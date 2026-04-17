@@ -1,0 +1,15 @@
+{
+  "name": "vm-auto-installer",
+  "version": "1.0.0",
+  "description": "One-click cross-platform VM setup automation using VirtualBox",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "author": "VM Auto Installer",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
