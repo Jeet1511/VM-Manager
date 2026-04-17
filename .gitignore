@@ -28,3 +28,13 @@ Thumbs.db
 dist/
 build/
 coverage/
+release/
+
+# Installer artifacts
+*.blockmap
+latest.yml
+*.exe
+
+# Electron temporary caches
+.electron-cache/
+.cache/

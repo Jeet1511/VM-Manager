@@ -1,15 +1,76 @@
 {
-  "name": "vm-auto-installer",
+  "name": "vm-xposed",
   "version": "1.0.0",
   "description": "One-click cross-platform VM setup automation using VirtualBox",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "prepare:icons": "node scripts/generate-icons.js",
+    "build:win": "npm run prepare:icons && electron-builder --win nsis --x64",
+    "build:portable": "npm run prepare:icons && electron-builder --win portable --x64",
+    "build:all": "npm run prepare:icons && electron-builder --win nsis portable --x64"
   },
-  "author": "VM Auto Installer",
+  "author": "Dev: Jeet",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-packager": "^17.1.2",
+    "png-to-ico": "^2.1.8",
+    "rcedit": "^4.0.1",
+    "sharp": "^0.34.5"
+  },
+  "build": {
+    "appId": "com.jeet.vmxposed",
+    "productName": "VM Xposed",
+    "afterPack": "scripts/after-pack-win.js",
+    "directories": {
+      "output": "dist"
+    },
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "adapters/**/*",
+      "core/**/*",
+      "renderer/**/*",
+      "services/**/*",
+      "vm/**/*",
+      "scripts/**/*",
+      "fix-dash.js",
+      "run-fix.js",
+      "make_dash.js",
+      "write-css.js",
+      "!release/**",
+      "!dist/**",
+      "!**/*.log",
+      "!**/.DS_Store",
+      "!**/Thumbs.db"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "icon": "logos/icon-app.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "installerIcon": "logos/icon-installer.ico",
+      "uninstallerIcon": "logos/icon-installer.ico",
+      "artifactName": "VM-Xposed-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "VM-Xposed-Portable-${version}.exe"
+    }
   }
 }

@@ -1,5 +1,5 @@
 /**
- * renderer/app.js — VM Manager Controller
+ * renderer/app.js — VM Xposed Controller
  *
  * Multi-view desktop controller with real routes:
  * Dashboard, Machines, Create VM, OS Library, Settings.
@@ -51,16 +51,159 @@ const STEPS = [
   WizardSteps.review
 ];
 
+let startupCatalogRefreshPromise = null;
+
+function _ensureMotionSystemMounted() {
+  const requiredLayers = [
+    'bg-gradient',
+    'bg-grid',
+    'bg-flow bg-flow--primary',
+    'bg-flow bg-flow--secondary',
+    'bg-scanline',
+    'bg-glow'
+  ];
+
+  let appBg = document.querySelector('.app-bg');
+  if (!appBg) {
+    appBg = document.createElement('div');
+    appBg.className = 'app-bg';
+    document.body.insertBefore(appBg, document.body.firstChild || null);
+  }
+
+  appBg.innerHTML = '';
+  requiredLayers.forEach((className) => {
+    const layer = document.createElement('div');
+    layer.className = className;
+    appBg.appendChild(layer);
+  });
+
+  let cursorLight = document.querySelector('.cursor-light');
+  if (!cursorLight) {
+    cursorLight = document.createElement('div');
+    cursorLight.className = 'cursor-light';
+    document.body.insertBefore(cursorLight, appBg.nextSibling);
+  }
+}
+
+function _validateMotionVisibility() {
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const layers = [
+    document.querySelector('.bg-gradient'),
+    document.querySelector('.bg-grid'),
+    document.querySelector('.bg-flow--primary'),
+    document.querySelector('.bg-flow--secondary'),
+    document.querySelector('.bg-glow')
+  ].filter(Boolean);
+
+  if (layers.length < 5) {
+    console.warn('Motion system is incomplete. Re-mounting background layers.');
+    _ensureMotionSystemMounted();
+  }
+
+  const hasAnimatedLayer = layers.some((layer) => {
+    const computed = window.getComputedStyle(layer);
+    return computed.animationName && computed.animationName !== 'none';
+  });
+
+  document.body.classList.remove('motion-prime', 'motion-debug');
+
+  if (reduceMotion) {
+    return;
+  }
+
+  document.body.classList.add('motion-prime');
+  window.setTimeout(() => {
+    document.body.classList.remove('motion-prime');
+  }, 1800);
+
+  if (!hasAnimatedLayer) {
+    console.warn('Motion animations not detected on computed styles.');
+  }
+}
+
+function _initBrandingAssets() {
+  const logoImage = document.querySelector('.sidebar-logo-image');
+  const logoFallback = document.querySelector('.sidebar-logo');
+  if (!logoImage || !logoFallback) return;
+
+  const candidateSources = [
+    '../logos/inside app logo.png',
+    '../logos/inside app logo.webp',
+    '../logos/inside app logo.jpg',
+    '../logos/inside app logo.jpeg',
+    '../logos/inside-app-logo.png',
+    '../logos/inside-app-logo.webp',
+    '../logos/inside-app-logo.jpg',
+    '../logos/inside-app-logo.jpeg',
+    'assets/vm-xposed-mark.png',
+    'assets/vm-xposed-mark.webp',
+    'assets/vm-xposed-mark.jpg',
+    'assets/vm-xposed-mark.jpeg',
+    'assets/vm-xposed-mark.svg',
+    'assets/vm-xposed-logo.png',
+    'assets/vm-xposed-logo.webp',
+    'assets/vm-xposed-logo.jpg',
+    'assets/vm-xposed-logo.jpeg',
+    'assets/vm-xposed-logo.svg',
+    'assets/logo.png',
+    'assets/logo.webp',
+    'assets/logo.jpg',
+    'assets/logo.jpeg',
+    'assets/icon.png',
+    'assets/icon.webp',
+    'assets/icon.jpg',
+    'assets/icon.jpeg'
+  ];
+
+  const showImage = () => {
+    logoImage.style.display = 'inline-flex';
+    logoFallback.style.display = 'none';
+  };
+
+  const showFallback = () => {
+    logoImage.style.display = 'none';
+    logoFallback.style.display = 'inline-flex';
+  };
+
+  const tryNextSource = (index = 0) => {
+    if (index >= candidateSources.length) {
+      showFallback();
+      return;
+    }
+    logoImage.src = candidateSources[index];
+  };
+
+  logoImage.addEventListener('load', () => {
+    showImage();
+  });
+
+  logoImage.addEventListener('error', () => {
+    const currentIndex = candidateSources.indexOf(logoImage.getAttribute('src') || '');
+    tryNextSource(currentIndex + 1);
+  });
+
+  if (logoImage.complete) {
+    if (logoImage.naturalWidth > 0) {
+      showImage();
+    } else {
+      showFallback();
+    }
+  }
+
+  tryNextSource(0);
+}
+
 function _setActiveNav(view) {
   const map = {
     dashboard: 'navDashboard',
     machines: 'navMachines',
     wizard: 'navCreate',
     library: 'navLibrary',
-    settings: 'navSettings'
+    settings: 'navSettings',
+    credits: 'navCredits'
   };
 
-  ['navDashboard', 'navMachines', 'navCreate', 'navLibrary', 'navSettings'].forEach((id) => {
+  ['navDashboard', 'navMachines', 'navCreate', 'navLibrary', 'navSettings', 'navCredits'].forEach((id) => {
     document.getElementById(id)?.classList.remove('active');
   });
 
@@ -68,6 +211,15 @@ function _setActiveNav(view) {
   if (activeId) {
     document.getElementById(activeId)?.classList.add('active');
   }
+}
+
+function _setPrimaryCta(view) {
+  const btn = document.getElementById('btnTopNewVM');
+  if (!btn) return;
+
+  const hideOn = view === 'wizard' || view === 'settings' || view === 'credits';
+  btn.style.display = hideOn ? 'none' : 'inline-flex';
+  btn.innerHTML = `${Icons.plus} New Machine`;
 }
 
 function _notify(message, type = 'info') {
@@ -104,6 +256,42 @@ function _saveCatalogRefreshMeta(meta) {
   localStorage.setItem('vmManager.catalogRefreshMeta', JSON.stringify(meta));
 }
 
+function _refreshCatalogInBackground() {
+  if (startupCatalogRefreshPromise) return startupCatalogRefreshPromise;
+
+  startupCatalogRefreshPromise = window.vmInstaller.refreshOfficialCatalog()
+    .then((refreshed) => {
+      if (!refreshed?.success) return refreshed;
+
+      appState.defaults.osCatalog = refreshed.osCatalog || appState.defaults.osCatalog;
+      appState.defaults.osCategories = refreshed.osCategories || appState.defaults.osCategories;
+      appState.catalogRefreshMeta = {
+        timestamp: Date.now(),
+        totalAdded: refreshed.totalAdded || 0,
+        summary: refreshed.summary || {}
+      };
+      _saveCatalogRefreshMeta(appState.catalogRefreshMeta);
+
+      if (!appState.osName || !appState.defaults.osCatalog?.[appState.osName]) {
+        appState.osName = Object.keys(appState.defaults.osCatalog || {})[0] || appState.osName;
+      }
+
+      if (appState.currentView === 'wizard') {
+        renderStep(appState.currentStep || 0);
+      } else if (appState.currentView === 'library') {
+        app.showLibrary();
+      }
+
+      return refreshed;
+    })
+    .catch((err) => {
+      console.warn('Background catalog refresh failed:', err);
+      return { success: false, error: err?.message || 'Catalog refresh failed' };
+    });
+
+  return startupCatalogRefreshPromise;
+}
+
 function _renderOverview() {
   return `
     <div class="dashboard">
@@ -129,7 +317,6 @@ function _renderOverview() {
         </div>
         <div class="vm-card-controls">
           <button class="btn btn-secondary" id="ovGoMachines">Open Machines</button>
-          <button class="btn btn-primary" id="ovGoCreate">Create VM</button>
           <button class="btn" id="ovGoLibrary">Open OS Library</button>
         </div>
       </div>
@@ -153,7 +340,6 @@ async function _initOverview() {
   }
 
   document.getElementById('ovGoMachines')?.addEventListener('click', () => app.showMachines());
-  document.getElementById('ovGoCreate')?.addEventListener('click', () => app.showWizard());
   document.getElementById('ovGoLibrary')?.addEventListener('click', () => app.showLibrary());
 }
 
@@ -347,6 +533,55 @@ function _renderSettings() {
   `;
 }
 
+function _renderCredits() {
+  return `
+    <div class="dashboard">
+      <div class="dashboard-header">
+        <div class="dashboard-title-group">
+          <h2 class="dashboard-title">Credits</h2>
+          <span class="dashboard-subtitle">About this project and how to support it</span>
+        </div>
+      </div>
+
+      <div class="vm-card" style="max-width: 760px;">
+        <div class="vm-card-header">
+          <div class="vm-card-title-group">
+            <div class="vm-card-name">Why I created this</div>
+            <div class="vm-card-os">A personal mission behind VM Xposed</div>
+          </div>
+        </div>
+
+        <div style="color: var(--text-secondary); font-size: 14px; line-height: 1.7;">
+          I created VM Xposed to make virtual machine setup simple, fast, and reliable for everyone.
+          The goal is to remove confusing manual steps and give users a clean workflow where VM creation,
+          OS selection, and management feel smooth from start to finish.
+        </div>
+
+        <div class="vm-card-controls" style="margin-top: 8px;">
+          <div class="vm-actions-secondary">
+            <button class="btn btn-primary btn-icon-text" id="btnSupportGithub">
+              ${Icons.externalLink} Support on GitHub @jeet1511
+            </button>
+            <button class="btn btn-secondary btn-icon-text" id="btnSupportInstagram">
+              ${Icons.externalLink} Follow on Instagram @_echo.del.alma_
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _initCredits() {
+  document.getElementById('btnSupportGithub')?.addEventListener('click', async () => {
+    await window.vmInstaller.openExternal('https://github.com/jeet1511');
+  });
+
+  document.getElementById('btnSupportInstagram')?.addEventListener('click', async () => {
+    await window.vmInstaller.openExternal('https://instagram.com/_echo.del.alma_');
+  });
+}
+
 function _initSettings() {
   document.getElementById('setInstallBrowse')?.addEventListener('click', async () => {
     const selected = await window.vmInstaller.selectFolder('Select default install path', appState.installPath || '');
@@ -358,7 +593,7 @@ function _initSettings() {
     if (selected) document.getElementById('setSharedPath').value = selected;
   });
 
-  document.getElementById('setSave')?.addEventListener('click', () => {
+  document.getElementById('setSave')?.addEventListener('click', async () => {
     const prefs = {
       installPath: document.getElementById('setInstallPath')?.value?.trim(),
       sharedFolderPath: document.getElementById('setSharedPath')?.value?.trim(),
@@ -372,6 +607,17 @@ function _initSettings() {
     appState.username = prefs.username;
     appState.password = prefs.password;
 
+    try {
+      const saved = await window.vmInstaller.saveUiPrefs(prefs);
+      if (!saved?.success) {
+        _notify(`Settings saved locally, but disk save failed: ${saved?.error || 'Unknown error'}`, 'error');
+        return;
+      }
+    } catch (err) {
+      _notify(`Settings saved locally, but disk save failed: ${err?.message || 'Unknown error'}`, 'error');
+      return;
+    }
+
     _notify('Default settings saved.', 'success');
   });
 }
@@ -380,10 +626,14 @@ function _initSettings() {
 
 const app = {
   showDashboard() {
+    if (typeof Dashboard !== 'undefined' && Dashboard.stopLiveSync) {
+      Dashboard.stopLiveSync();
+    }
     appState.currentView = 'dashboard';
     appState.isRunning = false;
 
     _setActiveNav('dashboard');
+    _setPrimaryCta('dashboard');
     const stepIndicator = document.getElementById('stepIndicator');
     if (stepIndicator) stepIndicator.style.display = 'none';
 
@@ -397,6 +647,7 @@ const app = {
     appState.isRunning = false;
 
     _setActiveNav('machines');
+    _setPrimaryCta('machines');
     const stepIndicator = document.getElementById('stepIndicator');
     if (stepIndicator) stepIndicator.style.display = 'none';
 
@@ -406,10 +657,14 @@ const app = {
   },
 
   showWizard() {
+    if (typeof Dashboard !== 'undefined' && Dashboard.stopLiveSync) {
+      Dashboard.stopLiveSync();
+    }
     appState.currentView = 'wizard';
     appState.currentStep = 0;
 
     _setActiveNav('wizard');
+    _setPrimaryCta('wizard');
     const stepIndicator = document.getElementById('stepIndicator');
     if (stepIndicator) stepIndicator.style.display = 'flex';
 
@@ -417,10 +672,14 @@ const app = {
   },
 
   showLibrary() {
+    if (typeof Dashboard !== 'undefined' && Dashboard.stopLiveSync) {
+      Dashboard.stopLiveSync();
+    }
     appState.currentView = 'library';
     appState.isRunning = false;
 
     _setActiveNav('library');
+    _setPrimaryCta('library');
     const stepIndicator = document.getElementById('stepIndicator');
     if (stepIndicator) stepIndicator.style.display = 'none';
 
@@ -430,16 +689,37 @@ const app = {
   },
 
   showSettings() {
+    if (typeof Dashboard !== 'undefined' && Dashboard.stopLiveSync) {
+      Dashboard.stopLiveSync();
+    }
     appState.currentView = 'settings';
     appState.isRunning = false;
 
     _setActiveNav('settings');
+    _setPrimaryCta('settings');
     const stepIndicator = document.getElementById('stepIndicator');
     if (stepIndicator) stepIndicator.style.display = 'none';
 
     const container = document.getElementById('wizardContainer');
     container.innerHTML = _renderSettings();
     _initSettings();
+  },
+
+  showCredits() {
+    if (typeof Dashboard !== 'undefined' && Dashboard.stopLiveSync) {
+      Dashboard.stopLiveSync();
+    }
+    appState.currentView = 'credits';
+    appState.isRunning = false;
+
+    _setActiveNav('credits');
+    _setPrimaryCta('credits');
+    const stepIndicator = document.getElementById('stepIndicator');
+    if (stepIndicator) stepIndicator.style.display = 'none';
+
+    const container = document.getElementById('wizardContainer');
+    container.innerHTML = _renderCredits();
+    _initCredits();
   },
 
   backToDashboard() {
@@ -691,6 +971,8 @@ function showError(error) {
 
 async function initApp() {
   try {
+    _initBrandingAssets();
+
     // Load defaults from main process
     appState.defaults = await window.vmInstaller.getDefaults();
     appState.installPath = appState.defaults.defaultInstallPath;
@@ -706,7 +988,17 @@ async function initApp() {
       appState.resumeInfo = null;
     }
 
-    const savedPrefs = _loadUiPrefs();
+    let savedPrefs = _loadUiPrefs();
+    try {
+      const diskPrefs = await window.vmInstaller.getUiPrefs();
+      if (diskPrefs?.success && diskPrefs.prefs && typeof diskPrefs.prefs === 'object') {
+        savedPrefs = { ...savedPrefs, ...diskPrefs.prefs };
+        _saveUiPrefs(savedPrefs);
+      }
+    } catch (err) {
+      console.warn('Disk UI prefs load failed:', err);
+    }
+
     const savedCatalogMeta = _loadCatalogRefreshMeta();
     appState.installPath = savedPrefs.installPath || appState.installPath;
     appState.sharedFolderPath = savedPrefs.sharedFolderPath || appState.sharedFolderPath;
@@ -735,12 +1027,19 @@ async function initApp() {
       if (!appState.isRunning) app.showSettings();
     });
 
+    document.getElementById('navCredits')?.addEventListener('click', () => {
+      if (!appState.isRunning) app.showCredits();
+    });
+
     document.getElementById('btnTopNewVM')?.addEventListener('click', () => {
       if (!appState.isRunning) app.showWizard();
     });
 
     // Start at dashboard
     app.showDashboard();
+
+    // Keep OS options fresh without blocking app startup.
+    _refreshCatalogInBackground();
   } catch (err) {
     console.error('Failed to initialize app:', err);
     document.getElementById('wizardContainer').innerHTML = `
@@ -753,4 +1052,104 @@ async function initApp() {
 }
 
 // Start the app when DOM is ready
-document.addEventListener('DOMContentLoaded', initApp);
+document.addEventListener('DOMContentLoaded', () => {
+  _ensureMotionSystemMounted();
+  _validateMotionVisibility();
+  initApp();
+});
+
+const pointerState = {
+  x: window.innerWidth * 0.5,
+  y: window.innerHeight * 0.5,
+  rafId: null,
+  cards: [],
+  canAnimate: true
+};
+
+function refreshPointerTargets() {
+  pointerState.cards = Array.from(document.querySelectorAll('.vm-card'));
+}
+
+function resolveMotionPreference() {
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const supportsHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  pointerState.canAnimate = !reduceMotion && supportsHover;
+}
+
+function applyPointerEffects() {
+  if (!pointerState.canAnimate) {
+    pointerState.rafId = null;
+    return;
+  }
+
+  const { innerWidth, innerHeight } = window;
+  const x = (pointerState.x / innerWidth - 0.5) * 2;
+  const y = (pointerState.y / innerHeight - 0.5) * 2;
+
+  pointerState.cards.forEach((card) => {
+    card.style.setProperty('--rx', `${y * -6}deg`);
+    card.style.setProperty('--ry', `${x * 6}deg`);
+    card.style.setProperty('--shadowX', `${x * 20}px`);
+    card.style.setProperty('--shadowY', `${y * 20}px`);
+  });
+
+  const light = document.querySelector('.cursor-light');
+  if (light) {
+    light.style.setProperty('--cursor-x', `${pointerState.x}px`);
+    light.style.setProperty('--cursor-y', `${pointerState.y}px`);
+  }
+
+  pointerState.rafId = null;
+}
+
+function resetPointerEffects() {
+  pointerState.cards.forEach((card) => {
+    card.style.removeProperty('--rx');
+    card.style.removeProperty('--ry');
+    card.style.removeProperty('--shadowX');
+    card.style.removeProperty('--shadowY');
+  });
+}
+
+resolveMotionPreference();
+refreshPointerTargets();
+
+const motionMedia = window.matchMedia('(prefers-reduced-motion: reduce)');
+motionMedia.addEventListener('change', () => {
+  resolveMotionPreference();
+  if (!pointerState.canAnimate) {
+    resetPointerEffects();
+  }
+});
+
+window.addEventListener('resize', resolveMotionPreference, { passive: true });
+
+const pointerTargetObserver = new MutationObserver(() => {
+  refreshPointerTargets();
+});
+
+pointerTargetObserver.observe(document.body, {
+  subtree: true,
+  childList: true
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!pointerState.canAnimate) {
+    return;
+  }
+
+  pointerState.x = e.clientX;
+  pointerState.y = e.clientY;
+
+  if (pointerState.rafId === null) {
+    pointerState.rafId = requestAnimationFrame(applyPointerEffects);
+  }
+}, { passive: true });
+
+document.addEventListener('mouseleave', () => {
+  if (!pointerState.canAnimate) {
+    return;
+  }
+
+  resetPointerEffects();
+});

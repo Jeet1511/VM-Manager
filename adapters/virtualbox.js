@@ -667,6 +667,86 @@ class VirtualBoxAdapter {
   }
 
   /**
+   * Configure host-side display integration preferences for a VM.
+   * Improves fullscreen behavior and dynamic resize readiness.
+   */
+  async configureDisplayIntegration(vmName) {
+    logger.info('VirtualBox', `Configuring display integration for "${vmName}"...`);
+
+    await this._run([
+      'modifyvm', vmName,
+      '--graphicscontroller', 'vmsvga',
+      '--vram', '128',
+      '--monitorcount', '1',
+      '--accelerate3d', 'on'
+    ]);
+
+    const vmExtra = [
+      ['GUI/Fullscreen', 'on'],
+      ['GUI/AutoresizeGuest', 'on'],
+      ['GUI/ScaleFactor', '1.0'],
+      ['GUI/Seamless', 'off']
+    ];
+
+    for (const [key, value] of vmExtra) {
+      try {
+        await this._run(['setextradata', vmName, key, value]);
+      } catch (err) {
+        logger.debug('VirtualBox', `setextradata ${key} warning: ${err.message}`);
+      }
+    }
+
+    try {
+      await this._run(['setextradata', 'global', 'GUI/MaxGuestResolution', 'any']);
+    } catch (err) {
+      logger.debug('VirtualBox', `global GUI/MaxGuestResolution warning: ${err.message}`);
+    }
+
+    logger.success('VirtualBox', 'Display integration preferences configured');
+  }
+
+  /**
+   * Apply runtime integration controls to a running VM.
+   */
+  async applyRuntimeIntegration(vmName, options = {}) {
+    const {
+      clipboardMode = 'bidirectional',
+      dragAndDrop = 'bidirectional',
+      width = 1920,
+      height = 1080,
+      bpp = 32,
+      display = 0
+    } = options;
+
+    logger.info('VirtualBox', `Applying runtime integration to "${vmName}"...`);
+
+    const warnings = [];
+
+    const safeRun = async (args, warningLabel) => {
+      try {
+        await this._run(args);
+      } catch (err) {
+        warnings.push(`${warningLabel}: ${err.message}`);
+      }
+    };
+
+    await safeRun(['controlvm', vmName, 'clipboard', clipboardMode], 'clipboard runtime apply');
+    await safeRun(['controlvm', vmName, 'draganddrop', dragAndDrop], 'drag-and-drop runtime apply');
+    await safeRun(['controlvm', vmName, 'setvideomodehint', String(width), String(height), String(bpp), String(display)], 'video mode hint apply');
+
+    if (warnings.length > 0) {
+      logger.warn('VirtualBox', `Runtime integration warnings: ${warnings.join(' | ')}`);
+    } else {
+      logger.success('VirtualBox', 'Runtime integration applied');
+    }
+
+    return {
+      success: warnings.length === 0,
+      warnings
+    };
+  }
+
+  /**
    * Detect the best bridge adapter for bridged networking.
    */
   async _detectBridgeAdapter() {

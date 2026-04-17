@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('vmInstaller', {
 
   // ─── Configuration ─────────────────────────────────────────────
   getDefaults: () => ipcRenderer.invoke('config:getDefaults'),
+  getUiPrefs: () => ipcRenderer.invoke('config:getUiPrefs'),
+  saveUiPrefs: (prefs) => ipcRenderer.invoke('config:saveUiPrefs', prefs),
   refreshOfficialCatalog: () => ipcRenderer.invoke('catalog:refreshOfficial'),
 
   // ─── System Check ──────────────────────────────────────────────

@@ -303,7 +303,7 @@ function getAppDataPath() {
   if (process.platform === 'win32') {
     return path.join(process.env.APPDATA || os.homedir(), 'VMAutoInstaller');
   }
-  return path.join(os.homedir(), '.vm-auto-installer');
+  return path.join(os.homedir(), '.vm-xposed');
 }
 
 function getDefaultSharedFolderPath() {

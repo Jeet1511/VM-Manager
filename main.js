@@ -8,7 +8,7 @@ process.on('uncaughtException', (err) => {
   console.error(err.stack);
 });
 
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execSync, exec } = require('child_process');
@@ -26,6 +26,31 @@ const { setupSharedFolder } = require('./vm/sharedFolder');
 
 let mainWindow = null;
 let runtimeOSCatalog = { ...OS_CATALOG };
+let isCatalogRefreshRunning = false;
+let catalogRefreshTimer = null;
+let isExitShutdownInProgress = false;
+
+function getUiPrefsFilePath() {
+  return path.join(app.getPath('userData'), 'ui-prefs.json');
+}
+
+function readUiPrefsFromDisk() {
+  try {
+    const prefsPath = getUiPrefsFilePath();
+    if (!fs.existsSync(prefsPath)) return {};
+    const raw = fs.readFileSync(prefsPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeUiPrefsToDisk(prefs) {
+  const prefsPath = getUiPrefsFilePath();
+  await fs.promises.mkdir(path.dirname(prefsPath), { recursive: true });
+  await fs.promises.writeFile(prefsPath, JSON.stringify(prefs, null, 2), 'utf8');
+}
 
 function getCategoriesFromCatalog(catalog) {
   const categories = {};
@@ -35,6 +60,181 @@ function getCategoriesFromCatalog(catalog) {
     categories[category].push(name);
   }
   return categories;
+}
+
+function resolveAppIconPath() {
+  const assetsDir = path.join(__dirname, 'renderer', 'assets');
+  const logosDir = path.join(__dirname, 'logos');
+  const candidates = [
+    path.join(logosDir, 'outside app logo.ico'),
+    path.join(logosDir, 'outside app logo.png'),
+    path.join(logosDir, 'outside app logo.webp'),
+    path.join(logosDir, 'outside app logo.jpg'),
+    path.join(logosDir, 'outside app logo.jpeg'),
+    path.join(logosDir, 'outside-app-logo.ico'),
+    path.join(logosDir, 'outside-app-logo.png'),
+    path.join(logosDir, 'outside-app-logo.webp'),
+    path.join(logosDir, 'outside-app-logo.jpg'),
+    path.join(logosDir, 'outside-app-logo.jpeg'),
+    path.join(assetsDir, 'vm-xposed-mark.ico'),
+    path.join(__dirname, 'renderer', 'assets', 'vm-xposed-mark.png'),
+    path.join(assetsDir, 'vm-xposed-mark.webp'),
+    path.join(assetsDir, 'vm-xposed-mark.jpg'),
+    path.join(assetsDir, 'vm-xposed-mark.jpeg'),
+    path.join(assetsDir, 'vm-xposed-logo.ico'),
+    path.join(__dirname, 'renderer', 'assets', 'vm-xposed-logo.png'),
+    path.join(assetsDir, 'vm-xposed-logo.webp'),
+    path.join(assetsDir, 'vm-xposed-logo.jpg'),
+    path.join(assetsDir, 'vm-xposed-logo.jpeg'),
+    path.join(assetsDir, 'icon.ico'),
+    path.join(assetsDir, 'icon.png'),
+    path.join(assetsDir, 'icon.webp'),
+    path.join(assetsDir, 'icon.jpg'),
+    path.join(assetsDir, 'icon.jpeg'),
+    path.join(assetsDir, 'logo.ico'),
+    path.join(assetsDir, 'logo.png'),
+    path.join(assetsDir, 'logo.webp'),
+    path.join(assetsDir, 'logo.jpg'),
+    path.join(assetsDir, 'logo.jpeg'),
+    path.join(__dirname, 'renderer', 'icon.png')
+  ];
+
+  for (const iconPath of candidates) {
+    if (fs.existsSync(iconPath)) {
+      return iconPath;
+    }
+  }
+
+  if (fs.existsSync(assetsDir)) {
+    const discovered = fs.readdirSync(assetsDir)
+      .filter((name) => /\.(ico|png|webp|jpg|jpeg)$/i.test(name))
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+
+    if (discovered.length > 0) {
+      return path.join(assetsDir, discovered[0]);
+    }
+  }
+
+  return undefined;
+}
+
+function createFallbackAppIcon() {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#0b1222"/>
+          <stop offset="100%" stop-color="#142a4a"/>
+        </linearGradient>
+        <linearGradient id="bolt" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#ffd84a"/>
+          <stop offset="100%" stop-color="#ffb300"/>
+        </linearGradient>
+      </defs>
+      <rect x="8" y="8" width="240" height="240" rx="48" fill="url(#bg)"/>
+      <rect x="52" y="66" width="120" height="34" rx="8" fill="#3b82f6"/>
+      <rect x="44" y="108" width="132" height="34" rx="8" fill="#1d4ed8"/>
+      <rect x="36" y="150" width="144" height="34" rx="8" fill="#0f3a7a"/>
+      <path d="M182 54 L144 124 H182 L136 202 L222 112 H186 L216 54 Z" fill="url(#bolt)"/>
+    </svg>
+  `;
+
+  const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+  return nativeImage.createFromDataURL(dataUrl);
+}
+
+function resolveAppIcon() {
+  const iconPath = resolveAppIconPath();
+  if (iconPath) {
+    const image = nativeImage.createFromPath(iconPath);
+    if (!image.isEmpty()) {
+      return image.resize({ width: 256, height: 256, quality: 'best' });
+    }
+    return iconPath;
+  }
+  return createFallbackAppIcon();
+}
+
+function parseVmNamesFromList(rawOutput) {
+  return String(rawOutput || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const m = line.match(/"(.+)"/);
+      return m ? m[1] : '';
+    })
+    .filter(Boolean);
+}
+
+async function refreshCatalogInBackground(reason = 'manual') {
+  if (isCatalogRefreshRunning) return;
+  isCatalogRefreshRunning = true;
+  try {
+    const refreshed = await refreshOfficialCatalog(runtimeOSCatalog, logger);
+    runtimeOSCatalog = refreshed.catalog;
+    logger.info('CatalogUpdater', `Background catalog refresh (${reason}) complete. Added ${refreshed.totalAdded || 0} entries.`);
+  } catch (err) {
+    logger.warn('CatalogUpdater', `Background catalog refresh (${reason}) failed: ${err.message}`);
+  } finally {
+    isCatalogRefreshRunning = false;
+  }
+}
+
+function scheduleCatalogRefresh() {
+  catalogRefreshTimer = setInterval(() => {
+    refreshCatalogInBackground('scheduled');
+  }, 4 * 60 * 60 * 1000);
+
+  if (typeof catalogRefreshTimer.unref === 'function') {
+    catalogRefreshTimer.unref();
+  }
+}
+
+async function shutdownRunningVMsOnExit() {
+  try {
+    await virtualbox.init();
+    const runningRaw = await virtualbox._run(['list', 'runningvms']);
+    const runningVms = parseVmNamesFromList(runningRaw);
+    if (runningVms.length === 0) return;
+
+    logger.info('App', `Stopping ${runningVms.length} running VM(s) before exit...`);
+
+    for (const vmName of runningVms) {
+      try {
+        await virtualbox._run(['controlvm', vmName, 'acpipowerbutton']);
+      } catch (err) {
+        logger.warn('App', `ACPI shutdown failed for ${vmName}: ${err.message}`);
+      }
+    }
+
+    const waitUntil = Date.now() + 15000;
+    let pending = new Set(runningVms);
+
+    while (pending.size > 0 && Date.now() < waitUntil) {
+      const nextPending = new Set();
+      for (const vmName of pending) {
+        const state = String(await virtualbox.getVMState(vmName)).toLowerCase();
+        if (state !== 'poweroff' && state !== 'aborted') {
+          nextPending.add(vmName);
+        }
+      }
+      pending = nextPending;
+      if (pending.size > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+    }
+
+    for (const vmName of pending) {
+      try {
+        await virtualbox._run(['controlvm', vmName, 'poweroff']);
+      } catch (err) {
+        logger.warn('App', `Forced poweroff failed for ${vmName}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.warn('App', `Failed to stop running VMs on exit: ${err.message}`);
+  }
 }
 
 // ─── Admin / Permissions Utilities ─────────────────────────────────────
@@ -163,9 +363,11 @@ function createWindow() {
     height: 780,
     minWidth: 900,
     minHeight: 650,
-    title: 'VM Auto Installer',
-    icon: path.join(__dirname, 'renderer', 'icon.png'),
-    backgroundColor: '#0f0f1a',
+    title: 'VM Xposed',
+    icon: resolveAppIcon(),
+    backgroundColor: '#00000000', // Transparent for glass effects
+    vibrancy: 'sidebar',          // macOS Vibrancy
+    visualEffectState: 'active',  // Force acrylic state
     show: false,  // Show after ready-to-show to prevent white flash
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -272,7 +474,7 @@ function buildAppMenu() {
             const result = await dialog.showMessageBox(mainWindow, {
               type: 'warning',
               title: 'Delete VMs',
-              message: 'This will list and optionally delete VM Auto Installer VMs. Continue?',
+              message: 'This will list and optionally delete VM Xposed VMs. Continue?',
               buttons: ['Cancel', 'Show VMs'],
               defaultId: 0,
               cancelId: 0
@@ -307,12 +509,12 @@ function buildAppMenu() {
         },
         { type: 'separator' },
         {
-          label: 'About VM Auto Installer',
+          label: 'About VM Xposed',
           click: () => {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: 'About VM Auto Installer',
-              message: 'VM Auto Installer v1.0.0',
+              title: 'About VM Xposed',
+              message: 'VM Xposed v1.0.0',
               detail: `One-click virtual machine setup with full automation.\n\nPlatform: ${process.platform} ${process.arch}\nElectron: ${process.versions.electron}\nNode: ${process.versions.node}\nAdmin: ${isAdmin ? 'Yes' : 'No'}`
             });
           }
@@ -340,6 +542,36 @@ function registerIPC() {
       defaultInstallPath: getDefaultInstallPath(),
       defaultSharedFolder: getDefaultSharedFolderPath()
     };
+  });
+
+  ipcMain.handle('config:getUiPrefs', async () => {
+    try {
+      return { success: true, prefs: readUiPrefsFromDisk() };
+    } catch (err) {
+      return { success: false, prefs: {}, error: err.message };
+    }
+  });
+
+  ipcMain.handle('config:saveUiPrefs', async (event, prefs = {}) => {
+    try {
+      const sanitize = (value, fallback = '') => {
+        if (value === undefined || value === null) return fallback;
+        return String(value).trim();
+      };
+
+      const merged = {
+        ...readUiPrefsFromDisk(),
+        installPath: sanitize(prefs.installPath),
+        sharedFolderPath: sanitize(prefs.sharedFolderPath),
+        username: sanitize(prefs.username, 'user') || 'user',
+        password: String(prefs.password ?? 'password')
+      };
+
+      await writeUiPrefsToDisk(merged);
+      return { success: true, prefs: merged };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
   });
 
   ipcMain.handle('catalog:refreshOfficial', async () => {
@@ -540,7 +772,11 @@ function registerIPC() {
             guestAdditionsRunLevel: parseInt(info.GuestAdditionsRunLevel || '0', 10) || 0,
             integrationChecks: {
               guestAdditions: !!info.GuestAdditionsVersion && (parseInt(info.GuestAdditionsRunLevel || '0', 10) >= 2),
-              fullscreenReady: ['vmsvga', 'vboxsvga'].includes(String(info.graphicscontroller || '').toLowerCase()) && !!info.GuestAdditionsVersion,
+              fullscreenReady:
+                ['vmsvga', 'vboxsvga'].includes(String(info.graphicscontroller || '').toLowerCase())
+                && !!info.GuestAdditionsVersion
+                && (parseInt(info.GuestAdditionsRunLevel || '0', 10) >= 2)
+                && ((parseInt(info.vram || '0', 10) || 0) >= 128),
               clipboard: String(info.clipboard || info['clipboard-mode'] || '').toLowerCase() === 'bidirectional',
               dragDrop: String(info.draganddrop || info['drag-and-drop'] || '').toLowerCase() === 'bidirectional',
               sharedFolder: sharedFolders.length > 0
@@ -626,11 +862,25 @@ function registerIPC() {
     try {
       const vmInfo = await virtualbox.getVMInfo(vmName);
       const vmState = (vmInfo?.VMState || '').toLowerCase();
-      if (vmState && vmState !== 'poweroff') {
+      const hardwareKeys = ['ram', 'cpus', 'vram', 'graphicsController', 'audioController', 'networkMode', 'bootOrder', 'audioEnabled', 'usbEnabled', 'accelerate3d', 'efiEnabled', 'nestedVirtualization', 'sharedFolders'];
+      const requestedHardwareEdit = hardwareKeys.some((key) => settings[key] !== undefined);
+
+      if (vmState && vmState !== 'poweroff' && requestedHardwareEdit) {
         return {
           success: false,
-          error: 'Power off the VM before editing hardware settings (RAM/CPU/graphics/network).'
+          error: 'Power off the VM before editing hardware settings (RAM/CPU/graphics/network/USB/shared folders).'
         };
+      }
+
+      if (vmState && vmState !== 'poweroff' && !requestedHardwareEdit) {
+        if (settings.clipboardMode) {
+          await virtualbox._run(['controlvm', vmName, 'clipboard', settings.clipboardMode]);
+        }
+        if (settings.dragAndDrop) {
+          await virtualbox._run(['controlvm', vmName, 'draganddrop', settings.dragAndDrop]);
+        }
+
+        return { success: true, runtimeApplied: true };
       }
 
       const args = ['modifyvm', vmName];
@@ -868,9 +1118,17 @@ function registerIPC() {
 
       if (vmState === 'running') {
         try {
-          await virtualbox._run(['controlvm', vmName, 'clipboard', 'bidirectional']);
-          await virtualbox._run(['controlvm', vmName, 'draganddrop', 'bidirectional']);
-          notes.push('Applied runtime clipboard/drag-drop for running VM.');
+          const runtime = await virtualbox.applyRuntimeIntegration(vmName, {
+            clipboardMode: 'bidirectional',
+            dragAndDrop: 'bidirectional',
+            width: 1920,
+            height: 1080,
+            bpp: 32,
+            display: 0
+          });
+          notes.push(runtime.warnings?.length
+            ? `Runtime integration applied with warnings: ${runtime.warnings.join(' | ')}`
+            : 'Applied runtime clipboard/drag-drop/display integration for running VM.');
         } catch (runtimeErr) {
           notes.push(`Runtime clipboard/drag-drop apply warning: ${runtimeErr.message}`);
         }
@@ -912,10 +1170,45 @@ function registerIPC() {
         sharedFolderName: sharedFolderName || 'shared'
       });
 
+      try {
+        const runtimeFinal = await virtualbox.applyRuntimeIntegration(vmName, {
+          clipboardMode: 'bidirectional',
+          dragAndDrop: 'bidirectional',
+          width: 1920,
+          height: 1080,
+          bpp: 32,
+          display: 0
+        });
+        if (runtimeFinal.warnings?.length) {
+          notes.push(`Final runtime integration warnings: ${runtimeFinal.warnings.join(' | ')}`);
+        }
+      } catch (runtimeErr) {
+        notes.push(`Final runtime integration warning: ${runtimeErr.message}`);
+      }
+
       if (!result?.guestAdditionsInstalled) {
         return {
           success: false,
           error: result?.error || 'In-guest integration failed.'
+        };
+      }
+
+      const postInfo = await virtualbox.getVMInfo(vmName);
+      const postChecks = {
+        guestAdditions: !!postInfo.GuestAdditionsVersion && ((parseInt(postInfo.GuestAdditionsRunLevel || '0', 10) || 0) >= 2),
+        graphicsController: ['vmsvga', 'vboxsvga'].includes(String(postInfo.graphicscontroller || '').toLowerCase()),
+        vram128: (parseInt(postInfo.vram || '0', 10) || 0) >= 128,
+        clipboardBidirectional: String(postInfo.clipboard || postInfo['clipboard-mode'] || '').toLowerCase() === 'bidirectional',
+        dragDropBidirectional: String(postInfo.draganddrop || postInfo['drag-and-drop'] || '').toLowerCase() === 'bidirectional'
+      };
+
+      if (!postChecks.guestAdditions || !postChecks.graphicsController || !postChecks.clipboardBidirectional || !postChecks.dragDropBidirectional) {
+        return {
+          success: false,
+          error: 'Guest integration verification failed. Retry Guest Setup after VM boot/login.',
+          notes,
+          checks: postChecks,
+          details: result
         };
       }
 
@@ -924,6 +1217,7 @@ function registerIPC() {
         message: 'Guest integration configured successfully.',
         sharedFolder: sharedFolderResult,
         notes,
+        checks: postChecks,
         details: result
       };
     } catch (err) {
@@ -1009,9 +1303,13 @@ if (!gotLock) {
 }
 
 app.whenReady().then(async () => {
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.jeet.vmxposed');
+  }
+
   // Initialize logger
   await logger.init();
-  logger.info('App', 'VM Auto Installer starting...');
+  logger.info('App', 'VM Xposed starting...');
   logger.info('App', `Platform: ${process.platform} ${process.arch}`);
   logger.info('App', `Electron: ${process.versions.electron}`);
   logger.info('App', `Node: ${process.versions.node}`);
@@ -1019,11 +1317,33 @@ app.whenReady().then(async () => {
 
   registerIPC();
   createWindow();
+  refreshCatalogInBackground('startup').catch((err) => {
+    logger.warn('CatalogUpdater', `Startup background refresh failed: ${err.message}`);
+  });
+  scheduleCatalogRefresh();
+});
+
+app.on('before-quit', (event) => {
+  if (isExitShutdownInProgress) return;
+  isExitShutdownInProgress = true;
+  event.preventDefault();
+
+  shutdownRunningVMsOnExit()
+    .finally(() => {
+      app.exit(0);
+    });
 });
 
 app.on('window-all-closed', () => {
   logger.info('App', 'Application closing');
   app.quit();
+});
+
+app.on('will-quit', () => {
+  if (catalogRefreshTimer) {
+    clearInterval(catalogRefreshTimer);
+    catalogRefreshTimer = null;
+  }
 });
 
 app.on('activate', () => {

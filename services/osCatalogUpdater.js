@@ -49,75 +49,122 @@ function sortVersionsDesc(versions) {
 }
 
 async function updateUbuntu(catalog) {
-  const page = await fetchText('https://releases.ubuntu.com/');
-  const regex = /ubuntu-(\d{2}\.\d{2}(?:\.\d+)?)-desktop-amd64\.iso/gi;
+  const regex = /ubuntu-(\d{2}\.\d{2}(?:\.\d+)?)-(?:desktop|live-server|server)-amd64\.iso/gi;
   const dirRegex = /href=["']?(\d{2}\.\d{2}(?:\.\d+)?)\/?["']?/gi;
   const versions = new Set();
-  let match;
 
-  while ((match = regex.exec(page)) !== null) {
-    versions.add(match[1]);
+  const addVersionsFromPage = (pageText) => {
+    let localMatch;
+    while ((localMatch = regex.exec(pageText)) !== null) {
+      versions.add(localMatch[1]);
+    }
+    while ((localMatch = dirRegex.exec(pageText)) !== null) {
+      versions.add(localMatch[1]);
+    }
+  };
+
+  try {
+    const releasesPage = await fetchText('https://releases.ubuntu.com/');
+    addVersionsFromPage(releasesPage);
+  } catch {
+    // Continue with old-releases fallback source.
   }
 
-  while ((match = dirRegex.exec(page)) !== null) {
-    versions.add(match[1]);
+  try {
+    const oldReleasesPage = await fetchText('https://old-releases.ubuntu.com/releases/');
+    addVersionsFromPage(oldReleasesPage);
+  } catch {
+    // old-releases can be temporarily unavailable.
   }
 
   if (versions.size === 0) {
-    const indexPage = await fetchText('https://old-releases.ubuntu.com/releases/');
-    while ((match = dirRegex.exec(indexPage)) !== null) {
-      versions.add(match[1]);
-    }
+    throw new Error('Could not discover Ubuntu versions from official sources.');
   }
 
   const sorted = sortVersionsDesc(Array.from(versions));
+  const aliasByBase = new Map();
   let added = 0;
   let found = 0;
 
   for (const version of sorted) {
     const key = `Ubuntu ${version}`;
-    const filename = `ubuntu-${version}-desktop-amd64.iso`;
-    const primaryUrl = `https://releases.ubuntu.com/${version}/${filename}`;
-    const oldUrl = `https://old-releases.ubuntu.com/releases/${version}/${filename}`;
+    const candidateFiles = [
+      `ubuntu-${version}-desktop-amd64.iso`,
+      `ubuntu-${version}-live-server-amd64.iso`,
+      `ubuntu-${version}-server-amd64.iso`
+    ];
+    const candidateBases = [
+      `https://releases.ubuntu.com/${version}/`,
+      `https://old-releases.ubuntu.com/releases/${version}/`
+    ];
 
-    let downloadUrl = primaryUrl;
-    try {
-      const dirPage = await fetchText(`https://releases.ubuntu.com/${version}/`);
-      if (!dirPage.includes(filename)) {
-        const oldPage = await fetchText(`https://old-releases.ubuntu.com/releases/${version}/`);
-        if (!oldPage.includes(filename)) continue;
-        downloadUrl = oldUrl;
-      }
-    } catch {
+    let selected = null;
+    for (const baseUrl of candidateBases) {
       try {
-        const oldPage = await fetchText(`https://old-releases.ubuntu.com/releases/${version}/`);
-        if (!oldPage.includes(filename)) continue;
-        downloadUrl = oldUrl;
+        const dirPage = await fetchText(baseUrl);
+        const matchedFile = candidateFiles.find((file) => dirPage.includes(file));
+        if (!matchedFile) continue;
+        selected = {
+          filename: matchedFile,
+          downloadUrl: `${baseUrl}${matchedFile}`,
+          sha256Url: `${baseUrl}SHA256SUMS`
+        };
+        break;
       } catch {
-        continue;
+        // Try next source.
+      }
+    }
+
+    if (!selected) continue;
+
+    const existing = catalog[key];
+    catalog[key] = {
+      ...(existing || {}),
+      category: 'Ubuntu',
+      osType: 'Ubuntu_64',
+      filename: selected.filename,
+      downloadUrl: selected.downloadUrl,
+      sha256Url: selected.sha256Url,
+      unattended: true,
+      defaultUser: 'user',
+      defaultPass: 'password',
+      ram: 4096,
+      cpus: 2,
+      disk: 25600,
+      vram: 128,
+      graphicsController: 'vmsvga',
+      notes: `Ubuntu ${version} from official Ubuntu archives`
+    };
+
+    if (!existing) {
+      added += 1;
+    }
+
+    const baseVersionMatch = version.match(/^(\d{2}\.\d{2})\.(\d+)$/);
+    if (baseVersionMatch) {
+      const baseVersion = baseVersionMatch[1];
+      const patch = parseInt(baseVersionMatch[2], 10);
+      const current = aliasByBase.get(baseVersion);
+      if (!current || patch > current.patch) {
+        aliasByBase.set(baseVersion, { patch, key });
       }
     }
 
     found += 1;
-    if (!catalog[key]) {
-      catalog[key] = {
-        category: 'Ubuntu',
-        osType: 'Ubuntu_64',
-        filename,
-        downloadUrl,
-        sha256Url: downloadUrl.includes('old-releases')
-          ? `https://old-releases.ubuntu.com/releases/${version}/SHA256SUMS`
-          : `https://releases.ubuntu.com/${version}/SHA256SUMS`,
-        unattended: true,
-        defaultUser: 'user',
-        defaultPass: 'password',
-        ram: 4096,
-        cpus: 2,
-        disk: 25600,
-        vram: 128,
-        graphicsController: 'vmsvga',
-        notes: `Ubuntu ${version} from releases.ubuntu.com`
-      };
+  }
+
+  for (const [baseVersion, alias] of aliasByBase.entries()) {
+    const aliasKey = `Ubuntu ${baseVersion}`;
+    const sourceEntry = catalog[alias.key];
+    if (!sourceEntry) continue;
+
+    const existingAlias = catalog[aliasKey];
+    catalog[aliasKey] = {
+      ...(existingAlias || {}),
+      ...(sourceEntry || {}),
+      notes: `Ubuntu ${baseVersion} (latest point release: ${alias.key.replace('Ubuntu ', '')})`
+    };
+    if (!existingAlias) {
       added += 1;
     }
   }

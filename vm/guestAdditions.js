@@ -70,12 +70,9 @@ async function configureGuestFeatures(vmName) {
   logger.info('GuestAdditions', `Configuring Guest Additions features for "${vmName}"...`);
 
   try {
-    // Set graphics controller to VMSVGA (best for Linux guests)
-    await virtualbox.configureVM(vmName, {
-      graphicsController: 'vmsvga',
-      vram: 128,
-    });
-    logger.success('GuestAdditions', 'Display: VMSVGA controller, 128MB VRAM');
+    // Set graphics and GUI integration preferences for fullscreen/dynamic resize
+    await virtualbox.configureDisplayIntegration(vmName);
+    logger.success('GuestAdditions', 'Display integration preferences applied');
 
     // Enable bidirectional clipboard
     await virtualbox.configureVM(vmName, {
@@ -329,11 +326,37 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     // ─── Step 7: Enable fullscreen / dynamic resolution ───────────
     _progress('Enabling fullscreen and dynamic resolution...', 90);
 
-    // Set display auto-resize
-    await virtualbox.guestShell(vmName, username, password,
-      'echo "' + password + '" | sudo -S bash -c \'VBoxClient --vmsvga 2>/dev/null &\'; ' +
-      'xrandr --output Virtual-1 --auto 2>/dev/null || true; echo done',
-      { timeout: 15000, ignoreErrors: true }
+    await runGuestStep(
+      vmName,
+      username,
+      password,
+      'pkill -f "VBoxClient --display" 2>/dev/null || true; ' +
+      'pkill -f "VBoxClient --clipboard" 2>/dev/null || true; ' +
+      'pkill -f "VBoxClient --draganddrop" 2>/dev/null || true; ' +
+      'nohup VBoxClient --display >/tmp/vbox-display.log 2>&1 & ' +
+      'nohup VBoxClient --clipboard >/tmp/vbox-clipboard.log 2>&1 & ' +
+      'nohup VBoxClient --draganddrop >/tmp/vbox-dnd.log 2>&1 & ' +
+      'sleep 2; ' +
+      'pgrep -f "VBoxClient --display" >/dev/null && echo display-ok',
+      {
+        timeout: 30000,
+        retries: 2,
+        description: 'Start VBoxClient display/clipboard/dragdrop services',
+        verify: async (out) => out.includes('display-ok')
+      }
+    );
+
+    await runGuestStep(
+      vmName,
+      username,
+      password,
+      'xrandr --output Virtual-1 --auto 2>/dev/null || xrandr --auto 2>/dev/null || true; echo done',
+      {
+        timeout: 20000,
+        retries: 1,
+        description: 'Apply dynamic display auto-resize',
+        verify: async (out) => out.includes('done')
+      }
     );
 
     // Remove screen lock / screensaver for better VM experience
@@ -349,6 +372,9 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     // ─── Verification ─────────────────────────────────────────────
     const verifyGroups = await virtualbox.guestShell(vmName, username, password, `id -nG ${username} || true`, { timeout: 15000, ignoreErrors: false });
     const verifyAutostart = await virtualbox.guestShell(vmName, username, password, `test -f /home/${username}/.config/autostart/vboxclient.desktop && echo ok || echo missing`, { timeout: 15000, ignoreErrors: false });
+    const verifyDisplayClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --display" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
+    const verifyClipboardClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --clipboard" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
+    const verifyDnDClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --draganddrop" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
     const verifyMount = configureSharedFolder
       ? await virtualbox.guestShell(vmName, username, password, `mount | grep -q "/media/sf_${sharedFolderName}" && echo mounted || echo not-mounted`, { timeout: 15000, ignoreErrors: false })
       : 'skipped';
@@ -356,11 +382,16 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     const checks = {
       userInVboxsf: verifyGroups.includes('vboxsf'),
       autostartFile: verifyAutostart.includes('ok'),
+      displayClient: verifyDisplayClient.includes('running'),
+      clipboardClient: verifyClipboardClient.includes('running'),
+      dragDropClient: verifyDnDClient.includes('running'),
       sharedMounted: configureSharedFolder ? verifyMount.includes('mounted') : true
     };
 
-    if (!checks.userInVboxsf || !checks.autostartFile) {
-      throw new Error(`Guest verification failed: userInVboxsf=${checks.userInVboxsf}, autostartFile=${checks.autostartFile}, sharedMounted=${checks.sharedMounted}`);
+    if (!checks.userInVboxsf || !checks.autostartFile || !checks.displayClient || !checks.clipboardClient || !checks.dragDropClient) {
+      throw new Error(
+        `Guest verification failed: userInVboxsf=${checks.userInVboxsf}, autostartFile=${checks.autostartFile}, displayClient=${checks.displayClient}, clipboardClient=${checks.clipboardClient}, dragDropClient=${checks.dragDropClient}, sharedMounted=${checks.sharedMounted}`
+      );
     }
 
     // ─── Done ─────────────────────────────────────────────────────
@@ -383,7 +414,8 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       dragDropEnabled: true,
       fullscreenEnabled: true,
       sharedFolderMounted: checks.sharedMounted,
-      autostartConfigured: true
+      autostartConfigured: true,
+      checks
     };
 
   } catch (err) {

@@ -13,6 +13,11 @@
 
 const Dashboard = {
 
+  _liveSyncTimer: null,
+  _liveSyncApp: null,
+  _visibilityHandler: null,
+  _focusHandler: null,
+
   render(state) {
     return `
       <div class="dashboard">
@@ -25,9 +30,6 @@ const Dashboard = {
             <button class="btn btn-ghost btn-icon-text" id="btnRefreshVMs">
               ${Icons.refresh} <span>Refresh</span>
             </button>
-            <button class="btn btn-primary btn-icon-text" id="btnNewVM">
-              ${Icons.plus} <span>New VM</span>
-            </button>
           </div>
         </div>
 
@@ -39,18 +41,66 @@ const Dashboard = {
             <span>Loading virtual machines...</span>
           </div>
         </div>
-
-        <div class="vm-modal-overlay" id="vmModalOverlay" style="display:none"></div>
-        <div class="vm-modal" id="vmSettingsModal" style="display:none"></div>
       </div>
     `;
   },
 
   async init(state, app) {
-    document.getElementById('btnNewVM')?.addEventListener('click', () => app.showWizard());
     document.getElementById('btnRefreshVMs')?.addEventListener('click', () => Dashboard.loadVMs(app));
+
+    if (!this._searchBound) {
+      this._searchBound = true;
+      document.querySelector('.search-input')?.addEventListener('input', () => {
+        if (document.getElementById('navMachines')?.classList.contains('active')) {
+          Dashboard.loadVMs(app);
+        }
+      });
+    }
+
     await Dashboard._checkPermissions();
     await Dashboard.loadVMs(app);
+  },
+
+  startLiveSync(app) {
+    this.stopLiveSync();
+    this._liveSyncApp = app;
+
+    this._liveSyncTimer = setInterval(() => {
+      if (document.getElementById('navMachines')?.classList.contains('active')) {
+        Dashboard.loadVMs(this._liveSyncApp, { silent: true });
+      }
+    }, 4000);
+
+    this._visibilityHandler = () => {
+      if (!document.hidden && document.getElementById('navMachines')?.classList.contains('active')) {
+        Dashboard.loadVMs(this._liveSyncApp, { silent: true });
+      }
+    };
+
+    this._focusHandler = () => {
+      if (document.getElementById('navMachines')?.classList.contains('active')) {
+        Dashboard.loadVMs(this._liveSyncApp, { silent: true });
+      }
+    };
+
+    document.addEventListener('visibilitychange', this._visibilityHandler);
+    window.addEventListener('focus', this._focusHandler);
+  },
+
+  stopLiveSync() {
+    if (this._liveSyncTimer) {
+      clearInterval(this._liveSyncTimer);
+      this._liveSyncTimer = null;
+    }
+    if (this._visibilityHandler) {
+      document.removeEventListener('visibilitychange', this._visibilityHandler);
+      this._visibilityHandler = null;
+    }
+    if (this._focusHandler) {
+      window.removeEventListener('focus', this._focusHandler);
+      this._focusHandler = null;
+    }
+    this._liveSyncApp = null;
   },
 
   async _checkPermissions() {
@@ -67,16 +117,20 @@ const Dashboard = {
       if (adminIssue) desc.push('Not running as administrator');
       if (driverIssue) desc.push('VBoxSup kernel driver is stopped');
 
+      const dismissed = localStorage.getItem('vmManager.dismissAdminWarning') === '1';
+      if (dismissed && adminIssue && !driverIssue) return;
+
       alertEl.innerHTML = `
         <div class="dash-alert dash-alert-warn">
           <div class="dash-alert-icon">${Icons.warning}</div>
           <div class="dash-alert-content">
-            <div class="dash-alert-title">Action Required</div>
+            <div class="dash-alert-title">Administrator Access Recommended</div>
             <div class="dash-alert-desc">${desc.join(' / ')}. Some VM operations may fail without elevated access.</div>
           </div>
           <div class="dash-alert-actions">
             ${driverIssue ? `<button class="btn btn-sm btn-primary btn-icon-text" id="btnFixDriver">${Icons.sized(Icons.settings, 14)} Fix Driver</button>` : ''}
             ${adminIssue ? `<button class="btn btn-sm btn-secondary btn-icon-text" id="btnElevateAdmin">${Icons.sized(Icons.shield, 14)} Run as Admin</button>` : ''}
+            <button class="btn btn-sm btn-ghost" id="btnDismissAdminWarn">Dismiss</button>
           </div>
         </div>
       `;
@@ -92,42 +146,58 @@ const Dashboard = {
         } else { btn.innerHTML = `${Icons.sized(Icons.xCircle, 14)} Failed`; }
       });
       document.getElementById('btnElevateAdmin')?.addEventListener('click', () => window.vmInstaller.restartAsAdmin());
+      document.getElementById('btnDismissAdminWarn')?.addEventListener('click', () => {
+        localStorage.setItem('vmManager.dismissAdminWarning', '1');
+        alertEl.style.display = 'none';
+      });
     } catch (err) { console.warn('Perm check failed:', err); }
   },
 
-  async loadVMs(app) {
+  async loadVMs(app, options = {}) {
     const grid = document.getElementById('vmGrid');
     const countEl = document.getElementById('vmCount');
     if (!grid) return;
 
-    grid.innerHTML = `<div class="vm-loading"><div class="spinner-ring"></div><span>Loading virtual machines...</span></div>`;
+    const silent = !!options.silent;
+
+    if (!silent) {
+      grid.innerHTML = `<div class="vm-loading"><div class="spinner-ring"></div><span>Loading virtual machines...</span></div>`;
+    }
 
     const result = await window.vmInstaller.listVMs();
 
     if (!result.success) {
-      grid.innerHTML = `<div class="vm-empty"><div class="vm-empty-icon">${Icons.sized(Icons.warning, 48)}</div><div class="vm-empty-title">Could not load VMs</div><div class="vm-empty-desc">${result.error || 'VirtualBox may not be installed'}</div></div>`;
-      countEl.textContent = 'Error';
+      if (!silent) {
+        grid.innerHTML = `<div class="vm-empty"><div class="vm-empty-icon">${Icons.sized(Icons.warning, 48)}</div><div class="vm-empty-title">Could not load VMs</div><div class="vm-empty-desc">${result.error || 'VirtualBox may not be installed'}</div></div>`;
+      }
+      if (countEl) countEl.textContent = 'Error';
       return;
     }
 
     const vms = result.vms;
-    countEl.textContent = `${vms.length} machine${vms.length !== 1 ? 's' : ''}`;
+    const searchValue = (document.querySelector('.search-input')?.value || '').trim().toLowerCase();
+    const filtered = searchValue
+      ? vms.filter((vm) => (`${vm.name} ${vm.os || ''}`).toLowerCase().includes(searchValue))
+      : vms;
 
-    if (vms.length === 0) {
-      grid.innerHTML = `<div class="vm-empty"><div class="vm-empty-icon">${Icons.sized(Icons.vm, 48)}</div><div class="vm-empty-title">No Virtual Machines</div><div class="vm-empty-desc">Create your first VM to get started</div><button class="btn btn-primary btn-icon-text" id="btnNewVMEmpty">${Icons.plus} Create New VM</button></div>`;
-      document.getElementById('btnNewVMEmpty')?.addEventListener('click', () => app.showWizard());
+    countEl.textContent = `${filtered.length} machine${filtered.length !== 1 ? 's' : ''}`;
+
+    if (filtered.length === 0) {
+      const emptyTitle = searchValue ? 'No matching machines' : 'No Virtual Machines';
+      const emptyDesc = searchValue ? 'Try a different search term.' : 'Create your first VM from the top-right New Machine button.';
+      grid.innerHTML = `<div class="vm-empty"><div class="vm-empty-icon">${Icons.sized(Icons.vm, 48)}</div><div class="vm-empty-title">${emptyTitle}</div><div class="vm-empty-desc">${emptyDesc}</div></div>`;
       return;
     }
 
-    grid.innerHTML = vms.map(vm => Dashboard._renderVMCard(vm)).join('');
-    Dashboard._wireCardEvents(vms, app);
+    grid.innerHTML = filtered.map(vm => Dashboard._renderVMCard(vm)).join('');
+    Dashboard._wireCardEvents(filtered, app);
   },
 
   _wireCardEvents(vms, app) {
     if (!this._outsideMenuClickBound) {
       this._outsideMenuClickBound = true;
       document.addEventListener('click', (event) => {
-        if (!event.target.closest('.vm-menu-wrap')) {
+        if (!event.target.closest('.vm-advanced-wrap')) {
           document.querySelectorAll('.vm-action-menu.open').forEach((menu) => menu.classList.remove('open'));
         }
       });
@@ -136,29 +206,38 @@ const Dashboard = {
     vms.forEach(vm => {
       const id = vm.uuid.substring(0, 8);
 
-      document.getElementById(`vm-start-${id}`)?.addEventListener('click', async function() {
-        this.disabled = true; this.innerHTML = `${Icons.sized(Icons.spinner, 14)} Starting...`;
-        await window.vmInstaller.startVM(vm.name);
-        setTimeout(() => Dashboard.loadVMs(app), 3000);
-      });
-
-      document.getElementById(`vm-stop-${id}`)?.addEventListener('click', async function() {
-        this.disabled = true; this.innerHTML = `${Icons.sized(Icons.spinner, 14)} Stopping...`;
-        await window.vmInstaller.stopVM(vm.name);
-        setTimeout(() => Dashboard.loadVMs(app), 3000);
-      });
-
-      document.getElementById(`vm-pause-${id}`)?.addEventListener('click', async function() {
+      document.getElementById(`vm-power-${id}`)?.addEventListener('click', async function() {
+        if (this.disabled) return;
         this.disabled = true;
-        if (vm.state === 'paused') {
-          await window.vmInstaller.resumeVM(vm.name);
-        } else {
-          await window.vmInstaller.pauseVM(vm.name);
+        this.classList.add('is-loading');
+
+        const powerLabel = this.querySelector('.vm-power-label');
+        if (powerLabel) powerLabel.textContent = 'Switching...';
+
+        const shouldStart = vm.state !== 'running' && vm.state !== 'paused';
+        const result = shouldStart
+          ? await window.vmInstaller.startVM(vm.name)
+          : await window.vmInstaller.stopVM(vm.name);
+
+        if (!result?.success) {
+          Dashboard._notify(result?.error || `Failed to ${shouldStart ? 'start' : 'stop'} VM`, 'error');
+          this.disabled = false;
+          this.classList.remove('is-loading');
+          if (powerLabel) powerLabel.textContent = shouldStart ? 'Stopped' : 'Running';
+          return;
         }
-        setTimeout(() => Dashboard.loadVMs(app), 2000);
+
+        this.disabled = false;
+        this.classList.remove('is-loading');
+        if (powerLabel) powerLabel.textContent = shouldStart ? 'Running' : 'Stopped';
+        Dashboard._notify(`${shouldStart ? 'Start' : 'Stop'} command sent. Click Refresh to update machine status.`, 'info');
       });
 
-      document.getElementById(`vm-edit-${id}`)?.addEventListener('click', async () => {
+      document.getElementById(`vm-edit-${id}`)?.addEventListener('click', () => {
+        Dashboard._openRenameModal(vm, app);
+      });
+
+      document.getElementById(`vm-settings-${id}`)?.addEventListener('click', async () => {
         const result = await window.vmInstaller.getVMDetails(vm.name);
         if (!result.success) {
           Dashboard._notify(result.error || 'Could not load VM settings', 'error');
@@ -171,15 +250,17 @@ const Dashboard = {
         Dashboard._openBootFixModal(vm, app);
       });
 
-      document.getElementById(`vm-users-${id}`)?.addEventListener('click', async () => {
+      document.getElementById(`vm-menu-users-${id}`)?.addEventListener('click', async () => {
+        document.getElementById(`vm-menu-${id}`)?.classList.remove('open');
         await Dashboard._openAccountsModal(vm);
       });
 
-      document.getElementById(`vm-integrate-${id}`)?.addEventListener('click', async () => {
+      document.getElementById(`vm-menu-integrate-${id}`)?.addEventListener('click', async () => {
+        document.getElementById(`vm-menu-${id}`)?.classList.remove('open');
         await Dashboard._openGuestIntegrationModal(vm, app);
       });
 
-      const menuBtn = document.getElementById(`vm-menu-btn-${id}`);
+      const menuBtn = document.getElementById(`vm-advanced-btn-${id}`);
       const menuEl = document.getElementById(`vm-menu-${id}`);
 
       menuBtn?.addEventListener('click', (event) => {
@@ -193,16 +274,6 @@ const Dashboard = {
       document.getElementById(`vm-menu-rename-${id}`)?.addEventListener('click', () => {
         menuEl?.classList.remove('open');
         Dashboard._openRenameModal(vm, app);
-      });
-
-      document.getElementById(`vm-menu-settings-${id}`)?.addEventListener('click', async () => {
-        menuEl?.classList.remove('open');
-        const result = await window.vmInstaller.getVMDetails(vm.name);
-        if (!result.success) {
-          Dashboard._notify(result.error || 'Could not load VM settings', 'error');
-          return;
-        }
-        Dashboard._openSettingsModal(result.vm, app);
       });
 
       document.getElementById(`vm-menu-clone-${id}`)?.addEventListener('click', () => {
@@ -226,23 +297,24 @@ const Dashboard = {
     const id = vm.uuid.substring(0, 8);
     const osLower = (vm.os || '').toLowerCase();
 
-    let osColor = '#e6edf3';
+    let osClass = 'os-generic';
     let dsOsIcon = Icons.monitor;
-    if (osLower.includes('ubuntu')) { osColor = '#E95420'; }
-    else if (osLower.includes('windows')) { osColor = '#0078D6'; }
-    else if (osLower.includes('debian')) { osColor = '#D70A53'; }
-    else if (osLower.includes('kali')) { osColor = '#557C94'; }
-    else if (osLower.includes('arch')) { osColor = '#1793D1'; }
-    else if (osLower.includes('mac') || osLower.includes('darwin')) { osColor = '#ffffff'; }
-    else if (osLower.includes('linux')) { osColor = '#f5c400'; }
+    if (osLower.includes('ubuntu')) { osClass = 'os-ubuntu'; }
+    else if (osLower.includes('windows')) { osClass = 'os-windows'; }
+    else if (osLower.includes('debian')) { osClass = 'os-debian'; }
+    else if (osLower.includes('kali')) { osClass = 'os-kali'; }
+    else if (osLower.includes('arch')) { osClass = 'os-arch'; }
+    else if (osLower.includes('mac') || osLower.includes('darwin')) { osClass = 'os-macos'; }
+    else if (osLower.includes('linux')) { osClass = 'os-linux'; }
 
     const isRunning = vm.state === 'running';
     const isPaused = vm.state === 'paused';
-    const isStopped = !isRunning && !isPaused;
 
     const stateLabel = isRunning ? 'Running' : isPaused ? 'Paused' : 'Powered Off';
     const stateClass = isRunning ? 'state-running' : isPaused ? 'state-paused' : 'state-stopped';
     const osLabel = (vm.os || 'Unknown').replace(/_/g, ' ');
+    const powerClass = isRunning ? 'running' : isPaused ? 'paused' : 'stopped';
+    const powerLabel = (isRunning || isPaused) ? 'Running' : 'Stopped';
 
     const featureBadges = [
       { label: 'Clipboard', on: (vm.clipboard || '').toLowerCase() !== 'disabled' },
@@ -264,28 +336,16 @@ const Dashboard = {
     ];
 
     return `
-      <div class="vm-card ${stateClass}" style="border-top: 3px solid ${osColor}">
+      <div class="vm-card ${stateClass} ${osClass}">
         <div class="vm-card-header">
-          <div class="vm-card-icon" style="color: ${osColor};">${Icons.sized(dsOsIcon, 32)}</div>
+          <div class="vm-card-icon">${Icons.sized(dsOsIcon, 38)}</div>
           <div class="vm-card-title-group">
             <div class="vm-card-name">${vm.name}</div>
             <div class="vm-card-os">${osLabel}</div>
           </div>
-          <div class="vm-card-state">
+          <div class="vm-card-state ${stateClass}">
             <span class="state-dot ${stateClass}"></span>
             <span class="state-text">${stateLabel}</span>
-          </div>
-          <div class="vm-menu-wrap">
-            <button class="btn btn-sm btn-ghost btn-icon vm-menu-btn" id="vm-menu-btn-${id}" title="More actions">
-              ${Icons.sized(Icons.moreVertical, 16)}
-            </button>
-            <div class="vm-action-menu" id="vm-menu-${id}">
-               <button class="vm-menu-item" id="vm-menu-rename-${id}">${Icons.sized(Icons.edit, 14)} Rename</button>
-               <button class="vm-menu-item" id="vm-menu-settings-${id}">${Icons.sized(Icons.settings, 14)} Settings</button>
-               <button class="vm-menu-item" id="vm-menu-clone-${id}">${Icons.sized(Icons.copy, 14)} Clone</button>
-               <button class="vm-menu-item" id="vm-menu-folder-${id}">${Icons.sized(Icons.folder, 14)} Open Folder</button>
-               <button class="vm-menu-item danger" id="vm-menu-delete-${id}">${Icons.sized(Icons.trash, 14)} Delete</button>
-            </div>
           </div>
         </div>
 
@@ -296,10 +356,8 @@ const Dashboard = {
           <div class="vm-spec" title="Network Mode">${Icons.sized(Icons.globe, 14)} <span><strong>NET</strong> ${vm.network}</span></div>
         </div>
 
-        <div class="vm-feature-badges">
-           ${
-featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${f.label}: ${f.on ? 'ON' : 'OFF'}</span>`).join('')
-}
+          <div class="vm-feature-badges">
+            ${featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${f.label} ${f.on ? 'ON' : 'OFF'}</span>`).join('')}
         </div>
 
         <div class="vm-integration-report">
@@ -315,39 +373,41 @@ featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${
         </div>
 
         <div class="vm-card-controls">
-          ${isStopped ? `
-            <button class="btn btn-sm btn-success btn-icon-text" id="vm-start-${id}" title="Start VM">
-              ${Icons.sized(Icons.play, 14)} Start
+          <div class="vm-actions-primary">
+            <button class="vm-power-toggle ${powerClass}" id="vm-power-${id}" title="Toggle power state">
+              <span class="vm-power-track">
+                <span class="vm-power-thumb"></span>
+              </span>
+              <span class="vm-power-label">${powerLabel}</span>
+              <span class="vm-power-spinner">${Icons.sized(Icons.spinner, 12)}</span>
             </button>
-          ` : ''}
-          ${isRunning ? `
-            <button class="btn btn-sm btn-warn btn-icon-text" id="vm-pause-${id}" title="Pause VM">
-              ${Icons.sized(Icons.pause, 14)} Pause
+          </div>
+
+          <div class="vm-actions-secondary">
+            <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-edit-${id}" title="Rename VM">
+              ${Icons.sized(Icons.edit, 14)} Edit
             </button>
-            <button class="btn btn-sm btn-danger btn-icon-text" id="vm-stop-${id}" title="Stop VM">
-              ${Icons.sized(Icons.power, 14)} Stop
+            <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-settings-${id}" title="Edit VM settings">
+              ${Icons.sized(Icons.settings, 14)} Settings
             </button>
-          ` : ''}
-          ${isPaused ? `
-            <button class="btn btn-sm btn-success btn-icon-text" id="vm-pause-${id}" title="Resume VM">
-              ${Icons.sized(Icons.play, 14)} Resume
+            <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-bootfix-${id}" title="Diagnose and fix boot issues">
+              ${Icons.sized(Icons.wrench, 14)} Boot Fix
             </button>
-            <button class="btn btn-sm btn-danger btn-icon-text" id="vm-stop-${id}" title="Force Stop">
-              ${Icons.sized(Icons.power, 14)} Stop
+          </div>
+
+          <div class="vm-actions-tertiary vm-advanced-wrap">
+            <button class="btn btn-sm btn-ghost btn-icon-text" id="vm-advanced-btn-${id}" title="Advanced actions">
+              ${Icons.sized(Icons.moreVertical, 14)} Advanced
             </button>
-          ` : ''}
-          <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-edit-${id}" title="Edit VM Settings">
-            ${Icons.sized(Icons.settings, 14)} Edit
-          </button>
-          <button class="btn btn-sm btn-ghost btn-icon-text" id="vm-bootfix-${id}" title="Diagnose and fix boot issues">
-            ${Icons.sized(Icons.wrench, 14)} Boot Fix
-          </button>
-          <button class="btn btn-sm btn-ghost btn-icon-text" id="vm-users-${id}" title="Manage guest users">
-            ${Icons.sized(Icons.user, 14)} Accounts
-          </button>
-          <button class="btn btn-sm btn-primary btn-icon-text" id="vm-integrate-${id}" title="Configure fullscreen, clipboard and shared folder inside guest">
-            ${Icons.sized(Icons.settings, 14)} Guest Setup
-          </button>
+            <div class="vm-action-menu" id="vm-menu-${id}">
+              <button class="vm-menu-item" id="vm-menu-users-${id}">${Icons.sized(Icons.user, 14)} Accounts</button>
+              <button class="vm-menu-item" id="vm-menu-integrate-${id}">${Icons.sized(Icons.settings, 14)} Guest Setup</button>
+              <button class="vm-menu-item" id="vm-menu-rename-${id}">${Icons.sized(Icons.edit, 14)} Rename</button>
+              <button class="vm-menu-item" id="vm-menu-clone-${id}">${Icons.sized(Icons.copy, 14)} Clone</button>
+              <button class="vm-menu-item" id="vm-menu-folder-${id}">${Icons.sized(Icons.folder, 14)} Open Folder</button>
+              <button class="vm-menu-item danger" id="vm-menu-delete-${id}">${Icons.sized(Icons.trash, 14)} Delete</button>
+            </div>
+          </div>
         </div>
       </div>
     `;
@@ -416,7 +476,17 @@ featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${
 
       const result = await window.vmInstaller.configureGuestIntegration(vm.name, payload);
       if (!result?.success) {
-        msg.textContent = result?.error || 'Guest setup failed.';
+        const extra = [];
+        if (result?.checks) {
+          const failed = Object.entries(result.checks).filter(([, ok]) => !ok).map(([k]) => k);
+          if (failed.length > 0) {
+            extra.push(`Failed checks: ${failed.join(', ')}`);
+          }
+        }
+        if (Array.isArray(result?.notes) && result.notes.length > 0) {
+          extra.push(result.notes.join(' | '));
+        }
+        msg.textContent = [result?.error || 'Guest setup failed.', ...extra].join(' ');
         msg.className = 'vm-inline-message error';
         runBtn.disabled = false;
         runBtn.textContent = 'Apply Guest Setup';
@@ -427,7 +497,7 @@ featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${
       msg.className = 'vm-inline-message success';
       this._notify('Guest setup completed successfully', 'success');
       close();
-      Dashboard.loadVMs(app);
+      this._notify('Click Refresh to reload machine status.', 'info');
     });
   },
 
@@ -469,7 +539,7 @@ featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${
       }
       this._notify('VM cloned successfully', 'success');
       close();
-      Dashboard.loadVMs(app);
+      this._notify('Click Refresh to see the cloned VM in the list.', 'info');
     });
   },
 
@@ -613,14 +683,15 @@ featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${
       }
 
       close();
-      Dashboard.loadVMs(app);
+      Dashboard._notify('Settings saved. Click Refresh to reload machine details.', 'info');
     });
   },
 
   _openRenameModal(vm, app) {
     const { close, modal } = this._openModal({
-      title: `Rename VM — ${vm.name}`,
+      title: 'Rename VM',
       body: `
+        <div class="vm-modal-note">Current name: <strong>${vm.name}</strong></div>
         <div class="form-group">
           <label class="form-label">New Name</label>
           <input class="form-input" id="renameVmInput" value="${vm.name}" maxlength="80" />
@@ -660,7 +731,7 @@ featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${
 
       this._notify('VM renamed successfully', 'success');
       close();
-      Dashboard.loadVMs(app);
+      this._notify('Click Refresh to see the updated VM name.', 'info');
     });
   },
 
@@ -689,7 +760,7 @@ featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${
 
       this._notify('VM deleted successfully', 'success');
       close();
-      Dashboard.loadVMs(app);
+      this._notify('Click Refresh to update the machine list.', 'info');
     });
   },
 
@@ -744,7 +815,7 @@ featureBadges.map(f => `<span class="vm-feature-badge ${f.on ? 'on' : 'off'}">${
       `;
       runBtn.remove();
       this._notify('Boot diagnostics complete', 'success');
-      Dashboard.loadVMs(app);
+      this._notify('Click Refresh to reload machine status.', 'info');
     });
   },
 

@@ -154,6 +154,9 @@ const WizardSteps = {
       const top3 = versions.slice(0, 3).map((v) => recommendation.scores[v.name]).filter(Boolean);
       const sourceUrl = selectedVersionInfo.downloadUrl || '';
       const sourceDomain = sourceUrl ? new URL(sourceUrl).hostname : '';
+      const lastSyncText = state.catalogRefreshMeta?.timestamp
+        ? new Date(state.catalogRefreshMeta.timestamp).toLocaleString()
+        : 'Not synced yet';
 
       return `
         <div class="glass-card" style="max-width: 800px; margin: 0 auto; color: #ccc;">
@@ -176,7 +179,11 @@ const WizardSteps = {
           </div>
 
           <div style="background: #1e1e1e; border: 1px solid #333; border-radius: 6px; padding: 16px; margin-bottom: 24px;">
-            <label style="display: block; margin-bottom: 8px; color: #fff;">Version</label>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px;">
+              <label style="display: block; color: #fff; margin:0;">Version</label>
+              <button class="btn btn-secondary" id="btnRefreshWizardCatalog" type="button" style="padding:4px 10px; font-size:12px;">Refresh Official Versions</button>
+            </div>
+            <div style="font-size:11px; color:#9da7b3; margin-bottom:8px;">Last sync: ${lastSyncText}</div>
             <select id="osVersionSelect" style="width:100%; padding:8px; background:#252526; border:1px solid #444; color:#ccc; border-radius:4px; margin-bottom:10px;">
               ${versionOptions}
             </select>
@@ -250,6 +257,46 @@ const WizardSteps = {
         if (!selected?.downloadUrl) return;
         if (window.vmInstaller?.openExternal) {
           await window.vmInstaller.openExternal(selected.downloadUrl);
+        }
+      });
+
+      document.getElementById('btnRefreshWizardCatalog')?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'Refreshing...';
+
+        try {
+          const refreshed = await window.vmInstaller.refreshOfficialCatalog();
+          if (!refreshed?.success) {
+            if (typeof Dashboard !== 'undefined' && Dashboard._notify) {
+              Dashboard._notify(`Catalog refresh failed: ${refreshed?.error || 'Unknown error'}`, 'error');
+            }
+            return;
+          }
+
+          state.defaults.osCatalog = refreshed.osCatalog || state.defaults.osCatalog;
+          state.defaults.osCategories = refreshed.osCategories || state.defaults.osCategories;
+          state.catalogRefreshMeta = {
+            timestamp: Date.now(),
+            totalAdded: refreshed.totalAdded || 0,
+            summary: refreshed.summary || {}
+          };
+
+          if (!state.osName || !state.defaults.osCatalog?.[state.osName]) {
+            const fallback = Object.keys(state.defaults.osCatalog || {})[0] || '';
+            if (fallback) state.osName = fallback;
+          }
+
+          if (typeof Dashboard !== 'undefined' && Dashboard._notify) {
+            Dashboard._notify(`Official catalog updated. Added ${refreshed.totalAdded || 0} versions.`, 'success');
+          }
+
+          if (typeof renderStep === 'function') {
+            renderStep(0);
+          }
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Refresh Official Versions';
         }
       });
 

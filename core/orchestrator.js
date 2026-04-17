@@ -119,14 +119,14 @@ class Orchestrator extends EventEmitter {
 
     if (this.resumeMode) {
       logger.info('Orchestrator', '══════════════════════════════════════════');
-      logger.info('Orchestrator', '  VM Auto Installer — RESUMING Setup');
+      logger.info('Orchestrator', '  VM Xposed — RESUMING Setup');
       logger.info('Orchestrator', `  Resuming from: ${resumeFrom}`);
       logger.info('Orchestrator', '══════════════════════════════════════════');
     } else {
       // Create fresh state
       stateManager.createNewState(config);
       logger.info('Orchestrator', '══════════════════════════════════════════');
-      logger.info('Orchestrator', '  VM Auto Installer — Starting Setup');
+      logger.info('Orchestrator', '  VM Xposed — Starting Setup');
       logger.info('Orchestrator', '══════════════════════════════════════════');
     }
 

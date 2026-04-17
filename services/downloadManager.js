@@ -116,7 +116,7 @@ function _downloadWithRedirects(url, destPath, partialPath, options) {
     }
 
     const requestHeaders = {
-      'User-Agent': 'VM-Auto-Installer/1.0'
+      'User-Agent': 'VM-Xposed/1.0'
     };
 
     if (startByte > 0) {
