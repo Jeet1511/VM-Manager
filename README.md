@@ -24,18 +24,22 @@ VM Xposed is a desktop automation tool that helps users set up and configure vir
 - `services/` — downloader, checksum, OS catalog, system checks
 - `vm/` — VM lifecycle helpers and post-install tooling
 - `adapters/` — virtualization platform adapters
+- `scripts/` — build helpers and utility scripts
 
 ## Download Installer (APK / Setup)
 
 ### Windows Setup Installer
 
-- Download from GitHub Releases asset: `VM-Xposed-Setup-<version>.exe`
-- Install by running the `.exe` on Windows
+[![Download Windows Installer](https://img.shields.io/badge/Download-Windows%20Installer-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/releases/latest/download/VM-Xposed-Setup.exe)
+
+- Tap the button above to auto-download the latest Windows installer.
 
 ### Android APK Installer
 
-- Download from GitHub Releases asset: `VM-Xposed-Android-v83.apk`
-- If APK is not attached in the release yet, use the latest Windows installer above
+[![Download Android APK](https://img.shields.io/badge/Download-Android%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Jeet1511/VM-Manager/releases/latest/download/VM-Xposed-Android.apk)
+
+- Tap the button above to auto-download the latest APK.
+- If APK is not attached in the latest release, use the Windows installer button.
 
 ## Local Development
 

@@ -39,10 +39,6 @@
       "services/**/*",
       "vm/**/*",
       "scripts/**/*",
-      "fix-dash.js",
-      "run-fix.js",
-      "make_dash.js",
-      "write-css.js",
       "!release/**",
       "!dist/**",
       "!**/*.log",
@@ -67,10 +63,10 @@
       "allowToChangeInstallationDirectory": false,
       "installerIcon": "logos/icon-installer.ico",
       "uninstallerIcon": "logos/icon-installer.ico",
-      "artifactName": "VM-Xposed-Setup-${version}.exe"
+      "artifactName": "VM-Xposed-Setup.exe"
     },
     "portable": {
-      "artifactName": "VM-Xposed-Portable-${version}.exe"
+      "artifactName": "VM-Xposed-Portable.exe"
     }
   }
 }
