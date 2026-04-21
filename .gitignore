@@ -34,6 +34,7 @@ release/
 *.blockmap
 latest.yml
 *.exe
+!Installer/*.exe
 
 # Electron temporary caches
 .electron-cache/
