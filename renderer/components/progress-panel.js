@@ -8,20 +8,39 @@
  */
 
 const ProgressPanel = {
+  _defaultPhaseCatalog: {
+    system_check: 'System Requirements Check',
+    download_vbox: 'Download VirtualBox',
+    install_vbox: 'Install VirtualBox',
+    download_iso: 'Download OS ISO',
+    verify_iso: 'Verify ISO Integrity',
+    create_vm: 'Create & Configure V Os',
+    install_os: 'Install Operating System',
+    wait_boot: 'Waiting for OS Boot',
+    guest_config: 'Configuring Guest Integration',
+    complete: 'Setup Complete'
+  },
+  _excludedOverallPhases: new Set(['pause', 'cancel', 'error']),
 
   /**
    * Render the progress dashboard.
    */
   render(config = {}) {
+    if (this._installPercentRaf) {
+      cancelAnimationFrame(this._installPercentRaf);
+      this._installPercentRaf = null;
+    }
+    this._installPercentValue = 0;
+    this._resetInstallTracking();
     return `
       <div class="progress-dashboard">
         <div class="installing-panel glass-card">
           <div class="installing-header">
-            <h3 class="installing-title">Installing Virtual Machine</h3>
+            <h3 class="installing-title">Installing V Os</h3>
             <span class="installing-percent" id="installPercent">0%</span>
           </div>
           <div class="installing-meta">
-            <div><span>VM</span><strong id="installVmName">${config.vmName || 'My VM'}</strong></div>
+            <div><span>V Os</span><strong id="installVmName">${config.vmName || 'My V Os'}</strong></div>
             <div><span>OS</span><strong id="installOs">${config.osName || config.ubuntuVersion || 'Selected OS'}</strong></div>
             <div><span>State</span><strong id="installState">Initializing</strong></div>
           </div>
@@ -29,6 +48,7 @@ const ProgressPanel = {
             <div class="installing-progress-fill" id="installProgressFill" style="width: 0%"></div>
           </div>
           <div class="installing-phase" id="installPhaseLabel">Preparing setup workflow...</div>
+          <div class="installing-subprogress" id="installSubProgress"></div>
         </div>
 
         <div class="glass-card" style="padding: var(--space-xl)">
@@ -42,6 +62,9 @@ const ProgressPanel = {
           <div id="cancelRow" class="btn-row" style="justify-content:center; border-top:none; padding-top:0">
             <button class="btn btn-ghost btn-icon-text" id="btnBackToDash" style="margin-right: var(--space-md)">
               ${Icons.arrowLeft} Dashboard
+            </button>
+            <button class="btn btn-warn btn-icon-text" id="btnPauseSetup">
+              ${Icons.pause} Pause Download
             </button>
             <button class="btn btn-danger btn-icon-text" id="btnCancelSetup">
               ${Icons.xCircle} Cancel Setup
@@ -68,19 +91,32 @@ const ProgressPanel = {
    * Render the completion screen.
    */
   renderComplete(result) {
+    const autoStarted = result?.autoStartVm === true;
+    const integrationReady = result?.guestConfigured === true;
+    const title = autoStarted ? 'V Os Setup Completed' : 'V Os Prepared Successfully';
+    const message = result?.message
+      || (autoStarted
+        ? 'Your V Os has been created and configured.'
+        : 'Auto-start is disabled to keep your PC responsive. Start the V Os manually when ready.');
+    const launchLabel = autoStarted ? 'Open V Os' : 'Start V Os';
+    const passIcon = `<div class="check-icon pass">${Icons.sized(Icons.check, 16)}</div>`;
+    const pendingIcon = `<div class="check-icon" style="color: var(--warn)">${Icons.sized(Icons.warning, 16)}</div>`;
+
     return `
       <div class="glass-card completion-card">
-        <div class="completion-icon completion-icon-ok">${Icons.sized(Icons.checkCircle, 40)}</div>
-        <h2 class="completion-title">Setup Complete!</h2>
-        <p class="completion-message">
-          Your virtual machine is fully set up and configured.<br>
-          Everything works out of the box — no manual steps needed.
-        </p>
+        <div class="completion-icon completion-icon-ok">
+          <svg class="onboard-success-check" viewBox="0 0 56 56" fill="none" aria-hidden="true">
+            <circle cx="28" cy="28" r="23"></circle>
+            <path class="onboard-success-check-path" d="M17 29.5L24.5 37L40 21"></path>
+          </svg>
+        </div>
+        <h2 class="completion-title">${title}</h2>
+        <p class="completion-message">${message}</p>
 
         <div class="credentials-box">
           <div class="credential-row">
-            <span class="credential-label">VM Name</span>
-            <span class="credential-value">${result.vmName || 'My VM'}</span>
+            <span class="credential-label">V Os Name</span>
+            <span class="credential-value">${result.vmName || 'My V Os'}</span>
           </div>
           <div class="credential-row">
             <span class="credential-label">Username</span>
@@ -100,52 +136,34 @@ const ProgressPanel = {
 
         <div class="check-list" style="margin-top: var(--space-xl); text-align:left">
           <div class="check-item">
-            <div class="check-icon pass">${Icons.sized(Icons.check, 16)}</div>
+            ${passIcon}
             <div class="check-details">
-              <div class="check-name">Guest Additions Installed</div>
-              <div class="check-value">Packages installed and guest integration enabled</div>
+              <div class="check-name">V Os Configuration</div>
+              <div class="check-value">Core hardware, storage, network, and integration preferences applied</div>
             </div>
           </div>
           <div class="check-item">
-            <div class="check-icon pass">${Icons.sized(Icons.check, 16)}</div>
+            ${autoStarted ? passIcon : pendingIcon}
             <div class="check-details">
-              <div class="check-name">Clipboard Sharing</div>
-              <div class="check-value">Bidirectional — copy/paste between host and VM</div>
+              <div class="check-name">OS Installation</div>
+              <div class="check-value">${autoStarted ? 'Installation was started automatically.' : 'Pending manual start to begin installation.'}</div>
             </div>
           </div>
           <div class="check-item">
-            <div class="check-icon pass">${Icons.sized(Icons.check, 16)}</div>
+            ${integrationReady ? passIcon : pendingIcon}
             <div class="check-details">
-              <div class="check-name">Drag & Drop</div>
-              <div class="check-value">Bidirectional — drag files between host and VM</div>
-            </div>
-          </div>
-          <div class="check-item">
-            <div class="check-icon pass">${Icons.sized(Icons.check, 16)}</div>
-            <div class="check-details">
-              <div class="check-name">Fullscreen & Dynamic Resolution</div>
-              <div class="check-value">VMSVGA + auto-resize enabled</div>
-            </div>
-          </div>
-          <div class="check-item">
-            <div class="check-icon pass">${Icons.sized(Icons.check, 16)}</div>
-            <div class="check-details">
-              <div class="check-name">Shared Folder</div>
-              <div class="check-value">Auto-mounted at /media/sf_shared — persists across reboots</div>
-            </div>
-          </div>
-          <div class="check-item">
-            <div class="check-icon pass">${Icons.sized(Icons.check, 16)}</div>
-            <div class="check-details">
-              <div class="check-name">Persistence</div>
-              <div class="check-value">All services auto-start on every boot — no manual setup ever</div>
+              <div class="check-name">Guest Integration</div>
+              <div class="check-value">${integrationReady ? 'Clipboard, drag & drop, display, and services are active.' : 'Can be finished from Guest Setup after first boot/login.'}</div>
             </div>
           </div>
         </div>
 
-        <div class="btn-row" style="justify-content: center; border-top: none">
-          <button class="btn btn-primary btn-icon-text" id="btnBackToDash">
-            ${Icons.arrowLeft} Back to Dashboard
+        <div class="btn-row" style="justify-content: center; border-top: none; gap: 12px;">
+          <button class="btn btn-primary btn-icon-text launch-vm-btn" id="btnLaunchVm">
+            ${Icons.play} ${launchLabel}
+          </button>
+          <button class="btn btn-secondary btn-icon-text" id="btnBackToDash">
+            ${Icons.arrowLeft} Dashboard
           </button>
         </div>
       </div>
@@ -189,24 +207,30 @@ const ProgressPanel = {
   },
 
   renderCancelled(message = 'Setup cancelled by user. Progress is saved and you can resume later.') {
+    const isPaused = /pause/i.test(String(message || ''));
+    const title = isPaused ? 'Setup Paused' : 'Setup Cancelled';
+    const actionLabel = isPaused ? 'Resume Setup' : 'Resume / Retry';
+    const guidance = isPaused
+      ? 'Your current state is preserved. Press resume to continue from the same setup phase.'
+      : 'Your current state is preserved. You can return to Create V Os and resume from the previous progress point.';
     return `
       <div class="glass-card completion-card">
         <div class="completion-icon" style="background: rgba(210,153,34,0.12); border-color: rgba(210,153,34,0.35); color: var(--warn)">
           ${Icons.sized(Icons.warning, 40)}
         </div>
-        <h2 class="completion-title" style="color: var(--warn)">Setup Cancelled</h2>
+        <h2 class="completion-title" style="color: var(--warn)">${title}</h2>
         <p class="completion-message">${message}</p>
 
         <div class="info-box" style="border-color: rgba(210,153,34,0.25); background: rgba(210,153,34,0.07)">
           <span class="info-box-icon">${Icons.info}</span>
           <span>
-            Your current state is preserved. You can return to Create VM and resume from the previous progress point.
+            ${guidance}
           </span>
         </div>
 
         <div class="btn-row" style="justify-content: center; border-top: none; gap: var(--space-md)">
           <button class="btn btn-primary btn-icon-text" id="btnRetry">
-            ${Icons.refresh} Resume / Retry
+            ${Icons.refresh} ${actionLabel}
           </button>
           <button class="btn btn-ghost btn-icon-text" id="btnBackToDash">
             ${Icons.arrowLeft} Dashboard
@@ -214,6 +238,181 @@ const ProgressPanel = {
         </div>
       </div>
     `;
+  },
+
+  initializePhases(phases = []) {
+    const phaseList = Array.isArray(phases) ? phases : [];
+    const phaseCatalog = { ...this._defaultPhaseCatalog };
+    const phaseOrder = [];
+
+    phaseList.forEach((phase) => {
+      const id = String(phase?.id || '').trim();
+      if (!id) return;
+      if (!phaseOrder.includes(id)) phaseOrder.push(id);
+      phaseCatalog[id] = phase?.label || phaseCatalog[id] || id;
+    });
+
+    if (!phaseOrder.includes('complete')) phaseOrder.push('complete');
+
+    this._phaseCatalog = phaseCatalog;
+    this._phaseOrder = phaseOrder.length > 0 ? phaseOrder : Object.keys(this._defaultPhaseCatalog);
+    this._phaseProgress = {};
+    this._phaseOrder.forEach((id) => {
+      this._phaseProgress[id] = {
+        label: this._phaseCatalog[id] || id,
+        status: 'pending',
+        percent: 0,
+        message: ''
+      };
+    });
+    this._renderInstallSubProgress();
+    this._refreshInstallHeader({ message: this._currentInstallMessage || 'Preparing setup workflow...' });
+  },
+
+  _resetInstallTracking() {
+    this._phaseCatalog = { ...this._defaultPhaseCatalog };
+    this._phaseOrder = Object.keys(this._defaultPhaseCatalog);
+    this._phaseProgress = {};
+    this._phaseOrder.forEach((id) => {
+      this._phaseProgress[id] = {
+        label: this._phaseCatalog[id] || id,
+        status: 'pending',
+        percent: 0,
+        message: ''
+      };
+    });
+    this._currentInstallMessage = 'Preparing setup workflow...';
+    this._manualOverallPercent = 0;
+  },
+
+  _normalizePercent(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.max(0, Math.min(100, Math.round(parsed)));
+  },
+
+  _ensurePhaseRecord(phaseId, label = '') {
+    const id = String(phaseId || '').trim();
+    if (!id) return null;
+
+    if (!this._phaseCatalog[id]) {
+      this._phaseCatalog[id] = label || id;
+    } else if (label) {
+      this._phaseCatalog[id] = label;
+    }
+
+    if (!Array.isArray(this._phaseOrder)) {
+      this._phaseOrder = [];
+    }
+    if (!this._phaseOrder.includes(id)) {
+      this._phaseOrder.push(id);
+    }
+
+    if (!this._phaseProgress) {
+      this._phaseProgress = {};
+    }
+    if (!this._phaseProgress[id]) {
+      this._phaseProgress[id] = {
+        label: this._phaseCatalog[id] || id,
+        status: 'pending',
+        percent: 0,
+        message: ''
+      };
+    }
+
+    const record = this._phaseProgress[id];
+    record.label = label || this._phaseCatalog[id] || id;
+    return record;
+  },
+
+  _resolvePhasePercent(record) {
+    if (!record) return 0;
+    if (record.status === 'complete' || record.status === 'skipped') return 100;
+    return this._normalizePercent(record.percent);
+  },
+
+  _renderInstallSubProgress() {
+    const container = document.getElementById('installSubProgress');
+    if (!container) return;
+
+    const phaseOrder = Array.isArray(this._phaseOrder) ? this._phaseOrder : [];
+    const rows = phaseOrder
+      .filter((id) => !this._excludedOverallPhases.has(id))
+      .map((id) => {
+        const record = this._phaseProgress?.[id] || this._ensurePhaseRecord(id, this._phaseCatalog?.[id] || id);
+        const status = String(record?.status || 'pending').toLowerCase();
+        const percent = this._resolvePhasePercent(record);
+        const statusLabel = status === 'complete'
+          ? 'Complete'
+          : status === 'skipped'
+            ? 'Skipped'
+            : status === 'error'
+              ? 'Error'
+              : status === 'active'
+                ? 'Active'
+                : 'Pending';
+
+        return `
+          <div class="install-sub-row is-${status}">
+            <span class="install-sub-name">${record?.label || id}</span>
+            <span class="install-sub-percent">${percent}%</span>
+            <span class="install-sub-status">${statusLabel}</span>
+          </div>
+        `;
+      });
+
+    container.innerHTML = rows.join('');
+  },
+
+  _refreshInstallHeader(options = {}) {
+    const phaseOrder = Array.isArray(this._phaseOrder) ? this._phaseOrder : [];
+    let total = 0;
+    let count = 0;
+    let hasActive = false;
+    let hasError = false;
+
+    phaseOrder.forEach((id) => {
+      if (this._excludedOverallPhases.has(id)) return;
+      const record = this._phaseProgress?.[id];
+      if (!record) return;
+      total += this._resolvePhasePercent(record);
+      count += 1;
+      if (record.status === 'active') hasActive = true;
+      if (record.status === 'error') hasError = true;
+    });
+
+    const computedPercent = count > 0 ? Math.round(total / count) : this._normalizePercent(options.fallbackPercent);
+    const fallbackPercent = this._normalizePercent(options.fallbackPercent);
+    const manualOverall = this._normalizePercent(this._manualOverallPercent);
+    const overallPercent = Math.max(computedPercent, fallbackPercent, manualOverall);
+
+    const percentEl = document.getElementById('installPercent');
+    const fillEl = document.getElementById('installProgressFill');
+    const phaseLabel = document.getElementById('installPhaseLabel');
+    const state = document.getElementById('installState');
+
+    if (percentEl) {
+      percentEl.textContent = `${overallPercent}%`;
+      percentEl.dataset.value = String(overallPercent);
+      this._installPercentValue = overallPercent;
+    }
+    if (fillEl) fillEl.style.width = `${overallPercent}%`;
+
+    if (options.message) {
+      this._currentInstallMessage = options.message;
+    }
+    if (phaseLabel) {
+      phaseLabel.textContent = this._currentInstallMessage || 'Preparing setup workflow...';
+    }
+
+    if (state) {
+      if (hasError) state.textContent = 'Error';
+      else if (overallPercent >= 100) state.textContent = 'Finalizing';
+      else if (hasActive) state.textContent = 'Installing';
+      else state.textContent = 'Preparing';
+    }
+
+    this._renderInstallSubProgress();
   },
 
   // ─── Phase Update Methods ───────────────────────────────────────
@@ -225,6 +424,16 @@ const ProgressPanel = {
   updatePhase(data) {
     if (!data || !data.id) return;
     const phaseId = data.id;
+    const status = data.status || 'active';
+    const phaseRecord = this._ensurePhaseRecord(phaseId, data.label || phaseId);
+    if (!phaseRecord) return;
+    phaseRecord.status = status;
+    if (status === 'complete' || status === 'skipped') {
+      phaseRecord.percent = 100;
+    }
+    if (data.message) {
+      phaseRecord.message = data.message;
+    }
 
     // Create phase element if it doesn't exist
     let phaseEl = document.getElementById(`phase-${phaseId}`);
@@ -256,7 +465,6 @@ const ProgressPanel = {
     // Remove old status
     phaseEl.classList.remove('active', 'complete', 'error', 'skipped');
 
-    const status = data.status || 'active';
     phaseEl.classList.add(status);
 
     if (data.message && msgEl) {
@@ -282,6 +490,11 @@ const ProgressPanel = {
         if (statusEl) statusEl.innerHTML = `<span style="color:var(--skip)">${Icons.sized(Icons.arrowRight, 14)}</span>`;
         break;
     }
+
+    const composedMessage = data.message
+      ? `${phaseRecord.label} · ${data.message}`
+      : `${phaseRecord.label}`;
+    this._refreshInstallHeader({ message: composedMessage });
   },
 
   /**
@@ -291,17 +504,28 @@ const ProgressPanel = {
   updateProgress(data) {
     if (!data || !data.id) return;
     const phaseId = data.id;
+    const record = this._ensurePhaseRecord(phaseId, data.label || phaseId);
+    if (!record) return;
 
     const msgEl = document.getElementById(`phase-msg-${phaseId}`);
     const barEl = document.getElementById(`phase-bar-${phaseId}`);
     const fillEl = document.getElementById(`phase-fill-${phaseId}`);
     const statsEl = document.getElementById(`phase-stats-${phaseId}`);
 
-    if (data.message && msgEl) msgEl.textContent = data.message;
+    if (data.message) {
+      record.message = data.message;
+      this._currentInstallMessage = data.message;
+      if (msgEl) msgEl.textContent = data.message;
+    }
 
     if (data.percent !== null && data.percent !== undefined && barEl && fillEl) {
+      const percent = this._normalizePercent(data.percent);
+      record.percent = percent;
+      if (!['complete', 'error', 'skipped'].includes(String(record.status || '').toLowerCase())) {
+        record.status = 'active';
+      }
       barEl.style.display = 'block';
-      fillEl.style.width = `${data.percent}%`;
+      fillEl.style.width = `${percent}%`;
     }
 
     if (data.downloadProgress && statsEl) {
@@ -313,6 +537,11 @@ const ProgressPanel = {
         <span>ETA: ${dp.etaFormatted || ''}</span>
       `;
     }
+
+    this._refreshInstallHeader({
+      message: this._currentInstallMessage,
+      fallbackPercent: data.percent
+    });
   },
 
   /**
@@ -342,34 +571,51 @@ const ProgressPanel = {
   ,
 
   updateInstallPhase(data) {
-    const phaseLabel = document.getElementById('installPhaseLabel');
-    const state = document.getElementById('installState');
-    if (!phaseLabel || !state) return;
-
     const status = data?.status || 'active';
     const label = data?.label || data?.id || 'Working';
-    phaseLabel.textContent = `${label}${data?.message ? ` · ${data.message}` : ''}`;
+    const phaseId = data?.id || '';
+    if (phaseId) {
+      const record = this._ensurePhaseRecord(phaseId, label);
+      if (record) {
+        record.status = status;
+        if (status === 'complete' || status === 'skipped') {
+          record.percent = 100;
+        }
+        if (data?.message) {
+          record.message = data.message;
+        }
+      }
+    }
 
-    if (status === 'complete') state.textContent = 'Completing';
-    else if (status === 'error') state.textContent = 'Error';
-    else if (status === 'skipped') state.textContent = 'Skipped';
-    else state.textContent = 'Installing';
+    const composedMessage = `${label}${data?.message ? ` · ${data.message}` : ''}`;
+    this._refreshInstallHeader({ message: composedMessage });
   },
 
   updateInstallProgress(data) {
     if (!data) return;
-    const percent = Math.max(0, Math.min(100, Number(data.percent || 0)));
-    const percentEl = document.getElementById('installPercent');
-    const fillEl = document.getElementById('installProgressFill');
-    const phaseLabel = document.getElementById('installPhaseLabel');
-
-    if (percentEl) percentEl.textContent = `${percent}%`;
-    if (fillEl) fillEl.style.width = `${percent}%`;
-    if (phaseLabel && data.message) phaseLabel.textContent = data.message;
-
-    const state = document.getElementById('installState');
-    if (state) {
-      state.textContent = percent >= 100 ? 'Finalizing' : 'Installing';
+    const phaseId = String(data.id || data.phase || '').trim();
+    if (phaseId) {
+      const phaseLabel = data.label || data.phaseLabel || phaseId;
+      const record = this._ensurePhaseRecord(phaseId, phaseLabel);
+      if (record) {
+        if (data.percent !== null && data.percent !== undefined) {
+          record.percent = this._normalizePercent(data.percent);
+        }
+        if (!['complete', 'error', 'skipped'].includes(String(record.status || '').toLowerCase())) {
+          record.status = 'active';
+        }
+        if (data.message) {
+          record.message = data.message;
+        }
+      }
+      this._manualOverallPercent = 0;
+    } else if (data.percent !== null && data.percent !== undefined) {
+      this._manualOverallPercent = this._normalizePercent(data.percent);
     }
+
+    this._refreshInstallHeader({
+      message: data.message || this._currentInstallMessage || 'Preparing setup workflow...',
+      fallbackPercent: data.percent
+    });
   }
 };

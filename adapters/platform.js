@@ -203,7 +203,7 @@ class PlatformAdapter {
     if (this.platform === 'win32') {
       return {
         cmd: installerPath,
-        args: ['--silent', '--msiparams', 'VBOX_START=0'],
+        args: ['--silent', '--msiparams', 'VBOX_START=0 REBOOT=ReallySuppress'],
         elevated: true
       };
     } else {

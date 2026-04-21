@@ -1,12 +1,18 @@
 const https = require('https');
 const { URL } = require('url');
 
-function fetchText(url) {
+const FETCH_TIMEOUT_MS = 12000;
+
+function fetchText(url, timeoutMs = FETCH_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    const req = https.get(url, {
+      headers: {
+        'User-Agent': 'VM-Xposed/1.0 (+https://github.com/jeet1511)'
+      }
+    }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         const redirected = new URL(res.headers.location, url).toString();
-        return resolve(fetchText(redirected));
+        return resolve(fetchText(redirected, timeoutMs));
       }
 
       if (res.statusCode !== 200) {
@@ -17,7 +23,13 @@ function fetchText(url) {
       res.setEncoding('utf8');
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => resolve(data));
-    }).on('error', reject);
+    });
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timeout after ${timeoutMs}ms for ${url}`));
+    });
+
+    req.on('error', reject);
   });
 }
 
@@ -187,23 +199,25 @@ async function updateKali(catalog) {
 
   for (const version of sorted) {
     const key = `Kali Linux ${version}`;
-    if (!catalog[key]) {
-      catalog[key] = {
-        category: 'Kali Linux',
-        osType: 'Debian_64',
-        filename: `kali-linux-${version}-installer-amd64.iso`,
-        downloadUrl: `https://cdimage.kali.org/kali-${version}/kali-linux-${version}-installer-amd64.iso`,
-        sha256Url: null,
-        unattended: false,
-        defaultUser: 'kali',
-        defaultPass: 'kali',
-        ram: 4096,
-        cpus: 2,
-        disk: 25600,
-        vram: 128,
-        graphicsController: 'vmsvga',
-        notes: `Kali Linux ${version} from cdimage.kali.org`
-      };
+    const existing = catalog[key];
+    catalog[key] = {
+      ...(existing || {}),
+      category: 'Kali Linux',
+      osType: 'Debian_64',
+      filename: `kali-linux-${version}-installer-amd64.iso`,
+      downloadUrl: `https://cdimage.kali.org/kali-${version}/kali-linux-${version}-installer-amd64.iso`,
+      sha256Url: null,
+      unattended: false,
+      defaultUser: 'kali',
+      defaultPass: 'kali',
+      ram: 4096,
+      cpus: 2,
+      disk: 25600,
+      vram: 128,
+      graphicsController: 'vmsvga',
+      notes: `Kali Linux ${version} from cdimage.kali.org`
+    };
+    if (!existing) {
       added += 1;
     }
   }
@@ -272,23 +286,25 @@ async function updateDebian(catalog) {
 
     const major = version.split('.')[0];
     const key = `Debian ${major} (${version})`;
-    if (!catalog[key]) {
-      catalog[key] = {
-        category: 'Debian',
-        osType: 'Debian_64',
-        filename: isoName,
-        downloadUrl: isoUrl,
-        sha256Url: null,
-        unattended: true,
-        defaultUser: 'user',
-        defaultPass: 'password',
-        ram: 2048,
-        cpus: 2,
-        disk: 20480,
-        vram: 16,
-        graphicsController: 'vmsvga',
-        notes: `Debian ${version} netinst from cdimage.debian.org`
-      };
+    const existing = catalog[key];
+    catalog[key] = {
+      ...(existing || {}),
+      category: 'Debian',
+      osType: 'Debian_64',
+      filename: isoName,
+      downloadUrl: isoUrl,
+      sha256Url: null,
+      unattended: true,
+      defaultUser: 'user',
+      defaultPass: 'password',
+      ram: 2048,
+      cpus: 2,
+      disk: 20480,
+      vram: 16,
+      graphicsController: 'vmsvga',
+      notes: `Debian ${version} netinst from cdimage.debian.org`
+    };
+    if (!existing) {
       added += 1;
     }
   }
@@ -356,23 +372,25 @@ async function updateFedora(catalog) {
     const key = `Fedora ${version} ${variant}`;
 
     found += 1;
-    if (!catalog[key]) {
-      catalog[key] = {
-        category: 'Fedora',
-        osType: 'Fedora_64',
-        filename: fileName,
-        downloadUrl: item.link,
-        sha256Url: null,
-        unattended: false,
-        defaultUser: 'user',
-        defaultPass: 'password',
-        ram: 4096,
-        cpus: 2,
-        disk: 30720,
-        vram: 128,
-        graphicsController: 'vmsvga',
-        notes: `Fedora ${version} ${variant} from fedoraproject.org/releases.json`
-      };
+    const existing = catalog[key];
+    catalog[key] = {
+      ...(existing || {}),
+      category: 'Fedora',
+      osType: 'Fedora_64',
+      filename: fileName,
+      downloadUrl: item.link,
+      sha256Url: null,
+      unattended: false,
+      defaultUser: 'user',
+      defaultPass: 'password',
+      ram: 4096,
+      cpus: 2,
+      disk: 30720,
+      vram: 128,
+      graphicsController: 'vmsvga',
+      notes: `Fedora ${version} ${variant} from fedoraproject.org/releases.json`
+    };
+    if (!existing) {
       added += 1;
     }
   }
@@ -396,23 +414,25 @@ async function updateArch(catalog) {
 
   for (const version of sorted) {
     const key = `Arch Linux ${version}`;
-    if (!catalog[key]) {
-      catalog[key] = {
-        category: 'Arch Linux',
-        osType: 'ArchLinux_64',
-        filename: 'archlinux-x86_64.iso',
-        downloadUrl: `${base}${version}/archlinux-x86_64.iso`,
-        sha256Url: `${base}${version}/sha256sums.txt`,
-        unattended: false,
-        defaultUser: 'root',
-        defaultPass: '',
-        ram: 2048,
-        cpus: 2,
-        disk: 20480,
-        vram: 16,
-        graphicsController: 'vmsvga',
-        notes: `Arch Linux snapshot ${version} from mirrors.edge.kernel.org`
-      };
+    const existing = catalog[key];
+    catalog[key] = {
+      ...(existing || {}),
+      category: 'Arch Linux',
+      osType: 'ArchLinux_64',
+      filename: 'archlinux-x86_64.iso',
+      downloadUrl: `${base}${version}/archlinux-x86_64.iso`,
+      sha256Url: `${base}${version}/sha256sums.txt`,
+      unattended: false,
+      defaultUser: 'root',
+      defaultPass: '',
+      ram: 2048,
+      cpus: 2,
+      disk: 20480,
+      vram: 16,
+      graphicsController: 'vmsvga',
+      notes: `Arch Linux snapshot ${version} from mirrors.edge.kernel.org`
+    };
+    if (!existing) {
       added += 1;
     }
   }
@@ -442,23 +462,25 @@ async function updateRocky(catalog) {
       if (!isoName) continue;
 
       const key = `Rocky Linux ${version}`;
-      if (!catalog[key]) {
-        catalog[key] = {
-          category: 'RHEL-Based',
-          osType: 'RedHat_64',
-          filename: isoName,
-          downloadUrl: `${isoDir}${isoName}`,
-          sha256Url: null,
-          unattended: false,
-          defaultUser: 'user',
-          defaultPass: 'password',
-          ram: 2048,
-          cpus: 2,
-          disk: 20480,
-          vram: 16,
-          graphicsController: 'vmsvga',
-          notes: `Rocky Linux ${version} from download.rockylinux.org`
-        };
+      const existing = catalog[key];
+      catalog[key] = {
+        ...(existing || {}),
+        category: 'RHEL-Based',
+        osType: 'RedHat_64',
+        filename: isoName,
+        downloadUrl: `${isoDir}${isoName}`,
+        sha256Url: null,
+        unattended: false,
+        defaultUser: 'user',
+        defaultPass: 'password',
+        ram: 2048,
+        cpus: 2,
+        disk: 20480,
+        vram: 16,
+        graphicsController: 'vmsvga',
+        notes: `Rocky Linux ${version} from download.rockylinux.org`
+      };
+      if (!existing) {
         added += 1;
       }
     } catch {
@@ -491,23 +513,25 @@ async function updateAlma(catalog) {
       if (!isoName) continue;
 
       const key = `AlmaLinux ${version}`;
-      if (!catalog[key]) {
-        catalog[key] = {
-          category: 'RHEL-Based',
-          osType: 'RedHat_64',
-          filename: isoName,
-          downloadUrl: `${isoDir}${isoName}`,
-          sha256Url: null,
-          unattended: false,
-          defaultUser: 'user',
-          defaultPass: 'password',
-          ram: 2048,
-          cpus: 2,
-          disk: 20480,
-          vram: 16,
-          graphicsController: 'vmsvga',
-          notes: `AlmaLinux ${version} from repo.almalinux.org`
-        };
+      const existing = catalog[key];
+      catalog[key] = {
+        ...(existing || {}),
+        category: 'RHEL-Based',
+        osType: 'RedHat_64',
+        filename: isoName,
+        downloadUrl: `${isoDir}${isoName}`,
+        sha256Url: null,
+        unattended: false,
+        defaultUser: 'user',
+        defaultPass: 'password',
+        ram: 2048,
+        cpus: 2,
+        disk: 20480,
+        vram: 16,
+        graphicsController: 'vmsvga',
+        notes: `AlmaLinux ${version} from repo.almalinux.org`
+      };
+      if (!existing) {
         added += 1;
       }
     } catch {
@@ -540,23 +564,25 @@ async function updateLinuxMint(catalog) {
       if (!isoName) continue;
 
       const key = `Linux Mint ${version} Cinnamon`;
-      if (!catalog[key]) {
-        catalog[key] = {
-          category: 'Linux Mint',
-          osType: 'Ubuntu_64',
-          filename: isoName,
-          downloadUrl: `${dir}${isoName}`,
-          sha256Url: null,
-          unattended: false,
-          defaultUser: 'user',
-          defaultPass: 'password',
-          ram: 4096,
-          cpus: 2,
-          disk: 25600,
-          vram: 128,
-          graphicsController: 'vmsvga',
-          notes: `Linux Mint ${version} Cinnamon from mirrors.edge.kernel.org`
-        };
+      const existing = catalog[key];
+      catalog[key] = {
+        ...(existing || {}),
+        category: 'Linux Mint',
+        osType: 'Ubuntu_64',
+        filename: isoName,
+        downloadUrl: `${dir}${isoName}`,
+        sha256Url: null,
+        unattended: false,
+        defaultUser: 'user',
+        defaultPass: 'password',
+        ram: 4096,
+        cpus: 2,
+        disk: 25600,
+        vram: 128,
+        graphicsController: 'vmsvga',
+        notes: `Linux Mint ${version} Cinnamon from mirrors.edge.kernel.org`
+      };
+      if (!existing) {
         added += 1;
       }
     } catch {
@@ -583,23 +609,25 @@ async function updateFreeBSD(catalog) {
 
   for (const version of sorted) {
     const key = `FreeBSD ${version}`;
-    if (!catalog[key]) {
-      catalog[key] = {
-        category: 'BSD',
-        osType: 'FreeBSD_64',
-        filename: `FreeBSD-${version}-RELEASE-amd64-disc1.iso`,
-        downloadUrl: `${base}${version}/FreeBSD-${version}-RELEASE-amd64-disc1.iso`,
-        sha256Url: null,
-        unattended: false,
-        defaultUser: 'root',
-        defaultPass: '',
-        ram: 2048,
-        cpus: 2,
-        disk: 20480,
-        vram: 16,
-        graphicsController: 'vboxvga',
-        notes: `FreeBSD ${version} from download.freebsd.org`
-      };
+    const existing = catalog[key];
+    catalog[key] = {
+      ...(existing || {}),
+      category: 'BSD',
+      osType: 'FreeBSD_64',
+      filename: `FreeBSD-${version}-RELEASE-amd64-disc1.iso`,
+      downloadUrl: `${base}${version}/FreeBSD-${version}-RELEASE-amd64-disc1.iso`,
+      sha256Url: null,
+      unattended: false,
+      defaultUser: 'root',
+      defaultPass: '',
+      ram: 2048,
+      cpus: 2,
+      disk: 20480,
+      vram: 16,
+      graphicsController: 'vboxvga',
+      notes: `FreeBSD ${version} from download.freebsd.org`
+    };
+    if (!existing) {
       added += 1;
     }
   }
@@ -633,15 +661,17 @@ async function refreshOfficialCatalog(baseCatalog, log = null) {
     }
   };
 
-  await safeRun('ubuntu', updateUbuntu);
-  await safeRun('kali', updateKali);
-  await safeRun('debian', updateDebian);
-  await safeRun('fedora', updateFedora);
-  await safeRun('arch', updateArch);
-  await safeRun('rocky', updateRocky);
-  await safeRun('alma', updateAlma);
-  await safeRun('mint', updateLinuxMint);
-  await safeRun('freebsd', updateFreeBSD);
+  await Promise.all([
+    safeRun('ubuntu', updateUbuntu),
+    safeRun('kali', updateKali),
+    safeRun('debian', updateDebian),
+    safeRun('fedora', updateFedora),
+    safeRun('arch', updateArch),
+    safeRun('rocky', updateRocky),
+    safeRun('alma', updateAlma),
+    safeRun('mint', updateLinuxMint),
+    safeRun('freebsd', updateFreeBSD)
+  ]);
 
   const totalAdded = Object.values(summary).reduce((acc, s) => acc + (s.added || 0), 0);
 

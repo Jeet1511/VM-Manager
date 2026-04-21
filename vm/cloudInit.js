@@ -49,8 +49,8 @@ function hashPassword(password) {
 function generateUserData(options) {
   const {
     hostname = 'ubuntu-vm',
-    username = 'user',
-    password = 'password',
+    username = 'guest',
+    password = 'guest',
     fullName = 'VM User',
     locale = 'en_US.UTF-8',
     timezone = 'UTC',

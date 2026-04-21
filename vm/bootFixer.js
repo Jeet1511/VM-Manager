@@ -1,10 +1,51 @@
+const fs = require('fs');
+const path = require('path');
 const { execSync } = require('child_process');
 const logger = require('../core/logger');
+const { getAppDataPath } = require('../core/config');
 const virtualbox = require('../adapters/virtualbox');
 
 function _asBool(value) {
   if (typeof value === 'boolean') return value;
   return String(value || '').toLowerCase() === 'on';
+}
+
+function _normalizeMediaPath(value) {
+  return String(value || '').replace(/^"+|"+$/g, '').trim();
+}
+
+function _resolveMediaPath(mediaPath, vmBaseDir) {
+  const normalized = _normalizeMediaPath(mediaPath);
+  if (!normalized) return '';
+  if (path.isAbsolute(normalized)) return normalized;
+  return vmBaseDir ? path.join(vmBaseDir, normalized) : normalized;
+}
+
+function _readSetupState() {
+  try {
+    const statePath = path.join(getAppDataPath(), 'setup-state.json');
+    if (!fs.existsSync(statePath)) return null;
+    const raw = fs.readFileSync(statePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function _getPendingInstallState(vmName) {
+  const state = _readSetupState();
+  if (!state?.config || !state?.phases) return null;
+  if (String(state.config.vmName || '').trim() !== String(vmName || '').trim()) return null;
+
+  const installStarted = String(state.phases.install_os || '').toLowerCase() === 'complete';
+  const setupFinished = String(state.phases.complete || '').toLowerCase() === 'complete';
+  const waitBootDone = String(state.phases.wait_boot || '').toLowerCase() === 'complete';
+
+  if (!installStarted || setupFinished || waitBootDone) return null;
+  return {
+    isoPath: String(state.artifacts?.isoPath || '').trim()
+  };
 }
 
 async function diagnoseBootIssues(vmName) {
@@ -18,7 +59,7 @@ async function diagnoseBootIssues(vmName) {
   diagnostics.push({
     key: 'state',
     status: vmState === 'running' ? 'warn' : 'ok',
-    message: vmState === 'running' ? 'VM is already running' : `VM state: ${vmState}`
+    message: vmState === 'running' ? 'V Os is already running' : `V Os state: ${vmState}`
   });
 
   const hasStorageController = Object.keys(info).some((k) => k.startsWith('storagecontrollername'));
@@ -28,13 +69,43 @@ async function diagnoseBootIssues(vmName) {
     message: hasStorageController ? 'Storage controller detected' : 'No storage controller configured'
   });
 
-  const hasDiskAttachment = Object.values(info).some((v) =>
-    typeof v === 'string' && /\.vdi|\.vmdk|\.vhd|\.qcow2/i.test(v)
-  );
+  const mediaValues = Object.values(info)
+    .filter((v) => typeof v === 'string')
+    .map((v) => _normalizeMediaPath(v));
+
+  const cfgFile = _normalizeMediaPath(info.CfgFile || '');
+  const vmBaseDir = cfgFile ? path.dirname(cfgFile) : '';
+
+  const diskPaths = mediaValues.filter((v) => /\.(vdi|vmdk|vhd|qcow2)$/i.test(v));
+  const isoPaths = mediaValues.filter((v) => /\.(iso|viso)$/i.test(v));
+  const existingDiskPaths = diskPaths.filter((diskPath) => {
+    try { return fs.existsSync(_resolveMediaPath(diskPath, vmBaseDir)); } catch { return false; }
+  });
+  const existingIsoPaths = isoPaths.filter((isoPath) => {
+    try { return fs.existsSync(_resolveMediaPath(isoPath, vmBaseDir)); } catch { return false; }
+  });
+  const hasDiskAttachment = diskPaths.length > 0;
+
   diagnostics.push({
     key: 'diskAttachment',
     status: hasDiskAttachment ? 'ok' : 'warn',
-    message: hasDiskAttachment ? 'Disk attachment detected' : 'No disk attachment found in machine config'
+    message: hasDiskAttachment ? 'Disk attachment detected' : 'No disk attachment found in V Os config'
+  });
+
+  diagnostics.push({
+    key: 'diskPathHealth',
+    status: !hasDiskAttachment ? 'warn' : (existingDiskPaths.length > 0 ? 'ok' : 'fail'),
+    message: !hasDiskAttachment
+      ? 'Disk path health skipped (no disk attachment)'
+      : (existingDiskPaths.length > 0 ? 'Attached disk file exists on host' : 'Attached disk path is missing on host')
+  });
+
+  diagnostics.push({
+    key: 'isoAttachment',
+    status: isoPaths.length > 0 ? (existingIsoPaths.length > 0 ? 'ok' : 'warn') : 'warn',
+    message: isoPaths.length > 0
+      ? (existingIsoPaths.length > 0 ? 'ISO attachment exists' : 'ISO is attached but file is missing on host')
+      : 'No ISO attachment found'
   });
 
   const windows11 = osType.includes('windows11');
@@ -69,13 +140,22 @@ async function diagnoseBootIssues(vmName) {
     }
   }
 
-  return { vmName, diagnostics, info };
+  return {
+    vmName,
+    diagnostics,
+    info,
+    diskPaths,
+    existingDiskPaths,
+    isoPaths,
+    existingIsoPaths
+  };
 }
 
 async function prebootValidateAndFix(vmName) {
   logger.info('BootFixer', `Running pre-boot validation for "${vmName}"`);
-  const { diagnostics, info } = await diagnoseBootIssues(vmName);
+  const { diagnostics, info, existingDiskPaths, existingIsoPaths } = await diagnoseBootIssues(vmName);
   const fixesApplied = [];
+  const pendingInstallState = _getPendingInstallState(vmName);
 
   if (process.platform === 'win32') {
     const vboxSupDiag = diagnostics.find((d) => d.key === 'vboxsup' && d.status === 'fail');
@@ -113,10 +193,74 @@ async function prebootValidateAndFix(vmName) {
     fixesApplied.push('Repaired boot order (disk -> dvd)');
   }
 
+  const hasBootableDisk = existingDiskPaths.length > 0;
+  let hasBootableIso = existingIsoPaths.length > 0;
+
+  if (pendingInstallState) {
+    const osType = String(info.ostype || '').toLowerCase();
+    const graphicsController = String(info.graphicscontroller || '').toLowerCase();
+    if ((osType.includes('ubuntu') || osType.includes('debian') || osType.includes('linux'))
+      && graphicsController === 'vmsvga') {
+      await virtualbox._run([
+        'modifyvm', vmName,
+        '--graphicscontroller', 'vboxsvga',
+        '--vram', '128',
+        '--accelerate3d', 'off'
+      ]);
+      fixesApplied.push('Switched display controller to VBoxSVGA safe mode for interrupted Linux install recovery');
+    }
+
+    if (!hasBootableIso && pendingInstallState.isoPath && fs.existsSync(pendingInstallState.isoPath)) {
+      const controllerNames = Object.keys(info)
+        .filter((key) => /^storagecontrollername\d+$/i.test(key))
+        .map((key) => String(info[key] || '').trim())
+        .filter(Boolean);
+
+      let targetController = controllerNames.find((name) => /ide/i.test(name)) || controllerNames[0] || 'IDE Controller';
+      try {
+        if (!controllerNames.includes(targetController) && /ide/i.test(targetController)) {
+          await virtualbox.addStorageController(vmName, targetController, 'ide');
+        }
+        await virtualbox.attachStorage(vmName, targetController, 0, 0, 'dvddrive', pendingInstallState.isoPath);
+        hasBootableIso = true;
+        fixesApplied.push('Re-attached installer ISO to resume interrupted unattended installation');
+      } catch (attachErr) {
+        logger.warn('BootFixer', `Could not re-attach installer ISO: ${attachErr.message}`);
+      }
+    }
+
+    await virtualbox._run([
+      'modifyvm', vmName,
+      '--boot1', 'dvd',
+      '--boot2', 'disk',
+      '--boot3', 'none',
+      '--boot4', 'none'
+    ]);
+    fixesApplied.push('Detected interrupted setup and switched boot priority to DVD first for recovery');
+  }
+
+  if (!hasBootableDisk && !hasBootableIso) {
+    throw new Error(
+      'No bootable media found. Attached disk/ISO file is missing or inaccessible. ' +
+      'Re-attach a valid disk/ISO in V Os Settings > Storage before starting.'
+    );
+  }
+
+  if (boot1 === 'dvd' && !hasBootableIso && hasBootableDisk) {
+    await virtualbox._run([
+      'modifyvm', vmName,
+      '--boot1', 'disk',
+      '--boot2', 'dvd',
+      '--boot3', 'none',
+      '--boot4', 'none'
+    ]);
+    fixesApplied.push('Prioritized disk boot because no valid ISO media was attached');
+  }
+
   const accel3d = _asBool(info.accelerate3d);
-  if (!accel3d && (info.graphicscontroller || '').toLowerCase() === 'vmsvga') {
-    await virtualbox._run(['modifyvm', vmName, '--accelerate3d', 'on']);
-    fixesApplied.push('Enabled 3D acceleration for VMSVGA');
+  if (accel3d && (info.graphicscontroller || '').toLowerCase() === 'vmsvga') {
+    await virtualbox._run(['modifyvm', vmName, '--accelerate3d', 'off']);
+    fixesApplied.push('Disabled 3D acceleration for VMSVGA stability');
   }
 
   return {

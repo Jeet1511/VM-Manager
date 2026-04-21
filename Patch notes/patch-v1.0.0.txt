@@ -1,0 +1,50 @@
+VM Xposed v1.0.0 — Initial Release
+====================================
+
+Welcome to VM Xposed — a desktop tool that simplifies virtual OS setup and management using VirtualBox.
+
+What's Included
+---------------
+
+• One-Click V Os Creation
+  Set up a fully configured virtual OS in minutes with a guided wizard.
+  Select your OS image, configure resources, and let VM Xposed handle the rest.
+
+• Dashboard
+  View, start, stop, and manage all your virtual OSes from a single interface.
+  Live status indicators for power state, integration health, and system resources.
+
+• Guest Integration
+  Clipboard sync, drag & drop, shared folders, and display fit — configured
+  automatically with one-click repair.
+
+• OS Library
+  Browse and download supported OS images directly from the app.
+  Built-in checksum verification for safe downloads.
+
+• Snapshots
+  Create, restore, and manage snapshots of your virtual OSes.
+
+• Storage Management
+  Monitor disk usage and manage virtual disk files.
+
+• Network Configuration
+  Switch between NAT, Bridged, Internal, and Host-Only networking modes.
+
+• Boot Fix
+  Diagnose and repair common boot issues with a guided troubleshooter.
+
+• VM Xposed Settings
+  Customize app behavior, notification preferences, and admin mode policies.
+
+• Auto-Update Detection
+  The app checks for new versions and patch notes from the repository.
+
+System Requirements
+-------------------
+  Windows 10 or later (64-bit)
+  VirtualBox 7.0+
+  4 GB RAM minimum (8 GB recommended)
+
+---
+Thank you for using VM Xposed.

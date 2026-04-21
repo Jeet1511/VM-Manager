@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VM Xposed - Professional Edition</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0A0D12;
+      --surface: #0F141B;
+      --surface-elevated: #151C24;
+      --surface-hover: rgba(255, 255, 255, 0.05);
+
+      --primary: #4C8DFF;
+      --secondary: #7C5CFF;
+      
+      --text: #E6EDF3;
+      --text-secondary: #9AA4B2;
+      --text-muted: #6B7280;
+
+      --border: rgba(255, 255, 255, 0.05);
+      --success: #2ea043;
+      
+      --transition: 250ms ease;
+      --font-stack: "Inter", -apple-system, sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-stack);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+    }
+
+    /* SYSTEM FLOW ANIMATION */
+    .sys-flow-bg {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .sys-flow-line {
+      position: absolute;
+      width: 150vw;
+      height: 1px;
+      left: -25vw;
+      opacity: 0.02;
+      background: linear-gradient(90deg, transparent, var(--primary), var(--secondary), transparent);
+      animation: flowMotion 15s linear infinite;
+      filter: blur(1px);
+    }
+    .sys-flow-line:nth-child(1) { top: 20%; animation-duration: 20s; transform: rotate(-2deg); height: 2px; }
+    .sys-flow-line:nth-child(2) { top: 45%; animation-duration: 12s; transform: rotate(1deg); opacity: 0.04; background: linear-gradient(90deg, transparent, var(--secondary), var(--primary), transparent); }
+    .sys-flow-line:nth-child(3) { top: 75%; animation-duration: 18s; transform: rotate(-1deg); }
+
+    @keyframes flowMotion {
+      0% { transform: translateX(-10%); }
+      50% { transform: translateX(10%); }
+      100% { transform: translateX(-10%); }
+    }
+
+    /* LAYOUT */
+    .sidebar {
+      width: 240px;
+      background: var(--bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      z-index: 10;
+    }
+
+    .sidebar-header {
+      padding: 24px 20px;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.5px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .sidebar-nav {
+      list-style: none;
+      padding: 0 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+
+    .nav-item:hover, .nav-item.active {
+      color: var(--text);
+      background: var(--surface-elevated);
+    }
+
+    .nav-item.active {
+      background: rgba(76, 141, 255, 0.1);
+      color: var(--primary);
+    }
+
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      z-index: 10;
+      position: relative;
+    }
+
+    .topbar {
+      height: 64px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 32px;
+      background: var(--bg);
+    }
+
+    .search {
+      background: var(--surface-elevated);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 6px 12px;
+      color: var(--text);
+      font-size: 13px;
+      width: 300px;
+      outline: none;
+      font-family: inherit;
+    }
+    .search::placeholder { color: var(--text-muted); }
+
+    .user-actions button {
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background var(--transition);
+    }
+    .user-actions button:hover { background: #3a75e0; }
+
+    /* DASHBOARD GRID */
+    .dashboard {
+      padding: 32px;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      grid-template-rows: auto 1fr;
+      gap: 24px;
+      height: calc(100vh - 64px);
+      overflow-y: auto;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      transition: transform var(--transition), border-color var(--transition);
+    }
+    .panel:hover {
+      transform: translateY(-2px);
+      border-color: rgba(255,255,255,0.1);
+    }
+
+    .panel-header {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* SYSTEM OVERVIEW */
+    .grid-stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+    
+    .stat-card {
+      background: var(--surface-elevated);
+      padding: 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+
+    .stat-value {
+      font-family: var(--font-mono);
+      font-size: 28px;
+      font-weight: 600;
+      margin: 8px 0 4px;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .stat-graph {
+      height: 20px;
+      border-bottom: 2px solid var(--primary);
+      background: linear-gradient(to top, rgba(76, 141, 255, 0.1), transparent);
+      margin-top: 8px;
+    }
+
+    /* RUNNING VMs */
+    .vm-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    
+    .vm-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: var(--surface-elevated);
+      border-radius: 6px;
+      border: 1px solid transparent;
+      transition: var(--transition);
+      cursor: pointer;
+    }
+
+    .vm-item:hover {
+      background: var(--surface-hover);
+      border-color: var(--border);
+    }
+
+    .vm-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+    }
+    .status-dot.active {
+      background: var(--success);
+      box-shadow: 0 0 8px rgba(46, 160, 67, 0.3);
+    }
+
+    .vm-name {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .vm-metrics {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      gap: 16px;
+    }
+
+    .vm-action {
+      opacity: 0;
+      transition: opacity var(--transition);
+    }
+    .vm-item:hover .vm-action {
+      opacity: 1;
+    }
+
+    /* RESOURCE MONITOR */
+    .res-monitor {
+      height: 120px;
+      position: relative;
+    }
+    .res-chart {
+      position: absolute;
+      bottom: 0; left: 0; right: 0; top: 0;
+      background: linear-gradient(180deg, rgba(76, 141, 255, 0.05), transparent);
+      border-bottom: 2px solid var(--primary);
+    }
+
+    /* STORAGE & HEALTH */
+    .storage-item {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 13px;
+    }
+    .storage-bar-bg {
+      height: 4px;
+      background: var(--surface-elevated);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .storage-bar-fill {
+      height: 100%;
+      background: var(--primary);
+      width: 64%;
+    }
+
+    /* ACTIVITY LOG */
+    .log-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      font-size: 12px;
+    }
+    .log-item {
+      display: flex;
+      gap: 12px;
+      color: var(--text-secondary);
+    }
+    .log-time {
+      font-family: var(--font-mono);
+      color: var(--text-muted);
+      width: 48px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Background Flow Animation -->
+  <div class="sys-flow-bg">
+    <div class="sys-flow-line"></div>
+    <div class="sys-flow-line"></div>
+    <div class="sys-flow-line"></div>
+  </div>
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M2 12h20M2 6h20M2 18h20" stroke-linecap="round"/></svg>
+      VM Xposed
+    </div>
+    <ul class="sidebar-nav">
+      <li class="nav-item active">Dashboard</li>
+      <li class="nav-item">Running VMs</li>
+      <li class="nav-item">Resource Monitor</li>
+      <li class="nav-item">Storage & Health</li>
+      <li class="nav-item">Activity Log</li>
+    </ul>
+  </aside>
+
+  <main class="main-content">
+    <header class="topbar">
+      <input type="text" class="search" placeholder="Search VMs, Snapshots...">
+      <div class="user-actions">
+        <button>New Virtual Machine</button>
+      </div>
+    </header>
+
+    <div class="dashboard">
+      <!-- MAIN COLUMN -->
+      <div style="display: flex; flex-direction: column; gap: 24px;">
+        
+        <!-- SYSTEM OVERVIEW -->
+        <div class="panel">
+          <div class="panel-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            System Overview
+          </div>
+          <div class="grid-stats">
+            <div class="stat-card">
+              <div class="stat-label">Active VMs</div>
+              <div class="stat-value">4</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">CPU Usage</div>
+              <div class="stat-value">18%</div>
+              <div class="stat-graph" style="width: 30%;"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">RAM Usage</div>
+              <div class="stat-value">8.4<span style="font-size:14px;color:var(--text-muted)">GB</span></div>
+              <div class="stat-graph" style="width: 52%;"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Disk I/O</div>
+              <div class="stat-value">42<span style="font-size:14px;color:var(--text-muted)">MB/s</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RUNNING VMs -->
+        <div class="panel">
+          <div class="panel-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            Running VMs
+          </div>
+          <div class="vm-list">
+            <div class="vm-item">
+              <div class="vm-info">
+                <div class="status-dot active"></div>
+                <div class="vm-name">Ubuntu-Server-Prod</div>
+              </div>
+              <div class="vm-metrics">
+                <span>CPU: 4%</span>
+                <span>RAM: 4GB</span>
+                <span>NET: 1.2MB/s</span>
+              </div>
+              <div class="vm-action">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 16 16 12 12 8"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+              </div>
+            </div>
+            
+            <div class="vm-item">
+              <div class="vm-info">
+                <div class="status-dot active"></div>
+                <div class="vm-name">Alpine-Docker-Node</div>
+              </div>
+              <div class="vm-metrics">
+                <span>CPU: 1%</span>
+                <span>RAM: 512MB</span>
+                <span>NET: 45KB/s</span>
+              </div>
+              <div class="vm-action">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 16 16 12 12 8"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- SIDE COLUMN -->
+      <div style="display: flex; flex-direction: column; gap: 24px;">
+        
+        <!-- RESOURCE MONITOR -->
+        <div class="panel">
+          <div class="panel-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            Resource Monitor
+          </div>
+          <div class="res-monitor">
+            <div class="res-chart"></div>
+            <!-- Dummy curve for the chart -->
+            <svg viewBox="0 0 100 40" preserveAspectRatio="none" style="width: 100%; height: 100%; position: absolute;">
+              <path d="M0,40 L10,35 L20,38 L30,25 L40,30 L50,15 L60,28 L70,22 L80,36 L90,25 L100,10 L100,40 Z" fill="transparent" stroke="var(--primary)" stroke-width="0.5"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- STORAGE & HEALTH -->
+        <div class="panel">
+          <div class="panel-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+            Storage & Health
+          </div>
+          <div class="storage-item">
+            <div style="display:flex; justify-content:space-between">
+              <span style="color:var(--text-secondary)">System Health</span>
+              <span style="color:var(--success)">Pass</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top: 8px;">
+              <span style="color:var(--text-secondary)">Storage Pool</span>
+              <span>64% (256GB free)</span>
+            </div>
+            <div class="storage-bar-bg">
+              <div class="storage-bar-fill"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ACTIVITY LOG -->
+        <div class="panel">
+          <div class="panel-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            Activity Log
+          </div>
+          <div class="log-list">
+            <div class="log-item">
+              <span class="log-time">10:42</span>
+              <span>Ubuntu Server 22.04 started</span>
+            </div>
+            <div class="log-item">
+              <span class="log-time">09:15</span>
+              <span>Snapshot created (Alpine Docker)</span>
+            </div>
+            <div class="log-item">
+              <span class="log-time">08:00</span>
+              <span>System backup completed</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+</body>
+</html>

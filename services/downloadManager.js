@@ -24,6 +24,48 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_BASE = 2000;  // 2 seconds, doubles each retry
 const MAX_REDIRECTS = 5;
 
+function _createAbortError(signal) {
+  const abortReason = signal?.reason === 'paused' ? 'paused' : 'cancelled';
+  const abortError = new Error(abortReason === 'paused' ? 'Download paused' : 'Download cancelled');
+  abortError.name = 'AbortError';
+  abortError.code = abortReason === 'paused' ? 'PAUSED' : 'CANCELLED';
+  return abortError;
+}
+
+function _throwIfAborted(signal) {
+  if (signal?.aborted) {
+    throw _createAbortError(signal);
+  }
+}
+
+function _waitWithAbort(delayMs, signal) {
+  if (!Number.isFinite(delayMs) || delayMs <= 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(_createAbortError(signal));
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      if (onAbort && signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(_createAbortError(signal));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
 /**
  * Download a file from HTTPS URL with full progress tracking.
  * 
@@ -34,10 +76,12 @@ const MAX_REDIRECTS = 5;
  * @param {function} [options.onProgress] - Callback({ downloaded, total, percent, speed, eta })
  * @param {AbortSignal} [options.signal] - AbortController signal for cancellation
  * @param {boolean} [options.resume] - Whether to resume partial downloads (default: true)
+ * @param {boolean} [options.cleanupOnAbort] - Remove partial file when cancelled (default: true)
  * @returns {Promise<string>} Absolute path to downloaded file
  */
 async function downloadFile(url, destDir, filename = null, options = {}) {
-  const { onProgress = null, signal = null, resume = true } = options;
+  const { onProgress = null, signal = null, resume = true, cleanupOnAbort = true } = options;
+  _throwIfAborted(signal);
 
   // Ensure destination directory exists
   await fs.promises.mkdir(destDir, { recursive: true });
@@ -63,12 +107,14 @@ async function downloadFile(url, destDir, filename = null, options = {}) {
       if (attempt > 1) {
         const delay = RETRY_DELAY_BASE * Math.pow(2, attempt - 2);
         logger.warn('Download', `Retry attempt ${attempt}/${MAX_RETRIES} — waiting ${delay / 1000}s...`);
-        await new Promise(r => setTimeout(r, delay));
+        await _waitWithAbort(delay, signal);
       }
 
+      _throwIfAborted(signal);
       await _downloadWithRedirects(url, destPath, partialPath, {
         onProgress,
         signal,
+        cleanupOnAbort,
         resume: resume && attempt === 1,  // Only resume on first attempt
         redirectCount: 0
       });
@@ -80,9 +126,12 @@ async function downloadFile(url, destDir, filename = null, options = {}) {
 
     } catch (err) {
       if (err.name === 'AbortError' || signal?.aborted) {
-        logger.warn('Download', 'Download cancelled by user');
-        _cleanupPartial(partialPath);
-        throw new Error('Download cancelled');
+        const abortReason = (err.code === 'PAUSED' || signal?.reason === 'paused') ? 'paused' : 'cancelled';
+        logger.warn('Download', abortReason === 'paused' ? 'Download paused by user' : 'Download cancelled by user');
+        if (abortReason !== 'paused' && cleanupOnAbort) {
+          _cleanupPartial(partialPath);
+        }
+        throw _createAbortError({ reason: abortReason });
       }
 
       logger.error('Download', `Download failed (attempt ${attempt}/${MAX_RETRIES}): ${err.message}`);
@@ -100,6 +149,8 @@ async function downloadFile(url, destDir, filename = null, options = {}) {
  */
 function _downloadWithRedirects(url, destPath, partialPath, options) {
   return new Promise((resolve, reject) => {
+    _throwIfAborted(options.signal);
+
     if (options.redirectCount >= MAX_REDIRECTS) {
       return reject(new Error('Too many redirects'));
     }
@@ -123,7 +174,11 @@ function _downloadWithRedirects(url, destPath, partialPath, options) {
       requestHeaders['Range'] = `bytes=${startByte}-`;
     }
 
+    let activeResponse = null;
+    let activeFileStream = null;
+
     const req = protocol.get(url, { headers: requestHeaders }, (response) => {
+      activeResponse = response;
       const statusCode = response.statusCode;
 
       // Handle redirects
@@ -165,6 +220,7 @@ function _downloadWithRedirects(url, destPath, partialPath, options) {
       // Open file for writing (append if resuming, otherwise overwrite)
       const flags = startByte > 0 && statusCode === 206 ? 'a' : 'w';
       const file = fs.createWriteStream(partialPath, { flags });
+      activeFileStream = file;
 
       let downloadedBytes = startByte;
       let lastProgressTime = Date.now();
@@ -233,21 +289,37 @@ function _downloadWithRedirects(url, destPath, partialPath, options) {
     });
 
     req.on('error', (err) => {
+      if (options.signal?.aborted) {
+        reject(_createAbortError(options.signal));
+        return;
+      }
       reject(new Error(`Network error: ${err.message}`));
     });
 
     // Handle abort signal
+    let onAbort = null;
     if (options.signal) {
-      options.signal.addEventListener('abort', () => {
-        req.destroy();
-        reject(Object.assign(new Error('Download cancelled'), { name: 'AbortError' }));
-      });
+      onAbort = () => {
+        activeResponse?.destroy(_createAbortError(options.signal));
+        activeFileStream?.destroy(_createAbortError(options.signal));
+        req.destroy(_createAbortError(options.signal));
+        reject(_createAbortError(options.signal));
+      };
+      options.signal.addEventListener('abort', onAbort, { once: true });
     }
 
     req.setTimeout(30000, () => {
       req.destroy();
       reject(new Error('Connection timed out'));
     });
+
+    const clearAbortListener = () => {
+      if (onAbort && options.signal) {
+        options.signal.removeEventListener('abort', onAbort);
+      }
+    };
+
+    req.on('close', clearAbortListener);
   });
 }
 

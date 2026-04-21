@@ -62,6 +62,34 @@ class Logger extends EventEmitter {
   }
 
   /**
+   * Return the current log file path.
+   */
+  getCurrentLogFilePath() {
+    if (!this.logFile) {
+      this._rotateIfNeeded();
+    }
+    return this.logFile;
+  }
+
+  /**
+   * Ensure the current log file exists on disk.
+   */
+  ensureLogFile() {
+    const logPath = this.getCurrentLogFilePath();
+    if (!logPath) return null;
+
+    try {
+      fs.mkdirSync(this.logDir, { recursive: true });
+      if (!fs.existsSync(logPath)) {
+        fs.writeFileSync(logPath, '');
+      }
+      return logPath;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Rotate log files if current file exceeds max size.
    */
   _rotateIfNeeded() {

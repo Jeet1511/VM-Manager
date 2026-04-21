@@ -266,7 +266,7 @@ const VIRTUALBOX_DOWNLOADS = {
 
 // ─── Default VM Configuration ─────────────────────────────────────────────────
 const VM_DEFAULTS = {
-  name: 'My VM',
+  name: 'My V Os',
   ram: 4096,
   cpus: 2,
   disk: 25600,

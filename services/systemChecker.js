@@ -7,9 +7,43 @@
  */
 
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
 const platform = require('../adapters/platform');
 const logger = require('../core/logger');
 const { SYSTEM_REQUIREMENTS } = require('../core/config');
+
+function resolvePreferredVBoxManagePath(rawPath = '') {
+  const candidate = String(rawPath || '').trim().replace(/^"(.*)"$/, '$1').trim();
+  if (!candidate) return '';
+
+  const asFile = (() => {
+    try {
+      if (!fs.existsSync(candidate)) return '';
+      return fs.statSync(candidate).isFile() ? candidate : '';
+    } catch {
+      return '';
+    }
+  })();
+  if (asFile) return asFile;
+
+  try {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      const exeName = process.platform === 'win32' ? 'VBoxManage.exe' : 'VBoxManage';
+      const sibling = path.join(candidate, exeName);
+      if (fs.existsSync(sibling) && fs.statSync(sibling).isFile()) return sibling;
+    }
+  } catch {}
+
+  if (process.platform === 'win32' && candidate.toLowerCase().endsWith('virtualbox.exe')) {
+    try {
+      const sibling = path.join(path.dirname(candidate), 'VBoxManage.exe');
+      if (fs.existsSync(sibling) && fs.statSync(sibling).isFile()) return sibling;
+    } catch {}
+  }
+
+  return '';
+}
 
 /**
  * Run all system checks and return a detailed report.
@@ -18,7 +52,7 @@ const { SYSTEM_REQUIREMENTS } = require('../core/config');
  * @param {string} [targetPath] - Installation path to check disk space for
  * @returns {Promise<object>} Structured system report
  */
-async function runSystemCheck(targetPath = null) {
+async function runSystemCheck(targetPath = null, options = {}) {
   logger.info('SystemCheck', '═══ Starting System Requirements Check ═══');
 
   const checks = [];
@@ -135,7 +169,8 @@ async function runSystemCheck(targetPath = null) {
   }
 
   // ─── Check 6: VirtualBox Installation ─────────────────────────────
-  const vboxPath = await platform.findVBoxManage();
+  const preferredVBoxPath = resolvePreferredVBoxManagePath(options?.preferredVBoxPath || '');
+  const vboxPath = preferredVBoxPath || await platform.findVBoxManage();
   const vboxCheck = {
     name: 'VirtualBox',
     value: vboxPath ? 'Installed' : 'Not installed',

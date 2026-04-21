@@ -72,7 +72,7 @@ class StateManager {
       }
 
       logger.info('StateManager', `Found previous state from: ${state.lastUpdated}`);
-      logger.info('StateManager', `VM: ${state.config.vmName}, Last phase: ${state.lastCompletedPhase}`);
+      logger.info('StateManager', `V Os: ${state.config.vmName}, Last phase: ${state.lastCompletedPhase}`);
 
       this.state = state;
       return state;
@@ -231,9 +231,11 @@ class StateManager {
     if (this.isPhaseComplete('install_vbox') || this.isPhaseComplete('download_vbox')) {
       const platform = require('../adapters/platform');
       const vboxPath = await platform.findVBoxManage();
-      if (!vboxPath && !this.isPhaseComplete('install_vbox') === false) {
-        // VBox was supposed to be skipped (already installed) but now it's gone
+      if (!vboxPath) {
+        // VBox was available in a previous run but is now missing. Re-enter VBox setup phases.
         validationIssues.push('VirtualBox no longer detected');
+        this.state.phases.download_vbox = PHASE_STATUS.PENDING;
+        this.state.phases.install_vbox = PHASE_STATUS.PENDING;
       }
     }
 
@@ -255,8 +257,8 @@ class StateManager {
         await virtualbox.init();
         const exists = await virtualbox.vmExists(this.state.config.vmName);
         if (!exists) {
-          logger.warn('StateManager', `VM "${this.state.config.vmName}" no longer exists`);
-          validationIssues.push('VM was deleted');
+          logger.warn('StateManager', `V Os "${this.state.config.vmName}" no longer exists`);
+          validationIssues.push('V Os was deleted');
           // Reset from create_vm phase onward
           this.state.phases.create_vm = PHASE_STATUS.PENDING;
           this.state.phases.install_os = PHASE_STATUS.PENDING;
@@ -316,7 +318,7 @@ class StateManager {
       install_vbox: 'Install VirtualBox',
       download_iso: 'Download Ubuntu ISO',
       verify_iso: 'Verify ISO',
-      create_vm: 'Create VM',
+      create_vm: 'Create V Os',
       install_os: 'Install Ubuntu',
       wait_boot: 'Wait for Boot',
       guest_config: 'Guest Configuration',

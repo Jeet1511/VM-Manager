@@ -17,14 +17,68 @@ const platform = require('./platform');
 class VirtualBoxAdapter {
   constructor() {
     this.vboxManagePath = null;
+    this.preferredManagePath = '';
+  }
+
+  setPreferredManagePath(managePath = '') {
+    const raw = String(managePath || '').trim();
+    this.preferredManagePath = raw.replace(/^"(.*)"$/, '$1').trim();
+  }
+
+  _resolvePreferredManagePath(rawPath = '') {
+    const candidate = String(rawPath || '').trim();
+    if (!candidate) return null;
+
+    const normalized = candidate.replace(/^"(.*)"$/, '$1').trim();
+    if (!normalized) return null;
+
+    const toFile = (target) => {
+      try {
+        if (!fs.existsSync(target)) return null;
+        const stat = fs.statSync(target);
+        return stat.isFile() ? target : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const directFile = toFile(normalized);
+    if (directFile) return directFile;
+
+    const lower = normalized.toLowerCase();
+    if (lower.endsWith('virtualbox.exe')) {
+      const sibling = path.join(path.dirname(normalized), 'VBoxManage.exe');
+      const siblingFile = toFile(sibling);
+      if (siblingFile) return siblingFile;
+    }
+
+    try {
+      if (fs.existsSync(normalized) && fs.statSync(normalized).isDirectory()) {
+        const exeName = process.platform === 'win32' ? 'VBoxManage.exe' : 'VBoxManage';
+        const managed = path.join(normalized, exeName);
+        const managedFile = toFile(managed);
+        if (managedFile) return managedFile;
+      }
+    } catch {}
+
+    return null;
   }
 
   /**
    * Initialize the adapter — find VBoxManage binary.
    * Must be called before any other method.
    */
-  async init() {
-    this.vboxManagePath = await platform.findVBoxManage();
+  async init(managePathOverride) {
+    if (managePathOverride !== undefined) {
+      this.setPreferredManagePath(managePathOverride);
+    }
+
+    const preferredPath = this._resolvePreferredManagePath(this.preferredManagePath);
+    if (this.preferredManagePath && !preferredPath) {
+      logger.warn('VirtualBox', `Configured VirtualBox Path is invalid: ${this.preferredManagePath}`);
+    }
+
+    this.vboxManagePath = preferredPath || await platform.findVBoxManage();
     if (this.vboxManagePath) {
       // Try to get version — if it fails, VirtualBox.xml may be corrupted
       let version = await this.getVersion();
@@ -166,6 +220,7 @@ class VirtualBoxAdapter {
       cpus: '--cpus',
       vram: '--vram',
       graphicsController: '--graphicscontroller',
+      accelerate3d: '--accelerate3d',
       audioController: '--audiocontroller',
       clipboardMode: '--clipboard',
       dragAndDrop: '--draganddrop',
@@ -483,6 +538,114 @@ class VirtualBoxAdapter {
   }
 
   /**
+   * List snapshots for a VM.
+   */
+  async listSnapshots(vmName) {
+    try {
+      const output = await this._run(['snapshot', vmName, 'list', '--machinereadable']);
+      const snapshotsByIndex = new Map();
+
+      const ensureIndex = (index) => {
+        if (!snapshotsByIndex.has(index)) {
+          snapshotsByIndex.set(index, {
+            id: '',
+            name: '',
+            description: '',
+            timestamp: '',
+            isCurrent: false
+          });
+        }
+        return snapshotsByIndex.get(index);
+      };
+
+      for (const rawLine of String(output || '').split('\n')) {
+        const line = rawLine.trim();
+        if (!line) continue;
+
+        const kvMatch = line.match(/^([^=]+)=(.*)$/);
+        if (!kvMatch) continue;
+        const key = kvMatch[1].trim();
+        const rawValue = kvMatch[2].trim();
+        const value = rawValue.replace(/^"(.*)"$/, '$1');
+
+        let match = key.match(/^SnapshotNameMachineMapping(\d+)$/);
+        if (match) {
+          ensureIndex(match[1]).name = value;
+          continue;
+        }
+
+        match = key.match(/^SnapshotUUIDMachineMapping(\d+)$/);
+        if (match) {
+          ensureIndex(match[1]).id = value;
+          continue;
+        }
+
+        match = key.match(/^SnapshotDescriptionMachineMapping(\d+)$/);
+        if (match) {
+          ensureIndex(match[1]).description = value;
+          continue;
+        }
+
+        match = key.match(/^SnapshotTimeStampMachineMapping(\d+)$/);
+        if (match) {
+          ensureIndex(match[1]).timestamp = value;
+        }
+      }
+
+      const currentSnapshot = String(output || '').match(/SnapshotName="([^"]+)"/);
+      const currentName = currentSnapshot ? currentSnapshot[1] : '';
+
+      const snapshots = Array.from(snapshotsByIndex.values())
+        .filter((snapshot) => snapshot.name || snapshot.id)
+        .map((snapshot) => ({
+          ...snapshot,
+          isCurrent: !!currentName && snapshot.name === currentName
+        }));
+
+      return snapshots;
+    } catch (err) {
+      const message = String(err?.message || '');
+      if (/does not have any snapshots/i.test(message)) {
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Create snapshot for a VM.
+   */
+  async createSnapshot(vmName, snapshotName) {
+    const state = String(await this.getVMState(vmName)).toLowerCase();
+    const args = ['snapshot', vmName, 'take', snapshotName];
+    if (state === 'running' || state === 'paused') {
+      args.push('--live');
+    }
+    await this._run(args);
+  }
+
+  /**
+   * Restore VM snapshot.
+   */
+  async restoreSnapshot(vmName, snapshotRef) {
+    const state = String(await this.getVMState(vmName)).toLowerCase();
+    if (state === 'running' || state === 'paused') {
+      try {
+        await this._run(['controlvm', vmName, 'poweroff']);
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+    await this._run(['snapshot', vmName, 'restore', snapshotRef]);
+  }
+
+  /**
+   * Delete VM snapshot.
+   */
+  async deleteSnapshot(vmName, snapshotRef) {
+    await this._run(['snapshot', vmName, 'delete', snapshotRef]);
+  }
+
+  /**
    * Execute a command INSIDE the running guest VM via Guest Additions.
    * This is how we configure Ubuntu without the user touching the terminal.
    * 
@@ -670,22 +833,31 @@ class VirtualBoxAdapter {
    * Configure host-side display integration preferences for a VM.
    * Improves fullscreen behavior and dynamic resize readiness.
    */
-  async configureDisplayIntegration(vmName) {
+  async configureDisplayIntegration(vmName, options = {}) {
+    const {
+      fullscreen = true,
+      accelerate3d = false,
+      graphicsController = '',
+      vram = 128
+    } = options;
     logger.info('VirtualBox', `Configuring display integration for "${vmName}"...`);
 
-    await this._run([
+    const args = [
       'modifyvm', vmName,
-      '--graphicscontroller', 'vmsvga',
-      '--vram', '128',
+      ...(graphicsController ? ['--graphicscontroller', String(graphicsController).toLowerCase()] : []),
+      '--vram', String(Number.isFinite(Number(vram)) ? Math.max(16, Number(vram)) : 128),
       '--monitorcount', '1',
-      '--accelerate3d', 'on'
-    ]);
+      '--accelerate3d', accelerate3d ? 'on' : 'off'
+    ];
+
+    await this._run(args);
 
     const vmExtra = [
-      ['GUI/Fullscreen', 'on'],
+      ['GUI/Fullscreen', 'off'],
       ['GUI/AutoresizeGuest', 'on'],
       ['GUI/ScaleFactor', '1.0'],
-      ['GUI/Seamless', 'off']
+      ['GUI/Seamless', 'off'],
+      ['VMXposed/GuestDisplayFullscreen', fullscreen ? 'on' : 'off']
     ];
 
     for (const [key, value] of vmExtra) {
@@ -712,15 +884,33 @@ class VirtualBoxAdapter {
     const {
       clipboardMode = 'bidirectional',
       dragAndDrop = 'bidirectional',
-      width = 1920,
-      height = 1080,
+      width = 0,
+      height = 0,
       bpp = 32,
-      display = 0
+      display = 0,
+      guestDisplayFullscreen = true,
+      waitForGuestAdditionsMs = 0
     } = options;
 
     logger.info('VirtualBox', `Applying runtime integration to "${vmName}"...`);
 
     const warnings = [];
+    let guestAdditionsReady = false;
+
+    try {
+      const info = await this.getVMInfo(vmName);
+      guestAdditionsReady = !!info.GuestAdditionsVersion && parseInt(info.GuestAdditionsRunLevel || '0', 10) >= 2;
+    } catch (err) {
+      warnings.push(`guest additions readiness check: ${err.message}`);
+    }
+
+    if (!guestAdditionsReady && Number(waitForGuestAdditionsMs) > 0) {
+      try {
+        guestAdditionsReady = await this.waitForGuestAdditions(vmName, Number(waitForGuestAdditionsMs));
+      } catch (err) {
+        warnings.push(`guest additions wait failed: ${err.message}`);
+      }
+    }
 
     const safeRun = async (args, warningLabel) => {
       try {
@@ -730,9 +920,29 @@ class VirtualBoxAdapter {
       }
     };
 
-    await safeRun(['controlvm', vmName, 'clipboard', clipboardMode], 'clipboard runtime apply');
-    await safeRun(['controlvm', vmName, 'draganddrop', dragAndDrop], 'drag-and-drop runtime apply');
-    await safeRun(['controlvm', vmName, 'setvideomodehint', String(width), String(height), String(bpp), String(display)], 'video mode hint apply');
+    if (guestAdditionsReady) {
+      await safeRun(['controlvm', vmName, 'clipboard', clipboardMode], 'clipboard runtime apply');
+      await safeRun(['controlvm', vmName, 'draganddrop', dragAndDrop], 'drag-and-drop runtime apply');
+    } else {
+      warnings.push('clipboard/drag-drop deferred until Guest Additions is fully ready (existing mode preserved)');
+    }
+    if (guestDisplayFullscreen && Number(width) > 0 && Number(height) > 0) {
+      if (guestAdditionsReady) {
+        const safeWidth = Math.min(Math.max(640, Math.floor(Number(width))), 7680);
+        const safeHeight = Math.min(Math.max(480, Math.floor(Number(height))), 4320);
+        await safeRun(
+          ['controlvm', vmName, 'setvideomodehint', String(safeWidth), String(safeHeight), String(bpp), String(display)],
+          'video mode hint apply'
+        );
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        await safeRun(
+          ['controlvm', vmName, 'setvideomodehint', String(safeWidth), String(safeHeight), String(bpp), String(display)],
+          'video mode hint re-apply'
+        );
+      } else {
+        warnings.push('video mode hint skipped until Guest Additions are running');
+      }
+    }
 
     if (warnings.length > 0) {
       logger.warn('VirtualBox', `Runtime integration warnings: ${warnings.join(' | ')}`);

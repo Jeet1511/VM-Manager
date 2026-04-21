@@ -6,7 +6,7 @@
  * HOST SIDE (VBoxManage modifyvm — before first boot):
  *   - Clipboard bidirectional
  *   - Drag-and-drop bidirectional
- *   - VMSVGA graphics + 128MB VRAM
+ *   - Display integration preferences (without forcing graphics controller)
  * 
  * GUEST SIDE (VBoxManage guestcontrol — after Ubuntu boots):
  *   - Install Guest Additions packages (virtualbox-guest-utils, etc.)
@@ -66,25 +66,38 @@ async function runGuestStep(vmName, username, password, script, options = {}) {
  * Configure all Guest Additions features on the HOST side.
  * This should be called after the VM is created but before first boot.
  */
-async function configureGuestFeatures(vmName) {
+async function configureGuestFeatures(vmName, options = {}) {
+  const {
+    fullscreen = true,
+    accelerate3d = false,
+    graphicsController = '',
+    vram = 128,
+    clipboardMode = 'bidirectional',
+    dragAndDrop = 'bidirectional'
+  } = options;
   logger.info('GuestAdditions', `Configuring Guest Additions features for "${vmName}"...`);
 
   try {
     // Set graphics and GUI integration preferences for fullscreen/dynamic resize
-    await virtualbox.configureDisplayIntegration(vmName);
+    await virtualbox.configureDisplayIntegration(vmName, {
+      fullscreen,
+      accelerate3d: accelerate3d === true,
+      graphicsController,
+      vram
+    });
     logger.success('GuestAdditions', 'Display integration preferences applied');
 
     // Enable bidirectional clipboard
     await virtualbox.configureVM(vmName, {
-      clipboardMode: 'bidirectional'
+      clipboardMode: clipboardMode || 'disabled'
     });
-    logger.success('GuestAdditions', 'Clipboard: Bidirectional sharing enabled');
+    logger.success('GuestAdditions', `Clipboard mode applied: ${clipboardMode || 'disabled'}`);
 
     // Enable bidirectional drag and drop
     await virtualbox.configureVM(vmName, {
-      dragAndDrop: 'bidirectional'
+      dragAndDrop: dragAndDrop || 'disabled'
     });
-    logger.success('GuestAdditions', 'Drag & Drop: Bidirectional enabled');
+    logger.success('GuestAdditions', `Drag & Drop mode applied: ${dragAndDrop || 'disabled'}`);
 
     logger.success('GuestAdditions', 'All host-side Guest Additions features configured');
 
@@ -288,18 +301,18 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       );
 
       // Add fstab entry for persistent mount
-      await runGuestStep(
-        vmName,
-        username,
-        password,
-        'echo "' + password + '" | sudo -S bash -c \'' +
-        'grep -q "' + sharedFolderName + ' ' + guestMountPoint + ' vboxsf" /etc/fstab || ' +
-        'echo "' + sharedFolderName + ' ' + guestMountPoint + ' vboxsf defaults,uid=1000,gid=1000,_netdev 0 0" >> /etc/fstab\' && echo ok',
-        {
-          timeout: 30000,
-          retries: 2,
-          description: 'Persist shared folder mount in fstab',
-          verify: async (out) => out.includes('ok')
+    await runGuestStep(
+      vmName,
+      username,
+      password,
+      'echo "' + password + '" | sudo -S bash -c \'' +
+      'sed -i "\\|^' + sharedFolderName + ' ' + guestMountPoint + ' vboxsf |d" /etc/fstab; ' +
+      'echo "' + sharedFolderName + ' ' + guestMountPoint + ' vboxsf rw,_netdev,umask=0007 0 0" >> /etc/fstab\' && echo ok',
+      {
+        timeout: 30000,
+        retries: 2,
+        description: 'Persist shared folder mount in fstab',
+        verify: async (out) => out.includes('ok')
         }
       );
 
@@ -325,6 +338,19 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
 
     // ─── Step 7: Enable fullscreen / dynamic resolution ───────────
     _progress('Enabling fullscreen and dynamic resolution...', 90);
+
+    // Drag & drop is unreliable on Ubuntu Wayland sessions in VirtualBox.
+    // Prefer Xorg when gdm3 is present so VBoxClient draganddrop can attach reliably.
+    await virtualbox.guestShell(
+      vmName,
+      username,
+      password,
+      'if [ -f /etc/gdm3/custom.conf ]; then ' +
+      'echo "' + password + '" | sudo -S sed -i \'s/^#\\?WaylandEnable=.*/WaylandEnable=false/\' /etc/gdm3/custom.conf 2>/dev/null || true; ' +
+      'grep -q "^WaylandEnable=false" /etc/gdm3/custom.conf || echo "' + password + '" | sudo -S bash -c \'printf "\\n[daemon]\\nWaylandEnable=false\\n" >> /etc/gdm3/custom.conf\'; ' +
+      'fi; echo done',
+      { timeout: 15000, ignoreErrors: true }
+    );
 
     await runGuestStep(
       vmName,
@@ -375,9 +401,19 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     const verifyDisplayClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --display" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
     const verifyClipboardClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --clipboard" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
     const verifyDnDClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --draganddrop" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
+    const verifySessionType = await virtualbox.guestShell(
+      vmName,
+      username,
+      password,
+      'sid=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$(whoami)" \'$3==u {print $1; exit}\'); ' +
+      'if [ -n "$sid" ]; then loginctl show-session "$sid" -p Type --value 2>/dev/null; else echo unknown; fi',
+      { timeout: 15000, ignoreErrors: true }
+    );
     const verifyMount = configureSharedFolder
       ? await virtualbox.guestShell(vmName, username, password, `mount | grep -q "/media/sf_${sharedFolderName}" && echo mounted || echo not-mounted`, { timeout: 15000, ignoreErrors: false })
       : 'skipped';
+    const sessionType = String(verifySessionType || '').trim().toLowerCase() || 'unknown';
+    const sessionX11 = sessionType.includes('x11') || sessionType.includes('xorg') || sessionType === 'unknown';
 
     const checks = {
       userInVboxsf: verifyGroups.includes('vboxsf'),
@@ -385,12 +421,20 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       displayClient: verifyDisplayClient.includes('running'),
       clipboardClient: verifyClipboardClient.includes('running'),
       dragDropClient: verifyDnDClient.includes('running'),
-      sharedMounted: configureSharedFolder ? verifyMount.includes('mounted') : true
+      sharedMounted: configureSharedFolder ? verifyMount.includes('mounted') : true,
+      sessionType,
+      sessionX11
     };
 
-    if (!checks.userInVboxsf || !checks.autostartFile || !checks.displayClient || !checks.clipboardClient || !checks.dragDropClient) {
+    if (!checks.userInVboxsf
+      || !checks.autostartFile
+      || !checks.displayClient
+      || !checks.clipboardClient
+      || !checks.dragDropClient
+      || (configureSharedFolder && !checks.sharedMounted)
+      || !checks.sessionX11) {
       throw new Error(
-        `Guest verification failed: userInVboxsf=${checks.userInVboxsf}, autostartFile=${checks.autostartFile}, displayClient=${checks.displayClient}, clipboardClient=${checks.clipboardClient}, dragDropClient=${checks.dragDropClient}, sharedMounted=${checks.sharedMounted}`
+        `Guest verification failed: userInVboxsf=${checks.userInVboxsf}, autostartFile=${checks.autostartFile}, displayClient=${checks.displayClient}, clipboardClient=${checks.clipboardClient}, dragDropClient=${checks.dragDropClient}, sharedMounted=${checks.sharedMounted}, sessionType=${checks.sessionType}`
       );
     }
 
@@ -415,6 +459,7 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       fullscreenEnabled: true,
       sharedFolderMounted: checks.sharedMounted,
       autostartConfigured: true,
+      sessionType: checks.sessionType,
       checks
     };
 

@@ -17,13 +17,22 @@ contextBridge.exposeInMainWorld('vmInstaller', {
   getDefaults: () => ipcRenderer.invoke('config:getDefaults'),
   getUiPrefs: () => ipcRenderer.invoke('config:getUiPrefs'),
   saveUiPrefs: (prefs) => ipcRenderer.invoke('config:saveUiPrefs', prefs),
+  getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
+  checkForUpdates: () => ipcRenderer.invoke('update:check'),
+  downloadAndInstallUpdate: (payload) => ipcRenderer.invoke('update:downloadAndInstall', payload),
+  getPatchNoteText: (payload) => ipcRenderer.invoke('update:getPatchNote', payload),
   refreshOfficialCatalog: () => ipcRenderer.invoke('catalog:refreshOfficial'),
 
   // ─── System Check ──────────────────────────────────────────────
   checkSystem: (targetPath) => ipcRenderer.invoke('system:check', targetPath),
+  fullSystemScan: () => ipcRenderer.invoke('system:fullScan'),
+  getRealtimeMetrics: () => ipcRenderer.invoke('system:getRealtimeMetrics'),
 
   // ─── VirtualBox Detection ──────────────────────────────────────
   detectVBox: () => ipcRenderer.invoke('vbox:detect'),
+  ensureVBoxInstalled: (options) => ipcRenderer.invoke('vbox:ensureInstalled', options),
+  pauseVBoxDownload: () => ipcRenderer.invoke('vbox:pauseDownload'),
+  cancelVBoxDownload: () => ipcRenderer.invoke('vbox:cancelDownload'),
 
   // ─── File/Folder Dialogs ───────────────────────────────────────
   selectFolder: (title, defaultPath) => ipcRenderer.invoke('dialog:selectFolder', title, defaultPath),
@@ -32,6 +41,7 @@ contextBridge.exposeInMainWorld('vmInstaller', {
 
   // ─── Setup Workflow ────────────────────────────────────────────
   startSetup: (config) => ipcRenderer.invoke('setup:start', config),
+  pauseSetup: () => ipcRenderer.invoke('setup:pause'),
   cancelSetup: () => ipcRenderer.invoke('setup:cancel'),
   getPhases: () => ipcRenderer.invoke('setup:getPhases'),
 
@@ -61,8 +71,16 @@ contextBridge.exposeInMainWorld('vmInstaller', {
   createVMUser: (payload) => ipcRenderer.invoke('vm:users:create', payload),
   updateVMUser: (payload) => ipcRenderer.invoke('vm:users:update', payload),
   setVMAutoLogin: (payload) => ipcRenderer.invoke('vm:users:autoLogin', payload),
+  deleteVMUser: (payload) => ipcRenderer.invoke('vm:users:delete', payload),
   configureGuestIntegration: (vmName, payload) => ipcRenderer.invoke('vm:guest:configure', vmName, payload),
   showVMInExplorer: (name) => ipcRenderer.invoke('vm:showInExplorer', name),
+  resolveVMFromFolder: (folderPath, options) => ipcRenderer.invoke('vm:resolveFromFolder', folderPath, options),
+  scanDownloadedVMs: (rootPath) => ipcRenderer.invoke('vm:scanDownloaded', rootPath),
+  getVMStorageUsage: () => ipcRenderer.invoke('vm:storageUsage'),
+  listSnapshots: (vmName) => ipcRenderer.invoke('vm:snapshots:list', vmName),
+  createSnapshot: (vmName, snapshotName) => ipcRenderer.invoke('vm:snapshots:create', vmName, snapshotName),
+  restoreSnapshot: (vmName, snapshotRef) => ipcRenderer.invoke('vm:snapshots:restore', vmName, snapshotRef),
+  deleteSnapshot: (vmName, snapshotRef) => ipcRenderer.invoke('vm:snapshots:delete', vmName, snapshotRef),
 
   // ─── Event Listeners (progress streaming from main → renderer) ─
   onPhase: (callback) => {
@@ -80,6 +98,9 @@ contextBridge.exposeInMainWorld('vmInstaller', {
   onComplete: (callback) => {
     ipcRenderer.on('setup:complete', (event, data) => callback(data));
   },
+  onVBoxEnsureProgress: (callback) => {
+    ipcRenderer.on('vbox:ensureProgress', (event, data) => callback(data));
+  },
   onPermissionsReport: (callback) => {
     ipcRenderer.on('permissions:showReport', (event) => callback());
   },
@@ -94,6 +115,7 @@ contextBridge.exposeInMainWorld('vmInstaller', {
     ipcRenderer.removeAllListeners('setup:log');
     ipcRenderer.removeAllListeners('setup:error');
     ipcRenderer.removeAllListeners('setup:complete');
+    ipcRenderer.removeAllListeners('vbox:ensureProgress');
     ipcRenderer.removeAllListeners('permissions:showReport');
     ipcRenderer.removeAllListeners('setup:stateCleared');
   }

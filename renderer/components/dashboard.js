@@ -17,13 +17,16 @@ const Dashboard = {
   _liveSyncApp: null,
   _visibilityHandler: null,
   _focusHandler: null,
+  _isLoadingVMs: false,
+  _pendingLoad: null,
+  _modalActive: false,
 
   render(state) {
     return `
       <div class="dashboard">
         <div class="dashboard-header">
           <div class="dashboard-title-group">
-            <h2 class="dashboard-title">Virtual Machines</h2>
+            <h2 class="dashboard-title">Virtual Os</h2>
             <span class="dashboard-subtitle" id="vmCount">Loading...</span>
           </div>
           <div class="dashboard-actions">
@@ -38,7 +41,7 @@ const Dashboard = {
         <div class="vm-grid" id="vmGrid">
           <div class="vm-loading">
             <div class="spinner-ring"></div>
-            <span>Loading virtual machines...</span>
+            <span>Loading virtual OSes...</span>
           </div>
         </div>
       </div>
@@ -66,19 +69,19 @@ const Dashboard = {
     this._liveSyncApp = app;
 
     this._liveSyncTimer = setInterval(() => {
-      if (document.getElementById('navMachines')?.classList.contains('active')) {
+      if (document.getElementById('navMachines')?.classList.contains('active') && !Dashboard._modalActive) {
         Dashboard.loadVMs(this._liveSyncApp, { silent: true });
       }
-    }, 4000);
+    }, 10000);
 
     this._visibilityHandler = () => {
-      if (!document.hidden && document.getElementById('navMachines')?.classList.contains('active')) {
+      if (!document.hidden && document.getElementById('navMachines')?.classList.contains('active') && !Dashboard._modalActive) {
         Dashboard.loadVMs(this._liveSyncApp, { silent: true });
       }
     };
 
     this._focusHandler = () => {
-      if (document.getElementById('navMachines')?.classList.contains('active')) {
+      if (document.getElementById('navMachines')?.classList.contains('active') && !Dashboard._modalActive) {
         Dashboard.loadVMs(this._liveSyncApp, { silent: true });
       }
     };
@@ -108,89 +111,191 @@ const Dashboard = {
     if (!alertEl) return;
     try {
       const report = await window.vmInstaller.checkPermissions();
-      const driverIssue = report.checks.find(c => c.name === 'VBox Kernel Driver' && c.status === 'required');
-      const adminIssue = !report.isAdmin;
+      const checks = Array.isArray(report?.checks) ? report.checks : [];
+      const driverIssue = checks.find(c => c.name === 'VBox Kernel Driver' && c.status === 'required');
+      const adminIssue = !report?.isAdmin;
 
       if (!driverIssue && !adminIssue) return;
 
       let desc = [];
       if (adminIssue) desc.push('Not running as administrator');
       if (driverIssue) desc.push('VBoxSup kernel driver is stopped');
-
-      const dismissed = localStorage.getItem('vmManager.dismissAdminWarning') === '1';
-      if (dismissed && adminIssue && !driverIssue) return;
+      const safeDesc = Dashboard._escapeHtml(desc.join(' / '));
 
       alertEl.innerHTML = `
         <div class="dash-alert dash-alert-warn">
           <div class="dash-alert-icon">${Icons.warning}</div>
           <div class="dash-alert-content">
             <div class="dash-alert-title">Administrator Access Recommended</div>
-            <div class="dash-alert-desc">${desc.join(' / ')}. Some VM operations may fail without elevated access.</div>
+            <div class="dash-alert-desc">${safeDesc}. Some V Os operations may fail without elevated access. Use the floating <strong>Continue with Admin Privilege</strong> action for full access.</div>
           </div>
           <div class="dash-alert-actions">
             ${driverIssue ? `<button class="btn btn-sm btn-primary btn-icon-text" id="btnFixDriver">${Icons.sized(Icons.settings, 14)} Fix Driver</button>` : ''}
-            ${adminIssue ? `<button class="btn btn-sm btn-secondary btn-icon-text" id="btnElevateAdmin">${Icons.sized(Icons.shield, 14)} Run as Admin</button>` : ''}
             <button class="btn btn-sm btn-ghost" id="btnDismissAdminWarn">Dismiss</button>
           </div>
         </div>
       `;
       alertEl.style.display = 'block';
 
+      if (adminIssue) {
+        window.vmxAdminAccess?.refresh?.();
+      }
+
       document.getElementById('btnFixDriver')?.addEventListener('click', async () => {
         const btn = document.getElementById('btnFixDriver');
         btn.innerHTML = `${Icons.sized(Icons.spinner, 14)} Fixing...`; btn.disabled = true;
         const r = await window.vmInstaller.fixDriver();
         if (r.success) {
-          alertEl.innerHTML = `<div class="dash-alert dash-alert-ok"><div class="dash-alert-icon">${Icons.checkCircle}</div><div class="dash-alert-content"><div class="dash-alert-title">Driver Fixed</div><div class="dash-alert-desc">${r.message}</div></div></div>`;
+          const safeMessage = Dashboard._escapeHtml(r.message);
+          alertEl.innerHTML = `<div class="dash-alert dash-alert-ok"><div class="dash-alert-icon">${Icons.checkCircle}</div><div class="dash-alert-content"><div class="dash-alert-title">Driver Fixed</div><div class="dash-alert-desc">${safeMessage}</div></div></div>`;
           setTimeout(() => { alertEl.style.display = 'none'; }, 3000);
         } else { btn.innerHTML = `${Icons.sized(Icons.xCircle, 14)} Failed`; }
       });
-      document.getElementById('btnElevateAdmin')?.addEventListener('click', () => window.vmInstaller.restartAsAdmin());
       document.getElementById('btnDismissAdminWarn')?.addEventListener('click', () => {
-        localStorage.setItem('vmManager.dismissAdminWarning', '1');
         alertEl.style.display = 'none';
       });
     } catch (err) { console.warn('Perm check failed:', err); }
   },
 
   async loadVMs(app, options = {}) {
+    if (this._isLoadingVMs) {
+      this._pendingLoad = { app, options };
+      return;
+    }
+
+    this._isLoadingVMs = true;
+
     const grid = document.getElementById('vmGrid');
     const countEl = document.getElementById('vmCount');
-    if (!grid) return;
+    if (!grid) {
+      this._isLoadingVMs = false;
+      return;
+    }
 
     const silent = !!options.silent;
 
+    if (silent && this._modalActive) {
+      this._isLoadingVMs = false;
+      return;
+    }
+
     if (!silent) {
-      grid.innerHTML = `<div class="vm-loading"><div class="spinner-ring"></div><span>Loading virtual machines...</span></div>`;
+      grid.innerHTML = `<div class="vm-loading"><div class="spinner-ring"></div><span>Loading virtual OSes...</span></div>`;
     }
 
-    const result = await window.vmInstaller.listVMs();
+    try {
+      const result = await window.vmInstaller.listVMs();
 
-    if (!result.success) {
-      if (!silent) {
-        grid.innerHTML = `<div class="vm-empty"><div class="vm-empty-icon">${Icons.sized(Icons.warning, 48)}</div><div class="vm-empty-title">Could not load VMs</div><div class="vm-empty-desc">${result.error || 'VirtualBox may not be installed'}</div></div>`;
+      if (!result.success) {
+        if (!silent) {
+          const safeError = Dashboard._escapeHtml(result.error || 'VirtualBox may not be installed');
+          grid.innerHTML = `<div class="vm-empty"><div class="vm-empty-icon">${Icons.sized(Icons.warning, 48)}</div><div class="vm-empty-title">Could not load V Os</div><div class="vm-empty-desc">${safeError}</div></div>`;
+        }
+        if (countEl) countEl.textContent = 'Error';
+        return;
       }
-      if (countEl) countEl.textContent = 'Error';
-      return;
+
+      const vms = result.vms;
+      const searchValue = (document.querySelector('.search-input')?.value || '').trim().toLowerCase();
+      const filtered = searchValue
+        ? vms.filter((vm) => (`${vm.name} ${vm.os || ''}`).toLowerCase().includes(searchValue))
+        : vms;
+
+      countEl.textContent = `${filtered.length} V Os`;
+
+      if (filtered.length === 0) {
+        if (!searchValue && typeof app?.showVmBootstrap === 'function') {
+          app.showVmBootstrap('No V Os found. Set up or import one to continue.');
+          return;
+        }
+
+        const emptyTitle = searchValue ? 'No matching V Os' : 'No V Os';
+        const emptyDesc = searchValue ? 'Try a different search term.' : 'Create your first V Os from the top-right New V Os button.';
+        grid.innerHTML = `<div class="vm-empty"><div class="vm-empty-icon">${Icons.sized(Icons.vm, 48)}</div><div class="vm-empty-title">${emptyTitle}</div><div class="vm-empty-desc">${emptyDesc}</div></div>`;
+        return;
+      }
+
+      grid.innerHTML = filtered.map((vm, index) => Dashboard._renderVMCard(vm, index)).join('');
+      Dashboard._wireCardEvents(filtered, app);
+    } finally {
+      this._isLoadingVMs = false;
+      if (this._pendingLoad) {
+        const next = this._pendingLoad;
+        this._pendingLoad = null;
+        setTimeout(() => {
+          Dashboard.loadVMs(next.app, next.options);
+        }, 0);
+      }
     }
+  },
 
-    const vms = result.vms;
-    const searchValue = (document.querySelector('.search-input')?.value || '').trim().toLowerCase();
-    const filtered = searchValue
-      ? vms.filter((vm) => (`${vm.name} ${vm.os || ''}`).toLowerCase().includes(searchValue))
-      : vms;
+  async _refreshAfterMutation(app) {
+    await Dashboard.loadVMs(app, { silent: true });
+  },
 
-    countEl.textContent = `${filtered.length} machine${filtered.length !== 1 ? 's' : ''}`;
+  _getPowerLabel(vmState) {
+    const state = String(vmState || '').toLowerCase();
+    return (state === 'running' || state === 'paused') ? 'Running...' : 'Start';
+  },
 
-    if (filtered.length === 0) {
-      const emptyTitle = searchValue ? 'No matching machines' : 'No Virtual Machines';
-      const emptyDesc = searchValue ? 'Try a different search term.' : 'Create your first VM from the top-right New Machine button.';
-      grid.innerHTML = `<div class="vm-empty"><div class="vm-empty-icon">${Icons.sized(Icons.vm, 48)}</div><div class="vm-empty-title">${emptyTitle}</div><div class="vm-empty-desc">${emptyDesc}</div></div>`;
-      return;
+  _escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  },
+
+  _readUiPrefs() {
+    try {
+      const raw = localStorage.getItem('vmManager.uiPrefs');
+      const parsed = raw ? JSON.parse(raw) : {};
+      return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch {
+      return {};
     }
+  },
 
-    grid.innerHTML = filtered.map(vm => Dashboard._renderVMCard(vm)).join('');
-    Dashboard._wireCardEvents(filtered, app);
+  _shouldNotify(type = 'info') {
+    const prefs = Dashboard._readUiPrefs();
+    const level = String(prefs.notificationLevel || 'important').toLowerCase();
+    const normalizedType = String(type || 'info').toLowerCase();
+    if (normalizedType === 'error') return true;
+    if (level === 'all') return true;
+    if (level === 'minimal') return false;
+    return normalizedType !== 'info';
+  },
+
+  _getVmDomId(vm, index = 0) {
+    const source = String(vm?.uuid || vm?.name || `vm-${index}`);
+    const sanitized = source.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16);
+    return sanitized || `vm-${index}`;
+  },
+
+  async _ensureAdminForTask(taskName = 'this work') {
+    try {
+      const isAdmin = (typeof window.vmxAdminAccess?.refresh === 'function')
+        ? await window.vmxAdminAccess.refresh(true)
+        : await window.vmInstaller.isAdmin();
+      if (isAdmin) return true;
+
+      const prefs = Dashboard._readUiPrefs();
+      const policy = String(prefs.adminModePolicy || 'auto').toLowerCase();
+      if (policy === 'auto' && window.vmInstaller?.restartAsAdmin) {
+        window.vmxAdminAccess?.focus?.(`"${taskName}" requires administrator mode.`);
+        Dashboard._notify(`"${taskName}" requires administrator mode. Restarting with admin privilege...`, 'info');
+        const restarted = await window.vmInstaller.restartAsAdmin();
+        if (restarted?.success) return false;
+      }
+
+      window.vmxAdminAccess?.focus?.(`"${taskName}" requires administrator mode.`);
+      Dashboard._notify(`"${taskName}" requires administrator mode. Use Continue with Admin Privilege.`, 'info');
+      return false;
+    } catch (err) {
+      Dashboard._notify(err?.message || 'Could not verify administrator mode.', 'error');
+      return false;
+    }
   },
 
   _wireCardEvents(vms, app) {
@@ -203,34 +308,40 @@ const Dashboard = {
       });
     }
 
-    vms.forEach(vm => {
-      const id = vm.uuid.substring(0, 8);
+    vms.forEach((vm, index) => {
+      const id = Dashboard._getVmDomId(vm, index);
 
       document.getElementById(`vm-power-${id}`)?.addEventListener('click', async function() {
         if (this.disabled) return;
+        const adminReady = await Dashboard._ensureAdminForTask('V Os power control');
+        if (!adminReady) return;
         this.disabled = true;
         this.classList.add('is-loading');
 
         const powerLabel = this.querySelector('.vm-power-label');
-        if (powerLabel) powerLabel.textContent = 'Switching...';
-
         const shouldStart = vm.state !== 'running' && vm.state !== 'paused';
+        if (powerLabel) powerLabel.textContent = shouldStart ? 'Starting...' : 'Stopping...';
+
         const result = shouldStart
           ? await window.vmInstaller.startVM(vm.name)
           : await window.vmInstaller.stopVM(vm.name);
 
         if (!result?.success) {
-          Dashboard._notify(result?.error || `Failed to ${shouldStart ? 'start' : 'stop'} VM`, 'error');
+          Dashboard._notify(result?.error || `Failed to ${shouldStart ? 'start' : 'stop'} V Os`, 'error');
           this.disabled = false;
           this.classList.remove('is-loading');
-          if (powerLabel) powerLabel.textContent = shouldStart ? 'Stopped' : 'Running';
+          if (powerLabel) powerLabel.textContent = shouldStart ? 'Start' : 'Running...';
           return;
         }
 
         this.disabled = false;
         this.classList.remove('is-loading');
-        if (powerLabel) powerLabel.textContent = shouldStart ? 'Running' : 'Stopped';
-        Dashboard._notify(`${shouldStart ? 'Start' : 'Stop'} command sent. Click Refresh to update machine status.`, 'info');
+        if (powerLabel) powerLabel.textContent = shouldStart ? 'Running...' : 'Stopped';
+        if (!shouldStart) {
+          await new Promise((resolve) => setTimeout(resolve, 700));
+        }
+        await Dashboard._refreshAfterMutation(app);
+        Dashboard._notify(`${shouldStart ? 'Start' : 'Stop'} command completed.`, 'success');
       });
 
       document.getElementById(`vm-edit-${id}`)?.addEventListener('click', () => {
@@ -238,9 +349,19 @@ const Dashboard = {
       });
 
       document.getElementById(`vm-settings-${id}`)?.addEventListener('click', async () => {
+        if (app && typeof app.showSettings === 'function') {
+          app.showSettings({
+            scope: 'vos',
+            section: vm.state === 'running' ? 'integration' : 'compute',
+            vmName: vm.name,
+            lockScope: true
+          });
+          return;
+        }
+
         const result = await window.vmInstaller.getVMDetails(vm.name);
         if (!result.success) {
-          Dashboard._notify(result.error || 'Could not load VM settings', 'error');
+          Dashboard._notify(result.error || 'Could not load V Os settings', 'error');
           return;
         }
         Dashboard._openSettingsModal(result.vm, app);
@@ -258,6 +379,41 @@ const Dashboard = {
       document.getElementById(`vm-menu-integrate-${id}`)?.addEventListener('click', async () => {
         document.getElementById(`vm-menu-${id}`)?.classList.remove('open');
         await Dashboard._openGuestIntegrationModal(vm, app);
+      });
+
+      document.getElementById(`vm-repair-${id}`)?.addEventListener('click', async function () {
+        if (this.disabled) return;
+        this.disabled = true;
+        const originalText = this.textContent;
+        this.textContent = 'Repairing...';
+        try {
+          await Dashboard._runOneClickRepair(vm, app);
+        } finally {
+          this.disabled = false;
+          this.textContent = originalText;
+        }
+      });
+
+      document.getElementById(`vm-integrate-${id}`)?.addEventListener('click', async () => {
+        await Dashboard._openGuestIntegrationModal(vm, app);
+      });
+
+      document.getElementById(`vm-toggle-fit-${id}`)?.addEventListener('click', async function () {
+        if (this.disabled) return;
+        const adminReady = await Dashboard._ensureAdminForTask('update display fit');
+        if (!adminReady) return;
+
+        this.disabled = true;
+        const enableFit = vm.fullscreenEnabled === false;
+        const result = await window.vmInstaller.editVM(vm.name, { fullscreenEnabled: enableFit });
+        if (!result?.success) {
+          Dashboard._notify(result?.error || 'Failed to update display fit.', 'error');
+          this.disabled = false;
+          return;
+        }
+
+        Dashboard._notify(`Guest display fit ${enableFit ? 'enabled' : 'disabled'}.`, 'success');
+        await Dashboard._refreshAfterMutation(app);
       });
 
       const menuBtn = document.getElementById(`vm-advanced-btn-${id}`);
@@ -286,15 +442,18 @@ const Dashboard = {
         Dashboard._openDeleteConfirm(vm, app);
       });
 
-      document.getElementById(`vm-menu-folder-${id}`)?.addEventListener('click', () => {
+      document.getElementById(`vm-menu-folder-${id}`)?.addEventListener('click', async () => {
         menuEl?.classList.remove('open');
-        window.vmInstaller.showVMInExplorer(vm.name);
+        const result = await window.vmInstaller.showVMInExplorer({ vmName: vm.name, vmDir: vm.vmDir || '' });
+        if (!result?.success) {
+          Dashboard._notify(result?.error || 'Could not open V Os folder.', 'error');
+        }
       });
     });
   },
 
-  _renderVMCard(vm) {
-    const id = vm.uuid.substring(0, 8);
+  _renderVMCard(vm, index = 0) {
+    const id = Dashboard._getVmDomId(vm, index);
     const osLower = (vm.os || '').toLowerCase();
 
     let osClass = 'os-generic';
@@ -313,12 +472,23 @@ const Dashboard = {
     const stateLabel = isRunning ? 'Running' : isPaused ? 'Paused' : 'Powered Off';
     const stateClass = isRunning ? 'state-running' : isPaused ? 'state-paused' : 'state-stopped';
     const osLabel = (vm.os || 'Unknown').replace(/_/g, ' ');
+    const safeVmName = Dashboard._escapeHtml(vm.name);
+    const safeOsLabel = Dashboard._escapeHtml(osLabel);
+    const safeNetwork = Dashboard._escapeHtml(vm.network);
+    const ramNumeric = Number(vm.ram);
+    const cpuNumeric = Number(vm.cpus);
+    const vramNumeric = Number(vm.vram);
+    const ramDisplay = Number.isFinite(ramNumeric) ? String(ramNumeric) : Dashboard._escapeHtml(vm.ram || '--');
+    const cpuDisplay = Number.isFinite(cpuNumeric) ? String(cpuNumeric) : Dashboard._escapeHtml(vm.cpus || '--');
+    const vramDisplay = Number.isFinite(vramNumeric) ? String(vramNumeric) : Dashboard._escapeHtml(vm.vram || '--');
+    const cpuPlural = Number.isFinite(cpuNumeric) && cpuNumeric > 1 ? 's' : '';
     const powerClass = isRunning ? 'running' : isPaused ? 'paused' : 'stopped';
-    const powerLabel = (isRunning || isPaused) ? 'Running' : 'Stopped';
+    const powerLabel = Dashboard._getPowerLabel(vm.state);
 
     const featureBadges = [
-      { label: 'Clipboard', on: (vm.clipboard || '').toLowerCase() !== 'disabled' },
-      { label: 'Drag&Drop', on: (vm.draganddrop || '').toLowerCase() !== 'disabled' },
+      { label: 'Clipboard', on: (vm.clipboardMode || vm.clipboard || '').toLowerCase() !== 'disabled' },
+      { label: 'Drag&Drop', on: (vm.dragAndDrop || vm.draganddrop || '').toLowerCase() !== 'disabled' },
+      { label: 'Guest Display', on: vm.fullscreenEnabled !== false },
       { label: 'Audio', on: !!vm.audioEnabled },
       { label: 'USB', on: !!vm.usbEnabled },
       { label: '3D', on: !!vm.accelerate3d },
@@ -327,12 +497,79 @@ const Dashboard = {
     ];
 
     const checks = vm.integrationChecks || {};
+    const sharedFolders = Array.isArray(vm.sharedFolders) ? vm.sharedFolders : [];
+    const primarySharedFolderPath = String(vm.primarySharedFolderPath || sharedFolders[0]?.hostPath || '').trim();
+    const safePrimarySharedPath = Dashboard._escapeHtml(primarySharedFolderPath || 'Not configured');
+    const sharedFolderSummary = sharedFolders.length > 0
+      ? sharedFolders.map((sf) => `${sf.name || 'shared'}: ${sf.hostPath || 'Unknown path'}`).join(' | ')
+      : 'No shared folder mapped';
+    const safeSharedFolderSummary = Dashboard._escapeHtml(sharedFolderSummary);
+
+    const normalizeMode = (rawValue) => {
+      const value = String(rawValue || 'disabled').toLowerCase();
+      return ['disabled', 'hosttoguest', 'guesttohost', 'bidirectional'].includes(value) ? value : 'disabled';
+    };
+    const modeLabel = (mode) => {
+      if (mode === 'hosttoguest') return 'Host->Guest';
+      if (mode === 'guesttohost') return 'Guest->Host';
+      if (mode === 'bidirectional') return 'Bidirectional';
+      return 'Off';
+    };
+    const runtimeCheckAvailable = isRunning;
+    const guestAdditionsReady = !!checks.guestAdditions;
+    const buildStatus = ({ configured, runtimeReady, onText, offText = 'Off', issueText = 'Needs setup' }) => {
+      if (!configured) {
+        return { state: 'off', value: offText, icon: Icons.sized(Icons.info, 14) };
+      }
+      if (runtimeReady) {
+        return { state: 'ok', value: onText, icon: Icons.sized(Icons.checkCircle, 14) };
+      }
+      if (!runtimeCheckAvailable) {
+        return { state: 'ok', value: onText, icon: Icons.sized(Icons.checkCircle, 14) };
+      }
+      if (!guestAdditionsReady) {
+        return { state: 'pending', value: `${onText} (waiting GA)`, icon: Icons.sized(Icons.warning, 14) };
+      }
+      return { state: 'missing', value: issueText, icon: Icons.sized(Icons.xCircle, 14) };
+    };
+    const buildModeStatus = (mode, runtimeReady, issueText = 'Needs setup') => {
+      const configured = mode !== 'disabled';
+      const label = modeLabel(mode);
+      if (!configured) {
+        return { state: 'off', value: label, icon: Icons.sized(Icons.info, 14) };
+      }
+      if (runtimeReady) {
+        return { state: 'ok', value: label, icon: Icons.sized(Icons.checkCircle, 14) };
+      }
+      if (!runtimeCheckAvailable) {
+        return { state: 'ok', value: label, icon: Icons.sized(Icons.checkCircle, 14) };
+      }
+      if (!guestAdditionsReady) {
+        return { state: 'pending', value: `${label} (waiting GA)`, icon: Icons.sized(Icons.warning, 14) };
+      }
+      return { state: 'missing', value: issueText, icon: Icons.sized(Icons.xCircle, 14) };
+    };
+
+    const clipboardMode = normalizeMode(vm.clipboardMode || vm.clipboard);
+    const dragDropMode = normalizeMode(vm.dragAndDrop || vm.draganddrop);
+    const clipboardRuntimeReady = clipboardMode !== 'disabled'
+      && (clipboardMode === 'bidirectional' ? !!checks.clipboard : guestAdditionsReady);
+    const dragDropRuntimeReady = dragDropMode !== 'disabled'
+      && (dragDropMode === 'bidirectional' ? !!checks.dragDrop : guestAdditionsReady);
+    const sharedConfigured = sharedFolders.length > 0 || primarySharedFolderPath.length > 0;
+
+    const guestAdditionsStatus = guestAdditionsReady
+      ? { state: 'ok', value: 'Ready', icon: Icons.sized(Icons.checkCircle, 14) }
+      : runtimeCheckAvailable
+      ? { state: 'missing', value: 'Install GA', icon: Icons.sized(Icons.xCircle, 14) }
+      : { state: 'ok', value: 'Check after start', icon: Icons.sized(Icons.checkCircle, 14) };
     const integrationRows = [
-      { label: 'Guest Additions', ok: !!checks.guestAdditions },
-      { label: 'Fullscreen Ready', ok: !!checks.fullscreenReady },
-      { label: 'Clipboard Sync', ok: !!checks.clipboard },
-      { label: 'Drag & Drop', ok: !!checks.dragDrop },
-      { label: 'Shared Folder', ok: !!checks.sharedFolder }
+      { label: 'Guest Additions', ...guestAdditionsStatus },
+      { label: 'Guest Display Fit', ...buildStatus({ configured: vm.fullscreenEnabled !== false, runtimeReady: vm.fullscreenEnabled !== false, onText: 'On' }) },
+      { label: 'Display Integration', ...buildStatus({ configured: vm.fullscreenEnabled !== false, runtimeReady: !!checks.fullscreenReady, onText: 'Ready', issueText: 'Needs guest setup' }) },
+      { label: 'Clipboard Sync', ...buildModeStatus(clipboardMode, clipboardRuntimeReady, 'Needs guest session') },
+      { label: 'Drag & Drop', ...buildModeStatus(dragDropMode, dragDropRuntimeReady, 'Needs guest session') },
+      { label: 'Shared Folder', ...buildStatus({ configured: sharedConfigured, runtimeReady: !!checks.sharedFolder, onText: 'Mapped', offText: 'Not mapped', issueText: 'Mount required' }) }
     ];
 
     return `
@@ -340,8 +577,8 @@ const Dashboard = {
         <div class="vm-card-header">
           <div class="vm-card-icon">${Icons.sized(dsOsIcon, 38)}</div>
           <div class="vm-card-title-group">
-            <div class="vm-card-name">${vm.name}</div>
-            <div class="vm-card-os">${osLabel}</div>
+            <div class="vm-card-name">${safeVmName}</div>
+            <div class="vm-card-os">${safeOsLabel}</div>
           </div>
           <div class="vm-card-state ${stateClass}">
             <span class="state-dot ${stateClass}"></span>
@@ -350,10 +587,11 @@ const Dashboard = {
         </div>
 
         <div class="vm-card-specs">
-          <div class="vm-spec" title="Memory">${Icons.sized(Icons.memory, 14)} <span><strong>RAM</strong> ${vm.ram} MB</span></div>
-          <div class="vm-spec" title="Processor">${Icons.sized(Icons.cpu, 14)} <span><strong>CPU</strong> ${vm.cpus} Core${vm.cpus > 1 ? 's' : ''}</span></div>
-          <div class="vm-spec" title="Video Memory">${Icons.sized(Icons.monitor, 14)} <span><strong>VRAM</strong> ${vm.vram} MB</span></div>
-          <div class="vm-spec" title="Network Mode">${Icons.sized(Icons.globe, 14)} <span><strong>NET</strong> ${vm.network}</span></div>
+          <div class="vm-spec" title="Memory">${Icons.sized(Icons.memory, 14)} <span><strong>RAM</strong> ${ramDisplay} MB</span></div>
+          <div class="vm-spec" title="Processor">${Icons.sized(Icons.cpu, 14)} <span><strong>CPU</strong> ${cpuDisplay} Core${cpuPlural}</span></div>
+          <div class="vm-spec" title="Video Memory">${Icons.sized(Icons.monitor, 14)} <span><strong>VRAM</strong> ${vramDisplay} MB</span></div>
+          <div class="vm-spec" title="Network Mode">${Icons.sized(Icons.globe, 14)} <span><strong>NET</strong> ${safeNetwork}</span></div>
+          <div class="vm-spec" title="Primary shared folder path">${Icons.sized(Icons.folder, 14)} <span><strong>SHARE</strong> ${safePrimarySharedPath}</span></div>
         </div>
 
           <div class="vm-feature-badges">
@@ -361,14 +599,27 @@ const Dashboard = {
         </div>
 
         <div class="vm-integration-report">
-          <div class="vm-integration-title">Integration Status</div>
+          <div class="vm-integration-head">
+            <div class="vm-integration-title">Integration Status</div>
+            <div class="vm-integration-controls">
+              <button class="btn btn-sm btn-primary" id="vm-repair-${id}">Fix All</button>
+              <button class="btn btn-sm btn-secondary" id="vm-integrate-${id}">Manage</button>
+              <button class="btn btn-sm ${vm.fullscreenEnabled !== false ? 'btn-primary' : 'btn-secondary'}" id="vm-toggle-fit-${id}">
+                Display Fit ${vm.fullscreenEnabled !== false ? 'ON' : 'OFF'}
+              </button>
+            </div>
+          </div>
           <div class="vm-integration-grid">
             ${integrationRows.map(item => `
-              <div class="vm-integration-item ${item.ok ? 'ok' : 'missing'}">
-                ${item.ok ? Icons.sized(Icons.checkCircle, 14) : Icons.sized(Icons.xCircle, 14)}
-                <span>${item.label}</span>
+              <div class="vm-integration-item ${item.state}">
+                ${item.icon}
+                <span class="vm-integration-label">${item.label}</span>
+                <span class="vm-integration-value">${item.value}</span>
               </div>
             `).join('')}
+          </div>
+          <div class="vm-shared-summary" title="${safeSharedFolderSummary}">
+            <strong>Shared Folder:</strong> ${safeSharedFolderSummary}
           </div>
         </div>
 
@@ -384,11 +635,11 @@ const Dashboard = {
           </div>
 
           <div class="vm-actions-secondary">
-            <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-edit-${id}" title="Rename VM">
+            <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-edit-${id}" title="Rename V Os">
               ${Icons.sized(Icons.edit, 14)} Edit
             </button>
-            <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-settings-${id}" title="Edit VM settings">
-              ${Icons.sized(Icons.settings, 14)} Settings
+            <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-settings-${id}" title="Edit V Os settings">
+              ${Icons.sized(Icons.settings, 14)} V Os Settings
             </button>
             <button class="btn btn-sm btn-secondary btn-icon-text" id="vm-bootfix-${id}" title="Diagnose and fix boot issues">
               ${Icons.sized(Icons.wrench, 14)} Boot Fix
@@ -413,31 +664,117 @@ const Dashboard = {
     `;
   },
 
+  async _runOneClickRepair(vm, app) {
+    const adminReady = await Dashboard._ensureAdminForTask('repair guest integration');
+    if (!adminReady) return;
+
+    let guestUser = 'guest';
+    let guestPass = 'guest';
+    try {
+      const prefsResult = await window.vmInstaller.getUiPrefs();
+      if (prefsResult?.success && prefsResult.prefs) {
+        guestUser = String(prefsResult.prefs.guestUsername || prefsResult.prefs.username || guestUser).trim() || guestUser;
+        guestPass = String(prefsResult.prefs.guestPassword ?? prefsResult.prefs.password ?? guestPass);
+      }
+    } catch {}
+
+    const sharedFolderPath = String(vm?.primarySharedFolderPath || vm?.sharedFolders?.[0]?.hostPath || '').trim();
+    const clipboardMode = String(vm?.clipboardMode || 'bidirectional').toLowerCase();
+    const dragAndDrop = String(vm?.dragAndDrop || 'bidirectional').toLowerCase();
+
+    Dashboard._notify(`Repair started for ${vm.name}.`, 'info');
+    let result;
+    try {
+      result = await window.vmInstaller.configureGuestIntegration(vm.name, {
+        guestUser,
+        guestPass,
+        sharedFolderPath,
+        sharedFolderName: 'shared',
+        enableSharedFolder: true,
+        autoStartVm: true,
+        startFullscreen: vm.fullscreenEnabled !== false,
+        accelerate3d: !!vm.accelerate3d,
+        quickRepair: true,
+        clipboardMode,
+        dragAndDrop
+      });
+    } catch (err) {
+      Dashboard._notify(err?.message || 'Repair failed.', 'error');
+      return;
+    }
+
+    if (!result?.success) {
+      Dashboard._notify(result?.error || 'Repair failed.', 'error');
+      if (result?.error && /admin|credential|login|auth|password|ready|running/i.test(result.error)) {
+        await Dashboard._openGuestIntegrationModal(vm, app);
+      }
+      return;
+    }
+
+    if (result.pendingInGuest) {
+      Dashboard._notify(result.message || 'Host-side repair applied. Start the V Os to finish in-guest setup.', 'info');
+      await Dashboard._refreshAfterMutation(app);
+      return;
+    }
+
+    const notes = Array.isArray(result.notes) ? result.notes : [];
+    if (!sharedFolderPath) {
+      notes.push('No shared folder host path is saved for this V Os.');
+    }
+    const hardFailures = notes.filter((n) => /failed|error|timeout|unable|not running|not installed/i.test(String(n || '')));
+    if (hardFailures.length) {
+      Dashboard._notify(`Repair completed with warnings: ${hardFailures[0]}`, 'info');
+    } else if (!sharedFolderPath) {
+      Dashboard._notify('Core integration repaired. Set a shared folder path in Manage to restore shared folders.', 'info');
+    } else {
+      Dashboard._notify('All guest integration settings were repaired successfully.', 'success');
+    }
+
+    await Dashboard._refreshAfterMutation(app);
+  },
+
   async _openGuestIntegrationModal(vm, app) {
+    let defaultAdminUser = 'guest';
+    let defaultAdminPass = 'guest';
+    try {
+      const prefsResult = await window.vmInstaller.getUiPrefs();
+      if (prefsResult?.success && prefsResult.prefs) {
+        defaultAdminUser = String(prefsResult.prefs.guestUsername || prefsResult.prefs.username || defaultAdminUser);
+        defaultAdminPass = String(prefsResult.prefs.guestPassword ?? prefsResult.prefs.password ?? defaultAdminPass);
+      }
+    } catch {}
+
+    const safeDefaultUser = Dashboard._escapeHtml(defaultAdminUser);
+    const safeDefaultPass = Dashboard._escapeHtml(defaultAdminPass);
+    const defaultSharedPath = String(vm?.primarySharedFolderPath || vm?.sharedFolders?.[0]?.hostPath || '').trim();
+    const safeDefaultSharedPath = Dashboard._escapeHtml(defaultSharedPath);
+
     const { close, modal } = this._openModal({
       title: `Guest Setup — ${vm.name}`,
       body: `
-        <div class="vm-modal-note">Automatically configure fullscreen, clipboard, drag & drop, and shared folder inside the guest OS.</div>
+        <div class="vm-modal-note">Use this to configure Guest Additions, display integration, clipboard, drag & drop, and shared folders inside the guest OS.</div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Guest Username</label>
-            <input class="form-input" id="giUser" value="user" />
+            <label class="form-label">OS Admin Username</label>
+            <input class="form-input" id="giUser" value="${safeDefaultUser}" />
           </div>
           <div class="form-group">
-            <label class="form-label">Guest Password</label>
-            <input class="form-input" id="giPass" type="password" value="password" />
+            <label class="form-label">OS Admin Password</label>
+            <input class="form-input" id="giPass" type="password" value="${safeDefaultPass}" />
           </div>
         </div>
-        <div class="form-group">
-          <label class="form-label">Shared Folder Host Path (optional)</label>
-          <div style="display:flex; gap:8px;">
-            <input class="form-input" id="giSharedPath" placeholder="C:\\Users\\<you>\\Documents" />
-            <button class="btn" id="giBrowsePath">Browse</button>
+          <div class="form-group">
+            <label class="form-label">Shared Folder Host Path (optional)</label>
+            <div style="display:flex; gap:8px;">
+              <input class="form-input" id="giSharedPath" value="${safeDefaultSharedPath}" placeholder="C:\\Users\\<you>\\Documents" />
+              <button class="btn" id="giBrowsePath">Browse</button>
+            </div>
           </div>
-        </div>
         <div class="form-row">
           <label><input type="checkbox" id="giEnableShare" checked> Configure shared folder integration</label>
-          <label><input type="checkbox" id="giAutoStart" checked> Auto-start VM if needed</label>
+          <label><input type="checkbox" id="giAutoStart"> Auto-start V Os if needed</label>
+          <label><input type="checkbox" id="giFullscreen" ${vm.fullscreenEnabled !== false ? 'checked' : ''}> Enable Guest Display Fit</label>
+          <label><input type="checkbox" id="gi3dAcceleration" ${vm.accelerate3d ? 'checked' : ''}> Enable 3D acceleration</label>
         </div>
         <div class="vm-inline-message" id="giMsg">Ready to configure guest integration.</div>
       `,
@@ -458,6 +795,9 @@ const Dashboard = {
     });
 
     modal.querySelector('#giRun')?.addEventListener('click', async () => {
+      const adminReady = await Dashboard._ensureAdminForTask('guest integration setup');
+      if (!adminReady) return;
+
       const runBtn = modal.querySelector('#giRun');
       const msg = modal.querySelector('#giMsg');
       runBtn.disabled = true;
@@ -466,15 +806,29 @@ const Dashboard = {
       msg.className = 'vm-inline-message';
 
       const payload = {
-        guestUser: modal.querySelector('#giUser')?.value?.trim() || 'user',
-        guestPass: modal.querySelector('#giPass')?.value ?? 'password',
+        guestUser: modal.querySelector('#giUser')?.value?.trim() || 'guest',
+        guestPass: modal.querySelector('#giPass')?.value ?? 'guest',
         sharedFolderPath: modal.querySelector('#giSharedPath')?.value?.trim() || '',
         sharedFolderName: 'shared',
         enableSharedFolder: !!modal.querySelector('#giEnableShare')?.checked,
-        autoStartVm: !!modal.querySelector('#giAutoStart')?.checked
+        autoStartVm: !!modal.querySelector('#giAutoStart')?.checked,
+        startFullscreen: !!modal.querySelector('#giFullscreen')?.checked,
+        accelerate3d: !!modal.querySelector('#gi3dAcceleration')?.checked
       };
 
       const result = await window.vmInstaller.configureGuestIntegration(vm.name, payload);
+      if (result?.pendingInGuest) {
+        const extra = Array.isArray(result?.notes) && result.notes.length > 0
+          ? ` ${result.notes.join(' | ')}`
+          : '';
+        msg.textContent = `${result.message || 'Host-side integration was applied. Finish guest setup after login.'}${extra}`;
+        msg.className = 'vm-inline-message';
+        runBtn.disabled = false;
+        runBtn.textContent = 'Apply Guest Setup';
+        Dashboard._notify('Host-side integration applied. Finish in-guest setup after V Os login.', 'info');
+        return;
+      }
+
       if (!result?.success) {
         const extra = [];
         if (result?.checks) {
@@ -497,25 +851,26 @@ const Dashboard = {
       msg.className = 'vm-inline-message success';
       this._notify('Guest setup completed successfully', 'success');
       close();
-      this._notify('Click Refresh to reload machine status.', 'info');
+      await Dashboard._refreshAfterMutation(app);
     });
   },
 
   _openCloneModal(vm, app) {
     const suggestedName = `${vm.name} Clone`;
+    const safeSuggestedName = Dashboard._escapeHtml(suggestedName);
     const { close, modal } = this._openModal({
-      title: `Clone VM — ${vm.name}`,
+      title: `Clone V Os — ${vm.name}`,
       body: `
         <div class="form-group">
           <label class="form-label">Clone Name</label>
-          <input class="form-input" id="cloneVmInput" value="${suggestedName}" maxlength="80" />
+          <input class="form-input" id="cloneVmInput" value="${safeSuggestedName}" maxlength="80" />
         </div>
         <div class="vm-modal-note">Cloning duplicates all disks and settings. This can take a few minutes.</div>
         <div class="vm-inline-message" id="cloneVmMsg"></div>
       `,
       footer: `
         <button class="btn btn-secondary" id="cloneVmCancel">Cancel</button>
-        <button class="btn btn-primary" id="cloneVmStart">Clone VM</button>
+        <button class="btn btn-primary" id="cloneVmStart">Clone V Os</button>
       `
     });
 
@@ -524,6 +879,9 @@ const Dashboard = {
 
     modal.querySelector('#cloneVmCancel')?.addEventListener('click', close);
     modal.querySelector('#cloneVmStart')?.addEventListener('click', async () => {
+      const adminReady = await Dashboard._ensureAdminForTask('clone V Os');
+      if (!adminReady) return;
+
       const msg = modal.querySelector('#cloneVmMsg');
       const cloneName = input?.value?.trim();
       if (!cloneName) {
@@ -537,9 +895,9 @@ const Dashboard = {
         msg.className = 'vm-inline-message error';
         return;
       }
-      this._notify('VM cloned successfully', 'success');
+      this._notify('V Os cloned successfully', 'success');
       close();
-      this._notify('Click Refresh to see the cloned VM in the list.', 'info');
+      await Dashboard._refreshAfterMutation(app);
     });
   },
 
@@ -548,23 +906,34 @@ const Dashboard = {
     const modal = document.getElementById('vmSettingsModal');
     if (!overlay || !modal) return;
 
+    const safeVmName = Dashboard._escapeHtml(vm.name);
+    const ramValue = Number.isFinite(Number(vm.ram)) ? Number(vm.ram) : 2048;
+    const cpuValue = Number.isFinite(Number(vm.cpus)) ? Number(vm.cpus) : 2;
+    const vramValue = Number.isFinite(Number(vm.vram)) ? Number(vm.vram) : 32;
+    const bootOrderValue = Dashboard._escapeHtml(
+      Array.isArray(vm.bootOrder) && vm.bootOrder.length > 0
+        ? vm.bootOrder.join(',')
+        : 'disk,dvd,none,none'
+    );
+
     const sharedRows = (vm.sharedFolders || []).map((sf, index) => `
       <div class="vm-share-row" data-index="${index}">
-        <input class="form-input vm-share-name" value="${sf.name || ''}" placeholder="Share name" />
-        <input class="form-input vm-share-path" value="${sf.hostPath || ''}" placeholder="Host path" />
+        <input class="form-input vm-share-name" value="${Dashboard._escapeHtml(sf.name || '')}" placeholder="Share name" />
+        <input class="form-input vm-share-path" value="${Dashboard._escapeHtml(sf.hostPath || '')}" placeholder="Host path" />
+        <button type="button" class="btn btn-sm btn-secondary vm-share-browse">Browse</button>
       </div>
-    `).join('');
+    `).join('') || '<div class="vm-share-empty">No shared folders configured yet.</div>';
 
     modal.innerHTML = `
       <div class="vm-modal-header">
-        <h3>Edit Settings — ${vm.name}</h3>
+        <h3>Edit Settings — ${safeVmName}</h3>
         <button class="btn btn-sm btn-ghost" id="vmModalClose">Close</button>
       </div>
       <div class="vm-modal-body">
         <div class="form-row">
-          <div class="form-group"><label class="form-label">RAM (MB)</label><input class="form-input" id="editRam" type="number" value="${vm.ram}"></div>
-          <div class="form-group"><label class="form-label">CPUs</label><input class="form-input" id="editCpus" type="number" value="${vm.cpus}"></div>
-          <div class="form-group"><label class="form-label">VRAM (MB)</label><input class="form-input" id="editVram" type="number" value="${vm.vram}"></div>
+          <div class="form-group"><label class="form-label">RAM (MB)</label><input class="form-input" id="editRam" type="number" value="${ramValue}"></div>
+          <div class="form-group"><label class="form-label">CPUs</label><input class="form-input" id="editCpus" type="number" value="${cpuValue}"></div>
+          <div class="form-group"><label class="form-label">VRAM (MB)</label><input class="form-input" id="editVram" type="number" value="${vramValue}"></div>
         </div>
         <div class="form-row">
           <div class="form-group"><label class="form-label">Graphics</label>
@@ -585,18 +954,19 @@ const Dashboard = {
             <select class="form-select" id="editNetwork">
               <option value="nat" ${(vm.network || '').toLowerCase() === 'nat' ? 'selected' : ''}>NAT</option>
               <option value="bridged" ${(vm.network || '').toLowerCase() === 'bridged' ? 'selected' : ''}>Bridged</option>
-              <option value="internal" ${(vm.network || '').toLowerCase() === 'intnet' ? 'selected' : ''}>Internal</option>
+              <option value="internal" ${['internal', 'intnet'].includes((vm.network || '').toLowerCase()) ? 'selected' : ''}>Internal</option>
               <option value="hostonly" ${(vm.network || '').toLowerCase() === 'hostonly' ? 'selected' : ''}>Host-Only</option>
             </select>
           </div>
         </div>
         <div class="form-group">
           <label class="form-label">Boot Order (comma separated)</label>
-          <input class="form-input" id="editBootOrder" value="${(vm.bootOrder || ['disk', 'dvd', 'none', 'none']).join(',')}">
+          <input class="form-input" id="editBootOrder" value="${bootOrderValue}">
         </div>
         <div class="vm-toggle-grid">
           <label><input type="checkbox" id="tClipboard" ${(vm.clipboardMode || '').toLowerCase() !== 'disabled' ? 'checked' : ''}> Clipboard</label>
           <label><input type="checkbox" id="tDnD" ${(vm.dragAndDrop || '').toLowerCase() !== 'disabled' ? 'checked' : ''}> Drag & Drop</label>
+          <label><input type="checkbox" id="tFullscreen" ${vm.fullscreenEnabled !== false ? 'checked' : ''}> Guest Display Fullscreen</label>
           <label><input type="checkbox" id="tAudio" ${vm.audioEnabled ? 'checked' : ''}> Audio</label>
           <label><input type="checkbox" id="tUsb" ${vm.usbEnabled ? 'checked' : ''}> USB</label>
           <label><input type="checkbox" id="t3d" ${vm.accelerate3d ? 'checked' : ''}> 3D Acceleration</label>
@@ -617,6 +987,7 @@ const Dashboard = {
 
     overlay.style.display = 'block';
     modal.style.display = 'block';
+    Dashboard._modalActive = true;
 
     const escHandler = (e) => {
       if (e.key === 'Escape') close();
@@ -628,6 +999,11 @@ const Dashboard = {
       modal.innerHTML = '';
       overlay.onclick = null;
       document.removeEventListener('keydown', escHandler);
+      Dashboard._modalActive = false;
+
+      if (document.getElementById('navMachines')?.classList.contains('active') && Dashboard._liveSyncApp) {
+        Dashboard.loadVMs(Dashboard._liveSyncApp, { silent: true });
+      }
     };
 
     document.getElementById('vmModalClose')?.addEventListener('click', close);
@@ -638,18 +1014,47 @@ const Dashboard = {
     document.getElementById('addShareRow')?.addEventListener('click', () => {
       const list = document.getElementById('vmShareList');
       if (!list) return;
+      const empty = list.querySelector('.vm-share-empty');
+      if (empty) empty.remove();
       const row = document.createElement('div');
       row.className = 'vm-share-row';
-      row.innerHTML = `<input class="form-input vm-share-name" placeholder="Share name" /><input class="form-input vm-share-path" placeholder="Host path" />`;
+      row.innerHTML = `<input class="form-input vm-share-name" placeholder="Share name" /><input class="form-input vm-share-path" placeholder="Host path" /><button type="button" class="btn btn-sm btn-secondary vm-share-browse">Browse</button>`;
       list.appendChild(row);
     });
 
+    modal.querySelector('#vmShareList')?.addEventListener('click', async (event) => {
+      const button = event.target.closest('.vm-share-browse');
+      if (!button) return;
+
+      const row = button.closest('.vm-share-row');
+      const pathInput = row?.querySelector('.vm-share-path');
+      const currentPath = pathInput?.value?.trim() || '';
+
+      const selected = await window.vmInstaller.selectFolder('Select shared folder path', currentPath);
+      if (!selected) return;
+      if (pathInput) pathInput.value = selected;
+    });
+
     document.getElementById('vmModalSave')?.addEventListener('click', async () => {
+      const saveBtn = document.getElementById('vmModalSave');
+      if (saveBtn?.disabled) return;
+
+      const adminReady = await Dashboard._ensureAdminForTask('save V Os settings');
+      if (!adminReady) return;
+
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+      }
+
       const shares = Array.from(modal.querySelectorAll('.vm-share-row')).map((row) => {
         const name = row.querySelector('.vm-share-name')?.value?.trim();
         const hostPath = row.querySelector('.vm-share-path')?.value?.trim();
         return { name, hostPath, autoMount: true };
       }).filter((s) => s.name && s.hostPath);
+      const selectedNetwork = (document.getElementById('editNetwork')?.value || 'nat').toLowerCase();
+      const originalNetwork = (vm.network || '').toLowerCase();
+      const normalizedOriginalNetwork = originalNetwork === 'intnet' ? 'internal' : originalNetwork;
 
       const payload = {
         ram: parseInt(document.getElementById('editRam')?.value || vm.ram),
@@ -657,10 +1062,10 @@ const Dashboard = {
         vram: parseInt(document.getElementById('editVram')?.value || vm.vram),
         graphicsController: document.getElementById('editGraphics')?.value || 'vmsvga',
         audioController: document.getElementById('editAudioController')?.value || 'hda',
-        networkMode: document.getElementById('editNetwork')?.value || 'nat',
         bootOrder: (document.getElementById('editBootOrder')?.value || 'disk,dvd,none,none').split(',').map(v => v.trim()).filter(Boolean),
         clipboardMode: document.getElementById('tClipboard')?.checked ? 'bidirectional' : 'disabled',
         dragAndDrop: document.getElementById('tDnD')?.checked ? 'bidirectional' : 'disabled',
+        fullscreenEnabled: !!document.getElementById('tFullscreen')?.checked,
         audioEnabled: !!document.getElementById('tAudio')?.checked,
         usbEnabled: !!document.getElementById('tUsb')?.checked,
         accelerate3d: !!document.getElementById('t3d')?.checked,
@@ -668,33 +1073,45 @@ const Dashboard = {
         nestedVirtualization: !!document.getElementById('tNested')?.checked,
         sharedFolders: shares
       };
+      if (selectedNetwork !== normalizedOriginalNetwork) {
+        payload.networkMode = selectedNetwork;
+      }
 
       const result = await window.vmInstaller.editVM(vm.name, payload);
       if (!result.success) {
         Dashboard._notify(`Failed to save settings: ${result.error || 'Unknown error'}`, 'error');
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = 'Save';
+        }
         return;
       }
 
       const refreshed = await window.vmInstaller.getVMDetails(vm.name);
       if (!refreshed.success) {
-        Dashboard._notify('Settings saved, but failed to reload VM details.', 'info');
+        Dashboard._notify('Settings saved, but failed to reload V Os details.', 'info');
       } else {
-        Dashboard._notify('VM settings saved and verified successfully', 'success');
+        if (Array.isArray(result.warnings) && result.warnings.length > 0) {
+          Dashboard._notify(`V Os settings saved with warnings: ${result.warnings.join(' | ')}`, 'info');
+        } else {
+          Dashboard._notify('V Os settings saved and verified successfully', 'success');
+        }
       }
 
       close();
-      Dashboard._notify('Settings saved. Click Refresh to reload machine details.', 'info');
+      await Dashboard._refreshAfterMutation(app);
     });
   },
 
   _openRenameModal(vm, app) {
+    const safeVmName = Dashboard._escapeHtml(vm.name);
     const { close, modal } = this._openModal({
-      title: 'Rename VM',
+      title: 'Rename V Os',
       body: `
-        <div class="vm-modal-note">Current name: <strong>${vm.name}</strong></div>
+        <div class="vm-modal-note">Current name: <strong>${safeVmName}</strong></div>
         <div class="form-group">
           <label class="form-label">New Name</label>
-          <input class="form-input" id="renameVmInput" value="${vm.name}" maxlength="80" />
+          <input class="form-input" id="renameVmInput" value="${safeVmName}" maxlength="80" />
         </div>
         <div class="vm-modal-note">Renaming is available for powered off VMs.</div>
         <div class="vm-inline-message" id="renameVmMsg"></div>
@@ -710,10 +1127,13 @@ const Dashboard = {
 
     modal.querySelector('#renameVmCancel')?.addEventListener('click', close);
     modal.querySelector('#renameVmSave')?.addEventListener('click', async () => {
+      const adminReady = await Dashboard._ensureAdminForTask('rename V Os');
+      if (!adminReady) return;
+
       const msg = modal.querySelector('#renameVmMsg');
       const newName = input?.value?.trim() || '';
       if (!newName) {
-        msg.textContent = 'VM name is required.';
+        msg.textContent = 'V Os name is required.';
         msg.className = 'vm-inline-message error';
         return;
       }
@@ -729,17 +1149,17 @@ const Dashboard = {
         return;
       }
 
-      this._notify('VM renamed successfully', 'success');
+      this._notify('V Os renamed successfully', 'success');
       close();
-      this._notify('Click Refresh to see the updated VM name.', 'info');
+      await Dashboard._refreshAfterMutation(app);
     });
   },
 
   _openDeleteConfirm(vm, app) {
     const { close, modal } = this._openModal({
-      title: `Delete VM — ${vm.name}`,
+      title: `Delete V Os — ${vm.name}`,
       body: `
-        <div class="vm-modal-note danger">This removes the VM and all associated files. This action cannot be undone.</div>
+        <div class="vm-modal-note danger">This removes the V Os and all associated files. This action cannot be undone.</div>
         <div class="vm-inline-message" id="deleteVmMsg"></div>
       `,
       footer: `
@@ -750,6 +1170,9 @@ const Dashboard = {
 
     modal.querySelector('#deleteVmCancel')?.addEventListener('click', close);
     modal.querySelector('#deleteVmConfirm')?.addEventListener('click', async () => {
+      const adminReady = await Dashboard._ensureAdminForTask('delete V Os');
+      if (!adminReady) return;
+
       const msg = modal.querySelector('#deleteVmMsg');
       const result = await window.vmInstaller.deleteVM(vm.name);
       if (!result.success) {
@@ -758,9 +1181,9 @@ const Dashboard = {
         return;
       }
 
-      this._notify('VM deleted successfully', 'success');
+      this._notify('V Os deleted successfully', 'success');
       close();
-      this._notify('Click Refresh to update the machine list.', 'info');
+      await Dashboard._refreshAfterMutation(app);
     });
   },
 
@@ -784,6 +1207,9 @@ const Dashboard = {
 
     modal.querySelector('#bootFixClose')?.addEventListener('click', close);
     runBtn?.addEventListener('click', async () => {
+      const adminReady = await Dashboard._ensureAdminForTask('boot fix');
+      if (!adminReady) return;
+
       runBtn.disabled = true;
       runBtn.innerHTML = `${Icons.sized(Icons.spinner, 14)} Running...`;
       msg.textContent = 'Running diagnostics...';
@@ -803,66 +1229,97 @@ const Dashboard = {
       const diag = result.diagnostics || [];
       msg.textContent = fixes.length ? 'Diagnostics complete. Fixes applied.' : 'Diagnostics complete. No fixes were required.';
       msg.className = 'vm-inline-message success';
+      const fixesMarkup = fixes.length
+        ? fixes.map((f) => `<li>${Dashboard._escapeHtml(f)}</li>`).join('')
+        : '<li>No changes required.</li>';
+      const diagMarkup = diag.map((d) => `<li><strong>${Dashboard._escapeHtml(d.key)}</strong>: ${Dashboard._escapeHtml(d.message)}</li>`).join('');
       resultEl.innerHTML = `
         <div class="vm-bootfix-block">
           <div class="vm-bootfix-title">Applied Fixes</div>
-          <ul>${fixes.length ? fixes.map((f) => `<li>${f}</li>`).join('') : '<li>No changes required.</li>'}</ul>
+          <ul>${fixesMarkup}</ul>
         </div>
         <div class="vm-bootfix-block">
           <div class="vm-bootfix-title">Diagnostics</div>
-          <ul>${diag.map((d) => `<li><strong>${d.key}</strong>: ${d.message}</li>`).join('')}</ul>
+          <ul>${diagMarkup}</ul>
         </div>
       `;
       runBtn.remove();
       this._notify('Boot diagnostics complete', 'success');
-      this._notify('Click Refresh to reload machine status.', 'info');
+      await Dashboard._refreshAfterMutation(app);
     });
   },
 
   async _openAccountsModal(vm) {
+    let defaultAdminUser = 'guest';
+    let defaultAdminPass = 'guest';
+    try {
+      const prefsResult = await window.vmInstaller.getUiPrefs();
+      if (prefsResult?.success && prefsResult.prefs) {
+        defaultAdminUser = String(prefsResult.prefs.guestUsername || prefsResult.prefs.username || defaultAdminUser);
+        defaultAdminPass = String(prefsResult.prefs.guestPassword ?? prefsResult.prefs.password ?? defaultAdminPass);
+      }
+    } catch {}
+
+    const escapedDefaultUser = Dashboard._escapeHtml(defaultAdminUser);
+    const escapedDefaultPass = Dashboard._escapeHtml(defaultAdminPass);
+
     const { close, modal } = this._openModal({
-      title: `Guest Accounts — ${vm.name}`,
+      title: `Account Management Center — ${vm.name}`,
       body: `
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Guest Admin User</label>
-            <input class="form-input" id="accGuestUser" value="user" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Guest Admin Password</label>
-            <input class="form-input" id="accGuestPass" type="password" value="password" />
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Action</label>
-            <select class="form-select" id="accAction">
-              <option value="list">List users</option>
-              <option value="add">Create user</option>
-              <option value="update">Update user</option>
-              <option value="autologin">Set auto-login</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Target Username</label>
-            <input class="form-input" id="accTargetUser" placeholder="Required for add/update/autologin" />
+        <div class="vm-users-panel">
+          <div class="vm-users-panel-title">Access Credentials</div>
+          <div class="vm-users-panel-note">Use your OS login (the user you created). VirtualBox runs account commands inside the running V Os using these credentials.</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">OS Admin Username</label>
+              <input class="form-input" id="accGuestUser" value="${escapedDefaultUser}" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">OS Admin Password</label>
+              <input class="form-input" id="accGuestPass" type="password" value="${escapedDefaultPass}" />
+            </div>
           </div>
         </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">New Username (update)</label>
-            <input class="form-input" id="accNewUser" placeholder="Optional" />
+        <div class="vm-users-panel">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Action</label>
+              <select class="form-select" id="accAction">
+                <option value="list">Show All Users</option>
+                <option value="create">Create User</option>
+                <option value="update">Update User</option>
+                <option value="delete">Delete User</option>
+                <option value="autologin">Set Auto-login</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Action Details</label>
+              <div class="vm-inline-message" id="accActionHint">Load all OS accounts from /etc/passwd.</div>
+            </div>
           </div>
-          <div class="form-group">
-            <label class="form-label">Password (new/update)</label>
-            <input class="form-input" id="accPassword" type="password" placeholder="Optional" />
+          <div class="form-row">
+            <div class="form-group" data-actions="create,update,delete,autologin">
+              <label class="form-label">Target Username</label>
+              <input class="form-input" id="accTargetUser" placeholder="Example: ubuntu" />
+            </div>
+            <div class="form-group" data-actions="update">
+              <label class="form-label">New Username (Optional)</label>
+              <input class="form-input" id="accNewUser" placeholder="Leave empty to keep existing name" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group" data-actions="create,update">
+              <label class="form-label">Password</label>
+              <input class="form-input" id="accPassword" type="password" placeholder="Required for create; optional for update" />
+            </div>
           </div>
         </div>
-        <div class="vm-inline-message" id="accMsg">Select an action to continue.</div>
+        <div class="vm-inline-message" id="accMsg">Account center ready.</div>
         <div class="vm-users-list" id="accUsersList"></div>
       `,
       footer: `
         <button class="btn btn-secondary" id="accClose">Close</button>
+        <button class="btn btn-ghost" id="accRefresh">Refresh Users</button>
         <button class="btn btn-primary" id="accRun">Run Action</button>
       `
     });
@@ -874,60 +1331,239 @@ const Dashboard = {
     });
 
     const msg = modal.querySelector('#accMsg');
+    const actionHint = modal.querySelector('#accActionHint');
+    const actionSelect = modal.querySelector('#accAction');
+    const runBtn = modal.querySelector('#accRun');
+    const refreshBtn = modal.querySelector('#accRefresh');
     const usersList = modal.querySelector('#accUsersList');
+    const vmStateLabel = String(vm?.state || 'unknown').toLowerCase();
+    const actionConfig = {
+      list: { button: 'Show Users', hint: 'Load all OS accounts from /etc/passwd.' },
+      create: { button: 'Create User', hint: 'Creates a user, assigns password, and adds sudo group.' },
+      update: { button: 'Update User', hint: 'Rename user and/or update password for an existing account.' },
+      delete: { button: 'Delete User', hint: 'Deletes selected user and removes its home directory. Root/admin user is protected.' },
+      autologin: { button: 'Set Auto-login', hint: 'Configures GDM to auto-login with the selected user.' }
+    };
+
+    const setMessage = (text, type = 'default') => {
+      if (!msg) return;
+      msg.textContent = text;
+      msg.className = `vm-inline-message${type === 'default' ? '' : ` ${type}`}`;
+    };
+
+    const getAdminUsername = () => String(modal.querySelector('#accGuestUser')?.value || '').trim().toLowerCase();
+    const isProtectedDeleteTarget = (username) => {
+      const candidate = String(username || '').trim().toLowerCase();
+      if (!candidate) return true;
+      const adminUser = getAdminUsername();
+      return candidate === 'root' || (adminUser && candidate === adminUser);
+    };
+
+    const renderUsers = (users = [], details = []) => {
+      if (!usersList) return;
+      usersList.innerHTML = '';
+
+      const titleRow = document.createElement('div');
+      titleRow.className = 'vm-users-title';
+      titleRow.textContent = `Users (${users.length})`;
+
+      const table = document.createElement('div');
+      table.className = 'vm-users-table';
+
+      const header = document.createElement('div');
+      header.className = 'vm-users-row vm-users-row--header';
+      ['Username', 'Type', 'UID', 'Home', 'Actions'].forEach((label) => {
+        const cell = document.createElement('div');
+        cell.className = 'vm-users-cell';
+        cell.textContent = label;
+        header.appendChild(cell);
+      });
+      table.appendChild(header);
+
+      const detailedMap = new Map((details || []).map((item) => [item.username, item]));
+      users.forEach((username) => {
+        const row = document.createElement('div');
+        row.className = 'vm-users-row';
+        const detail = detailedMap.get(username) || {};
+
+        const usernameCell = document.createElement('div');
+        usernameCell.className = 'vm-users-cell';
+        usernameCell.textContent = username;
+
+        const typeCell = document.createElement('div');
+        typeCell.className = 'vm-users-cell';
+        const typeBadge = document.createElement('span');
+        typeBadge.className = `vm-users-badge ${detail.type === 'human' ? 'human' : 'system'}`;
+        typeBadge.textContent = detail.type === 'human' ? 'Human' : 'System';
+        typeCell.appendChild(typeBadge);
+
+        const uidCell = document.createElement('div');
+        uidCell.className = 'vm-users-cell';
+        uidCell.textContent = detail.uid ?? '-';
+
+        const homeCell = document.createElement('div');
+        homeCell.className = 'vm-users-cell';
+        homeCell.textContent = detail.home || '-';
+
+        const actionsCell = document.createElement('div');
+        actionsCell.className = 'vm-users-cell vm-users-cell--actions';
+        const deleteBtn = document.createElement('button');
+        const protectedAccount = isProtectedDeleteTarget(username);
+        deleteBtn.className = `btn btn-sm ${protectedAccount ? 'btn-secondary' : 'btn-danger'} vm-users-delete`;
+        deleteBtn.dataset.username = username;
+        deleteBtn.textContent = protectedAccount ? 'Protected' : 'Delete';
+        deleteBtn.disabled = protectedAccount;
+        if (protectedAccount) {
+          deleteBtn.title = 'Root and current admin user cannot be deleted from this panel.';
+        }
+        actionsCell.appendChild(deleteBtn);
+
+        row.appendChild(usernameCell);
+        row.appendChild(typeCell);
+        row.appendChild(uidCell);
+        row.appendChild(homeCell);
+        row.appendChild(actionsCell);
+        table.appendChild(row);
+      });
+
+      usersList.appendChild(titleRow);
+      usersList.appendChild(table);
+    };
+
+    const updateActionForm = () => {
+      const action = actionSelect?.value || 'list';
+      const config = actionConfig[action] || actionConfig.list;
+
+      if (actionHint) actionHint.textContent = config.hint;
+      if (runBtn) runBtn.textContent = config.button;
+
+      const actionFields = modal.querySelectorAll('[data-actions]');
+      actionFields.forEach((field) => {
+        const allowed = (field.getAttribute('data-actions') || '').split(',').map((s) => s.trim());
+        field.style.display = allowed.includes(action) ? '' : 'none';
+      });
+    };
+
+    const loadUsers = async () => {
+      const result = await window.vmInstaller.listVMUsers(getPayload());
+      if (!result?.success) {
+        setMessage(result?.error || 'Could not load users.', 'error');
+        return;
+      }
+      renderUsers(result.users || [], result.usersDetailed || []);
+      setMessage('OS users loaded.', 'success');
+    };
 
     modal.querySelector('#accClose')?.addEventListener('click', close);
-    modal.querySelector('#accRun')?.addEventListener('click', async () => {
-      const action = modal.querySelector('#accAction')?.value;
-      const base = getPayload();
+    usersList?.addEventListener('click', async (event) => {
+      const button = event.target?.closest?.('.vm-users-delete');
+      if (!button || button.disabled) return;
+      const username = button.dataset.username;
+      const adminReady = await Dashboard._ensureAdminForTask('guest user account management');
+      if (!adminReady) return;
 
-      msg.textContent = 'Running operation...';
-      msg.className = 'vm-inline-message';
+      const confirmed = window.confirm(`Delete user "${username}" from ${vm.name}? This also removes the home directory.`);
+      if (!confirmed) {
+        setMessage('Delete action cancelled.');
+        return;
+      }
+
+      setMessage(`Deleting "${username}"...`);
+      const result = await window.vmInstaller.deleteVMUser({ ...getPayload(), username });
+      if (!result?.success) {
+        setMessage(result?.error || 'Delete failed.', 'error');
+        return;
+      }
+
+      setMessage(`User "${username}" deleted successfully.`, 'success');
+      await loadUsers();
+      this._notify('Account operation completed', 'success');
+    });
+    actionSelect?.addEventListener('change', updateActionForm);
+    refreshBtn?.addEventListener('click', async () => {
+      const adminReady = await Dashboard._ensureAdminForTask('guest user account management');
+      if (!adminReady) return;
+      setMessage('Refreshing users...');
+      await loadUsers();
+    });
+
+    runBtn?.addEventListener('click', async () => {
+      const adminReady = await Dashboard._ensureAdminForTask('guest user account management');
+      if (!adminReady) return;
+
+      const action = actionSelect?.value || 'list';
+      const base = getPayload();
+      const username = modal.querySelector('#accTargetUser')?.value?.trim();
+      const password = modal.querySelector('#accPassword')?.value ?? '';
+      const requiresUser = action === 'create' || action === 'update' || action === 'delete' || action === 'autologin';
+      if (requiresUser && !username) {
+        setMessage('Target username is required for this action.', 'error');
+        return;
+      }
+      if (action === 'delete' && isProtectedDeleteTarget(username)) {
+        setMessage('Root and current admin user cannot be deleted from this panel.', 'error');
+        return;
+      }
+      if (action === 'create' && !password) {
+        setMessage('Password is required when creating a user.', 'error');
+        return;
+      }
+
+      setMessage('Running operation...');
 
       let result;
       if (action === 'list') {
         result = await window.vmInstaller.listVMUsers(base);
-        if (result.success) {
-          usersList.innerHTML = `<div class="vm-users-title">Users (${result.users.length})</div><div>${result.users.join(', ')}</div>`;
-          msg.textContent = 'User list loaded.';
-          msg.className = 'vm-inline-message success';
+        if (result?.success) {
+          renderUsers(result.users || [], result.usersDetailed || []);
+          setMessage('OS users loaded.', 'success');
         }
-      } else if (action === 'add') {
-        const username = modal.querySelector('#accTargetUser')?.value?.trim();
-        const password = modal.querySelector('#accPassword')?.value ?? '';
+      } else if (action === 'create') {
         result = await window.vmInstaller.createVMUser({ ...base, username, password });
       } else if (action === 'update') {
-        const oldUsername = modal.querySelector('#accTargetUser')?.value?.trim();
+        const oldUsername = username;
         const newUsername = modal.querySelector('#accNewUser')?.value?.trim() || oldUsername;
-        const newPassword = modal.querySelector('#accPassword')?.value ?? '';
-        result = await window.vmInstaller.updateVMUser({ ...base, oldUsername, newUsername, newPassword });
+        result = await window.vmInstaller.updateVMUser({ ...base, oldUsername, newUsername, newPassword: password });
+      } else if (action === 'delete') {
+        result = await window.vmInstaller.deleteVMUser({ ...base, username });
       } else if (action === 'autologin') {
-        const username = modal.querySelector('#accTargetUser')?.value?.trim();
         result = await window.vmInstaller.setVMAutoLogin({ ...base, username });
       }
 
       if (!result?.success) {
-        msg.textContent = result?.error || 'Operation failed.';
-        msg.className = 'vm-inline-message error';
+        setMessage(result?.error || 'Operation failed.', 'error');
         return;
       }
 
       if (action !== 'list') {
-        msg.textContent = 'Operation completed successfully.';
-        msg.className = 'vm-inline-message success';
+        setMessage('Operation completed successfully.', 'success');
+        await loadUsers();
       }
       this._notify('Account operation completed', 'success');
     });
+
+    updateActionForm();
+    const canPrefetch = await window.vmInstaller.isAdmin().catch(() => false);
+    const vmIsRunning = vmStateLabel === 'running';
+    if (canPrefetch && vmIsRunning) {
+      setMessage('Loading users...');
+      await loadUsers();
+    } else if (!vmIsRunning) {
+      setMessage(`Start this V Os first to manage accounts (current state: ${vmStateLabel}).`, 'error');
+    } else {
+      setMessage('Ready. Use Continue with Admin Privilege to load or manage accounts.');
+    }
   },
 
   _openModal({ title, body, footer }) {
     const overlay = document.getElementById('vmModalOverlay');
     const modal = document.getElementById('vmSettingsModal');
     if (!overlay || !modal) return { close: () => {}, modal: null };
+    const safeTitle = Dashboard._escapeHtml(title);
 
     modal.innerHTML = `
       <div class="vm-modal-header">
-        <h3 class="vm-modal-title">${title}</h3>
+        <h3 class="vm-modal-title">${safeTitle}</h3>
         <button class="btn btn-sm btn-ghost" id="vmGenericClose">Close</button>
       </div>
       <div class="vm-modal-body">${body}</div>
@@ -936,6 +1572,7 @@ const Dashboard = {
 
     overlay.style.display = 'block';
     modal.style.display = 'block';
+    this._modalActive = true;
 
     const escHandler = (e) => {
       if (e.key === 'Escape') close();
@@ -947,6 +1584,11 @@ const Dashboard = {
       modal.innerHTML = '';
       overlay.onclick = null;
       document.removeEventListener('keydown', escHandler);
+      this._modalActive = false;
+
+      if (document.getElementById('navMachines')?.classList.contains('active') && this._liveSyncApp) {
+        Dashboard.loadVMs(this._liveSyncApp, { silent: true });
+      }
     };
 
     modal.querySelector('#vmGenericClose')?.addEventListener('click', close);
@@ -957,6 +1599,7 @@ const Dashboard = {
   },
 
   _notify(message, type = 'info') {
+    if (!Dashboard._shouldNotify(type)) return;
     const existing = document.getElementById('vmToast');
     if (existing) existing.remove();
 
@@ -968,7 +1611,12 @@ const Dashboard = {
       : type === 'error'
       ? Icons.sized(Icons.xCircle, 14)
       : Icons.sized(Icons.info, 14);
-    toast.innerHTML = `${icon}<span>${message}</span>`;
+    const iconEl = document.createElement('span');
+    iconEl.innerHTML = icon;
+    const textEl = document.createElement('span');
+    textEl.textContent = message;
+    toast.appendChild(iconEl);
+    toast.appendChild(textEl);
     document.body.appendChild(toast);
 
     setTimeout(() => {

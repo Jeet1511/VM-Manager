@@ -41,7 +41,7 @@ const PHASES = [
   { id: 'install_vbox', label: 'Install VirtualBox', icon: '📦' },
   { id: 'download_iso', label: 'Download OS ISO', icon: '⬇️' },
   { id: 'verify_iso', label: 'Verify ISO Integrity', icon: '🔐' },
-  { id: 'create_vm', label: 'Create & Configure VM', icon: '🔧' },
+  { id: 'create_vm', label: 'Create & Configure V Os', icon: '🔧' },
   { id: 'install_os', label: 'Install Operating System', icon: '💿' },
   { id: 'wait_boot', label: 'Waiting for OS to Boot', icon: '⏳' },
   { id: 'guest_config', label: 'Configuring Guest Integration', icon: '⚙️' },
@@ -55,6 +55,123 @@ class Orchestrator extends EventEmitter {
     this.isRunning = false;
     this.currentPhase = null;
     this.resumeMode = false;
+    this.vboxEnsurePromise = null;
+    this.vboxEnsureAbortController = null;
+    this.vboxEnsurePhase = null;
+  }
+
+  /**
+   * Ensure VirtualBox is installed and ready.
+   * Used by setup workflow and startup preflight.
+   *
+   * @param {object} [options]
+   * @param {AbortSignal} [options.signal]
+   * @param {function} [options.onProgress]
+   * @returns {Promise<object>}
+   */
+  async ensureVirtualBoxInstalled(options = {}) {
+    const { signal = null, onProgress = null, downloadDir = null, installerPath = '' } = options;
+
+    if (this.vboxEnsurePromise) {
+      return this.vboxEnsurePromise;
+    }
+
+    const localController = signal ? null : new AbortController();
+    const effectiveSignal = signal || localController?.signal || null;
+    if (localController) {
+      this.vboxEnsureAbortController = localController;
+    }
+
+    const emitVBoxProgress = (payload = {}) => {
+      this.vboxEnsurePhase = payload.phase || this.vboxEnsurePhase;
+      if (onProgress) onProgress(payload);
+    };
+
+    this.vboxEnsurePromise = (async () => {
+      emitVBoxProgress({ phase: 'system_check', message: 'Checking VirtualBox installation...', percent: 0 });
+
+      const initial = await runSystemCheck();
+      if (initial.vboxInstalled) {
+        await virtualbox.init();
+        emitVBoxProgress({ phase: 'system_check', message: 'VirtualBox already installed.', percent: 100 });
+        return {
+          success: true,
+          installed: true,
+          downloaded: false,
+          installerPath: null,
+          version: await virtualbox.getVersion()
+        };
+      }
+
+      let vboxInstallerPath = String(installerPath || '').trim();
+      const usingLocalInstaller = !!vboxInstallerPath;
+      if (!usingLocalInstaller) {
+        emitVBoxProgress({ phase: 'download_vbox', message: 'Downloading VirtualBox...', percent: 0 });
+
+        const resolvedDownloadDir = String(downloadDir || '').trim() || getDownloadDir();
+        const vboxUrl = await this._resolveVBoxDownloadUrl();
+        vboxInstallerPath = await downloadFile(
+          vboxUrl,
+          resolvedDownloadDir,
+          null,
+          {
+            signal: effectiveSignal,
+            onProgress: (p) => {
+              emitVBoxProgress({
+                phase: 'download_vbox',
+                message: `Downloading VirtualBox... ${p.percent || 0}% (${p.speedFormatted})`,
+                percent: p.percent || 0,
+                downloadProgress: p
+              });
+            }
+          }
+        );
+      } else {
+        const resolvedPath = path.resolve(vboxInstallerPath);
+        if (!fs.existsSync(resolvedPath)) {
+          throw new Error('Selected VirtualBox installer file was not found.');
+        }
+        vboxInstallerPath = resolvedPath;
+        emitVBoxProgress({
+          phase: 'download_vbox',
+          message: `Using selected installer: ${path.basename(vboxInstallerPath)}`,
+          percent: 100
+        });
+      }
+
+      emitVBoxProgress({ phase: 'install_vbox', message: 'Installing VirtualBox...', percent: 10 });
+
+      await this._installVirtualBox(vboxInstallerPath);
+      await virtualbox.init();
+
+      if (!virtualbox.isInstalled()) {
+        throw new Error('VirtualBox installation failed — VBoxManage not found after install.');
+      }
+
+      const version = await virtualbox.getVersion();
+      emitVBoxProgress({
+        phase: 'install_vbox',
+        message: `VirtualBox ${version || ''} installed successfully`,
+        percent: 100
+      });
+
+      emitVBoxProgress({ phase: 'system_check', message: 'VirtualBox verification complete.', percent: 100 });
+
+      return {
+        success: true,
+        installed: true,
+        downloaded: !usingLocalInstaller,
+        installerPath: vboxInstallerPath,
+        usedLocalInstaller: usingLocalInstaller,
+        version
+      };
+    })().finally(() => {
+      this.vboxEnsurePromise = null;
+      this.vboxEnsureAbortController = null;
+      this.vboxEnsurePhase = null;
+    });
+
+    return this.vboxEnsurePromise;
   }
 
   /**
@@ -130,7 +247,7 @@ class Orchestrator extends EventEmitter {
       logger.info('Orchestrator', '══════════════════════════════════════════');
     }
 
-    logger.info('Orchestrator', `VM Name: ${config.vmName}`);
+    logger.info('Orchestrator', `V Os Name: ${config.vmName}`);
     logger.info('Orchestrator', `Install Path: ${config.installPath}`);
     logger.info('Orchestrator', `OS: ${config.osName || config.ubuntuVersion}`);
     logger.info('Orchestrator', `Resources: ${config.ram}MB RAM, ${config.cpus} CPUs, ${config.disk}MB Disk`);
@@ -183,42 +300,29 @@ class Orchestrator extends EventEmitter {
           this._setPhase('download_vbox', 'active');
           this._emitProgress('download_vbox', 'Downloading VirtualBox...', 0);
 
-          const downloadDir = getDownloadDir();
-          const vboxUrl = await this._resolveVBoxDownloadUrl();
-
-          const vboxInstallerPath = await downloadFile(
-            vboxUrl,
-            downloadDir,
-            null,
-            {
-              signal: this.abortController.signal,
-              onProgress: (p) => {
-                this._emitProgress('download_vbox',
-                  `Downloading VirtualBox... ${p.percent || 0}% (${p.speedFormatted})`,
-                  p.percent || 0,
-                  p
-                );
+          const ensureResult = await this.ensureVirtualBoxInstalled({
+            signal: this.abortController.signal,
+            onProgress: (data) => {
+              if (!data?.phase) return;
+              if (data.phase === 'download_vbox') {
+                this._emitProgress('download_vbox', data.message || 'Downloading VirtualBox...', data.percent ?? 0, data.downloadProgress || null);
+              }
+              if (data.phase === 'install_vbox') {
+                if (this.currentPhase !== 'install_vbox') {
+                  this._setPhase('download_vbox', 'complete');
+                  this._setPhase('install_vbox', 'active');
+                }
+                this._emitProgress('install_vbox', data.message || 'Installing VirtualBox...', data.percent ?? 0);
               }
             }
-          );
+          });
 
-          this._emitProgress('download_vbox', 'VirtualBox downloaded', 100);
           this._setPhase('download_vbox', 'complete');
-          await stateManager.completePhase('download_vbox', { vboxInstallerPath });
+          await stateManager.completePhase('download_vbox', { vboxInstallerPath: ensureResult.installerPath || null });
 
-          // ─── Phase 3: Install VirtualBox ──────────────────────────────
           this._setPhase('install_vbox', 'active');
-          this._emitProgress('install_vbox', 'Installing VirtualBox (admin permission may be required)...', 0);
-
-          await this._installVirtualBox(vboxInstallerPath);
-          await virtualbox.init();
-
-          if (!virtualbox.isInstalled()) {
-            throw new Error('VirtualBox installation failed — VBoxManage not found after install.');
-          }
-
-          const version = await virtualbox.getVersion();
-          this._emitProgress('install_vbox', `VirtualBox ${version} installed successfully`, 100);
+          const version = ensureResult.version || await virtualbox.getVersion();
+          this._emitProgress('install_vbox', `VirtualBox ${version || ''} installed successfully`, 100);
           this._setPhase('install_vbox', 'complete');
           await stateManager.completePhase('install_vbox');
         } else {
@@ -235,8 +339,9 @@ class Orchestrator extends EventEmitter {
       }
 
       // ─── Phase 4: Download OS ISO ──────────────────────────────────
-      const selectedOS = findOS(config.osName || config.ubuntuVersion) || OS_CATALOG['Custom ISO'];
+      const selectedOS = config._resolvedOsProfile || findOS(config.osName || config.ubuntuVersion) || OS_CATALOG['Custom ISO'];
       const selectedIsoConfig = selectedOS || UBUNTU_RELEASES[config.ubuntuVersion];
+      const resolvedDownloadDir = String(config.downloadPath || '').trim() || getDownloadDir();
       let isoPath;
 
       // Check if ISO was already downloaded in a previous run
@@ -263,8 +368,9 @@ class Orchestrator extends EventEmitter {
           this._setPhase('download_iso', 'skipped');
           await stateManager.skipPhase('download_iso');
         } else if (selectedIsoConfig?.downloadUrl && selectedIsoConfig?.filename) {
-          const downloadDir = getDownloadDir();
-          const expectedPath = path.join(downloadDir, selectedIsoConfig.filename);
+          const expectedPath = path.join(resolvedDownloadDir, selectedIsoConfig.filename);
+
+          this._emitProgress('download_iso', `ISO storage path: ${expectedPath}`, 1);
 
           if (isDownloadComplete(expectedPath)) {
             isoPath = expectedPath;
@@ -275,7 +381,7 @@ class Orchestrator extends EventEmitter {
 
             isoPath = await downloadFile(
               selectedIsoConfig.downloadUrl,
-              downloadDir,
+              resolvedDownloadDir,
               selectedIsoConfig.filename,
               {
                 signal: this.abortController.signal,
@@ -307,7 +413,7 @@ class Orchestrator extends EventEmitter {
           // Download SHA256SUMS file
           const sha256sumsPath = await downloadFile(
             selectedIsoConfig.sha256Url,
-            getDownloadDir(),
+            resolvedDownloadDir,
             'SHA256SUMS',
             { signal: this.abortController.signal }
           );
@@ -350,18 +456,18 @@ class Orchestrator extends EventEmitter {
         const vmExists = await virtualbox.vmExists(config.vmName);
         if (vmExists) {
           this._setPhase('create_vm', 'complete');
-          this._emitProgress('create_vm', 'VM already created (previous run)', 100);
-          logger.info('Orchestrator', `⏭ VM create — "${config.vmName}" already exists, skipping`);
+          this._emitProgress('create_vm', 'V Os already created (previous run)', 100);
+          logger.info('Orchestrator', `⏭ V Os create — "${config.vmName}" already exists, skipping`);
           vmResult = { vmName: config.vmName, sharedFolder: stateManager.state.artifacts.sharedFolderResult || null };
         } else {
-          logger.warn('Orchestrator', 'VM was deleted — recreating...');
+          logger.warn('Orchestrator', 'V Os was deleted — recreating...');
           _shouldSkip('create_vm'); // fallthrough
         }
       }
 
       if (!vmResult) {
         this._setPhase('create_vm', 'active');
-        this._emitProgress('create_vm', 'Creating virtual machine...', 0);
+        this._emitProgress('create_vm', 'Creating virtual OS...', 0);
 
         vmResult = await createAndConfigureVM(
           {
@@ -373,13 +479,18 @@ class Orchestrator extends EventEmitter {
             isoPath,
             osType: selectedIsoConfig?.osType || 'Other_64',
             network: config.network,
-            sharedFolderPath: config.sharedFolderPath,
-            username: config.username || 'user',
-            password: config.password || 'password',
+            sharedFolderPath: config.enableSharedFolder ? config.sharedFolderPath : '',
+            username: config.username || 'guest',
+            password: config.password || 'guest',
             unattended: selectedIsoConfig?.unattended !== false,
             graphicsController: selectedIsoConfig?.graphicsController || 'vmsvga',
             vram: config.vram || selectedIsoConfig?.vram || 128,
-            audioController: config.audioController || 'hda'
+            audioController: config.audioController || 'hda',
+            startFullscreen: config.startFullscreen !== false,
+            accelerate3d: config.accelerate3d === true,
+            clipboardMode: config.clipboardMode || 'bidirectional',
+            dragAndDrop: config.dragAndDrop || 'bidirectional',
+            autoStartVm: config.autoStartVm === true
           },
           (p) => {
             this._emitProgress('create_vm', p.message, p.percent);
@@ -395,106 +506,136 @@ class Orchestrator extends EventEmitter {
 
       // ─── Phase 7: OS Installation Started ──────────────────────────
       const unattendedInstall = selectedIsoConfig?.unattended !== false;
+      const autoStartVm = config.autoStartVm === true;
       if (_shouldSkip('install_os')) {
-        this._setPhase('install_os', 'complete');
-        this._emitProgress('install_os', 'OS installation started (previous run)', 100);
-        logger.info('Orchestrator', '⏭ OS install — already started, skipping');
+        if (autoStartVm) {
+          this._setPhase('install_os', 'complete');
+          this._emitProgress('install_os', 'OS installation started (previous run)', 100);
+          logger.info('Orchestrator', '⏭ OS install — already started, skipping');
 
-        // If VM isn't running, start it
-        const vmState = await virtualbox.getVMState(config.vmName);
-        if (vmState !== 'running') {
-          logger.info('Orchestrator', `VM is ${vmState} — starting it...`);
-          await virtualbox.startVM(config.vmName);
+          // If VM isn't running, start it
+          const vmState = await virtualbox.getVMState(config.vmName);
+          if (vmState !== 'running') {
+            logger.info('Orchestrator', `V Os is ${vmState} — starting it...`);
+            await virtualbox.startVM(config.vmName);
+          }
+        } else {
+          this._setPhase('install_os', 'skipped');
+          this._emitProgress('install_os', 'Auto-start is disabled. V Os was prepared but not launched.', 100);
+          await stateManager.skipPhase('install_os');
         }
+      } else if (!autoStartVm) {
+        this._setPhase('install_os', 'skipped');
+        this._emitProgress('install_os', 'Auto-start is disabled. Start the V Os manually to begin OS installation.', 100);
+        logger.info('Orchestrator', 'Skipping automatic V Os boot to keep host responsive.');
+        await stateManager.skipPhase('install_os');
       } else {
         this._setPhase('install_os', 'active');
         if (unattendedInstall) {
-          this._emitProgress('install_os', 'OS is installing automatically in the VM window...', 10);
-          logger.info('Orchestrator', 'The VM is now running. OS installation is unattended.');
+          this._emitProgress('install_os', 'OS is installing automatically in the V Os window...', 10);
+          logger.info('Orchestrator', 'The V Os is now running. OS installation is unattended.');
         } else {
-          this._emitProgress('install_os', 'VM booted. Complete OS installation manually from the ISO.', 10);
+          this._emitProgress('install_os', 'V Os booted. Complete OS installation manually from the ISO.', 10);
           logger.info('Orchestrator', 'Manual installation required for this OS profile.');
         }
-        logger.info('Orchestrator', 'This may take 10-20 minutes. Please do not close the VM window.');
+        logger.info('Orchestrator', 'This may take 10-20 minutes. Please do not close the V Os window.');
         this._setPhase('install_os', 'complete');
         await stateManager.completePhase('install_os', { vmStarted: true });
       }
 
       // ─── Phase 8: Wait for boot & Guest Additions ───────────────────
+      const gaUsername = config.username || 'guest';
+      const gaPassword = config.password || 'guest';
+      let guestConfigured = false;
+      let guestConfigWarning = '';
+
       if (!unattendedInstall) {
         this._setPhase('wait_boot', 'skipped');
         this._setPhase('guest_config', 'skipped');
         logger.info('Orchestrator', 'Skipping guest auto-configuration for manual-install OS profile.');
+      } else if (!autoStartVm) {
+        this._setPhase('wait_boot', 'skipped');
+        this._setPhase('guest_config', 'skipped');
+        guestConfigWarning = 'Automatic V Os start is disabled. Start the V Os manually and run Guest Setup when the OS is ready.';
+        logger.info('Orchestrator', 'Skipping wait_boot/guest_config because auto-start is disabled.');
       } else {
-      this._setPhase('wait_boot', 'active');
-      this._emitProgress('wait_boot', 'Waiting for OS installation to complete and Guest Additions to start...', 0);
+        this._setPhase('wait_boot', 'active');
+        this._emitProgress('wait_boot', 'Waiting for OS installation to complete and Guest Additions to start...', 0);
 
-      const gaUsername = config.username || 'user';
-      const gaPassword = config.password || 'password';
-
-      // Wait for Guest Additions to be running (up to 20 minutes)
-      // This means Ubuntu has finished installing and rebooted
-      const gaReady = await virtualbox.waitForGuestAdditions(
-        config.vmName,
-        1200000,  // 20 minute timeout — installation takes time
-        (p) => {
-          this._emitProgress('wait_boot', p.message, null);
-        }
-      );
-
-      if (gaReady) {
-        this._emitProgress('wait_boot', 'Guest Additions detected! Waiting for Ubuntu desktop...', 70);
-
-        // Wait for the guest OS to actually be responsive
-        const guestReady = await virtualbox.waitForGuestReady(
-          config.vmName, gaUsername, gaPassword,
-          300000,  // 5 minute timeout
+        // Wait for Guest Additions to be running (up to 20 minutes)
+        // This means Ubuntu has finished installing and rebooted
+        const gaReady = await virtualbox.waitForGuestAdditions(
+          config.vmName,
+          1200000,  // 20 minute timeout — installation takes time
           (p) => {
             this._emitProgress('wait_boot', p.message, null);
           }
         );
 
-        if (guestReady) {
-          this._emitProgress('wait_boot', 'Guest OS is ready!', 100);
-          this._setPhase('wait_boot', 'complete');
+        if (gaReady) {
+          this._emitProgress('wait_boot', 'Guest Additions detected! Waiting for Ubuntu desktop...', 70);
 
-          // ─── Phase 9: In-Guest Configuration ─────────────────────────
-          this._setPhase('guest_config', 'active');
-          this._emitProgress('guest_config', 'Configuring guest integration (shared folders, clipboard, fullscreen)...', 0);
-
-          const guestResult = await configureGuestInside(
-            config.vmName,
-            gaUsername,
-            gaPassword,
+          // Wait for the guest OS to actually be responsive
+          const guestReady = await virtualbox.waitForGuestReady(
+            config.vmName, gaUsername, gaPassword,
+            300000,  // 5 minute timeout
             (p) => {
-              this._emitProgress('guest_config', p.message, p.percent);
-            },
-            {
-              configureSharedFolder: !!config.sharedFolderPath,
-              sharedFolderName: 'shared'
+              this._emitProgress('wait_boot', p.message, null);
             }
           );
 
-          if (!guestResult || guestResult.guestAdditionsInstalled !== true) {
-            throw new Error('In-guest configuration did not complete successfully. Check VM console and logs, then retry/resume setup.');
-          }
+          if (guestReady) {
+            this._emitProgress('wait_boot', 'Guest OS is ready!', 100);
+            this._setPhase('wait_boot', 'complete');
 
-          this._emitProgress('guest_config', 'Guest integration fully configured!', 100);
-          this._setPhase('guest_config', 'complete');
-          await stateManager.completePhase('guest_config', { guestConfigured: true });
+            // ─── Phase 9: In-Guest Configuration ─────────────────────────
+            this._setPhase('guest_config', 'active');
+            this._emitProgress('guest_config', 'Configuring guest integration (shared folders, clipboard, fullscreen)...', 0);
+
+            try {
+              const guestResult = await configureGuestInside(
+                config.vmName,
+                gaUsername,
+                gaPassword,
+                (p) => {
+                  this._emitProgress('guest_config', p.message, p.percent);
+                },
+                {
+                  configureSharedFolder: !!(config.enableSharedFolder && config.sharedFolderPath),
+                  sharedFolderName: 'shared'
+                }
+              );
+
+              if (!guestResult || guestResult.guestAdditionsInstalled !== true) {
+                throw new Error('In-guest configuration did not complete successfully.');
+              }
+
+              guestConfigured = true;
+              this._emitProgress('guest_config', 'Guest integration fully configured!', 100);
+              this._setPhase('guest_config', 'complete');
+              await stateManager.completePhase('guest_config', { guestConfigured: true });
+            } catch (guestErr) {
+              guestConfigured = false;
+              guestConfigWarning = guestErr.message;
+              this._emitProgress('guest_config', 'OS installed. Integration setup will continue after login from V Os tools.', 100);
+              this._setPhase('guest_config', 'skipped');
+              logger.warn('Orchestrator', `Guest integration deferred: ${guestErr.message}`);
+            }
+          } else {
+            this._emitProgress('wait_boot', 'OS booted but not yet responsive — in-guest config will happen on next boot', 100);
+            this._setPhase('wait_boot', 'complete');
+            this._setPhase('guest_config', 'skipped');
+            guestConfigWarning = 'Guest OS booted but was not yet responsive for integration commands.';
+            logger.warn('Orchestrator', 'Guest not responsive yet. Services will auto-start on next login.');
+          }
         } else {
-          this._emitProgress('wait_boot', 'OS booted but not yet responsive — in-guest config will happen on next boot', 100);
+          this._emitProgress('wait_boot', 'OS is still installing — in-guest config will happen on next boot', 100);
           this._setPhase('wait_boot', 'complete');
           this._setPhase('guest_config', 'skipped');
-          logger.warn('Orchestrator', 'Guest not responsive yet. Services will auto-start on next login.');
+          guestConfigWarning = 'Guest Additions was not ready before setup completion.';
+          logger.warn('Orchestrator', 'Guest Additions not yet ready. OS is likely still installing.');
+          logger.info('Orchestrator', 'The in-guest setup will complete automatically when you log in.');
         }
-      } else {
-        this._emitProgress('wait_boot', 'OS is still installing — in-guest config will happen on next boot', 100);
-        this._setPhase('wait_boot', 'complete');
-        this._setPhase('guest_config', 'skipped');
-        logger.warn('Orchestrator', 'Guest Additions not yet ready. OS is likely still installing.');
-        logger.info('Orchestrator', 'The in-guest setup will complete automatically when you log in.');
-      }
       }
 
       // ─── Phase 10: Complete ────────────────────────────────────────
@@ -507,28 +648,48 @@ class Orchestrator extends EventEmitter {
           username: gaUsername,
           password: gaPassword
         },
+        guestConfigured,
+        autoStartVm,
+        guestConfigWarning,
         sharedFolder: vmResult.sharedFolder,
         installPath: config.installPath,
         message: unattendedInstall
-          ? 'VM setup complete! OS is fully configured.'
-          : 'VM created and booted. Complete manual installation in the VM window.'
+          ? (!autoStartVm
+            ? 'V Os prepared successfully. Start it manually to begin OS installation.'
+            : (guestConfigured
+              ? 'V Os setup complete! OS and guest integration are fully configured.'
+              : 'V Os setup complete. OS is installed and guest integration will finish after first login.'))
+          : (!autoStartVm
+            ? 'V Os prepared successfully. Start it manually and complete installation from the ISO.'
+            : 'V Os created and booted. Complete manual installation in the V Os window.')
       };
 
-      this._emitProgress('complete', 'Setup complete! Your VM is ready to use.', 100);
+      this._emitProgress('complete', finalResult.message, 100);
       this._setPhase('complete', 'complete');
       await stateManager.markComplete();
 
       logger.success('Orchestrator', '══════════════════════════════════════════');
-      logger.success('Orchestrator', '  Setup Complete — Everything Configured!');
-      logger.success('Orchestrator', `  VM: ${config.vmName}`);
+      logger.success(
+        'Orchestrator',
+        (!autoStartVm)
+          ? '  Setup Complete — V Os Prepared (Manual Start Required)'
+          : ((guestConfigured || !unattendedInstall)
+            ? '  Setup Complete — Everything Configured!'
+            : '  Setup Complete — OS Ready, Integration Pending')
+      );
+      logger.success('Orchestrator', `  V Os: ${config.vmName}`);
       logger.success('Orchestrator', `  Username: ${finalResult.credentials.username}`);
       logger.success('Orchestrator', `  Password: ${finalResult.credentials.password}`);
-      logger.success('Orchestrator', '  ✓ Guest Additions installed');
-      logger.success('Orchestrator', '  ✓ Clipboard sharing enabled');
-      logger.success('Orchestrator', '  ✓ Drag & drop enabled');
-      logger.success('Orchestrator', '  ✓ Fullscreen / dynamic resolution');
-      logger.success('Orchestrator', '  ✓ Shared folder auto-mounted');
-      logger.success('Orchestrator', '  ✓ All settings persist across reboots');
+      if (guestConfigured) {
+        logger.success('Orchestrator', '  ✓ Guest Additions installed');
+        logger.success('Orchestrator', '  ✓ Clipboard sharing enabled');
+        logger.success('Orchestrator', '  ✓ Drag & drop enabled');
+        logger.success('Orchestrator', '  ✓ Fullscreen / dynamic resolution');
+        logger.success('Orchestrator', '  ✓ Shared folder auto-mounted');
+        logger.success('Orchestrator', '  ✓ All settings persist across reboots');
+      } else if (unattendedInstall) {
+        logger.warn('Orchestrator', `  ⚠ Guest integration pending: ${guestConfigWarning || 'Will complete after login.'}`);
+      }
       logger.success('Orchestrator', '══════════════════════════════════════════');
 
       this.emit('complete', finalResult);
@@ -536,7 +697,13 @@ class Orchestrator extends EventEmitter {
 
     } catch (err) {
       if (this.abortController?.signal?.aborted || err?.name === 'AbortError') {
-        logger.warn('Orchestrator', 'Setup cancelled by user — progress saved, can resume later');
+        const isPaused = this.abortController?.signal?.reason === 'paused'
+          || err?.code === 'PAUSED'
+          || /pause/i.test(String(err?.message || ''));
+        const stopMessage = isPaused
+          ? 'Setup paused by user. Progress saved for resume.'
+          : 'Setup cancelled by user. Progress saved for resume.';
+        logger.warn('Orchestrator', stopMessage);
 
         if (this.currentPhase) {
           this._setPhase(this.currentPhase, 'skipped');
@@ -544,12 +711,13 @@ class Orchestrator extends EventEmitter {
 
         this.emit('error', {
           phase: this.currentPhase,
-          message: 'Setup cancelled by user. Progress saved for resume.',
+          message: stopMessage,
           recoverable: true,
-          cancelled: true
+          cancelled: !isPaused,
+          paused: isPaused
         });
 
-        throw new Error('Setup cancelled by user. Progress saved for resume.');
+        throw new Error(stopMessage);
       }
 
       logger.error('Orchestrator', `Setup failed: ${err.message}`);
@@ -579,10 +747,40 @@ class Orchestrator extends EventEmitter {
    * State is preserved — user can resume later.
    */
   cancel() {
-    if (this.abortController) {
-      logger.warn('Orchestrator', 'Setup cancelled by user — progress saved, can resume later');
-      this.abortController.abort();
+    if (!this.abortController || this.abortController.signal.aborted) {
+      return false;
     }
+    logger.warn('Orchestrator', 'Setup cancelled by user — progress saved, can resume later');
+    this.abortController.abort('cancelled');
+    return true;
+  }
+
+  pause() {
+    if (!this.abortController || this.abortController.signal.aborted) {
+      return false;
+    }
+    logger.warn('Orchestrator', 'Setup paused by user — progress saved, can resume later');
+    this.abortController.abort('paused');
+    return true;
+  }
+
+  pauseVBoxDownload() {
+    if (!this.vboxEnsureAbortController || this.vboxEnsureAbortController.signal.aborted) {
+      return false;
+    }
+    if (this.vboxEnsurePhase !== 'download_vbox') {
+      return false;
+    }
+    this.vboxEnsureAbortController.abort('paused');
+    return true;
+  }
+
+  cancelVBoxDownload() {
+    if (!this.vboxEnsureAbortController || this.vboxEnsureAbortController.signal.aborted) {
+      return false;
+    }
+    this.vboxEnsureAbortController.abort('cancelled');
+    return true;
   }
 
   /**
@@ -612,26 +810,93 @@ class Orchestrator extends EventEmitter {
     logger.info('Orchestrator', `Running VirtualBox installer: ${installerPath}`);
     logger.info('Orchestrator', 'Admin permission may be required — please approve if prompted.');
 
+    const _runWindowsInstaller = (args, elevated = false) => {
+      return new Promise((resolve, reject) => {
+        if (!elevated) {
+          execFile(installerPath, args, { timeout: 900000, windowsHide: true }, (error, stdout, stderr) => {
+            if (error) {
+              reject(new Error(stderr || error.message || 'Installer execution failed'));
+              return;
+            }
+            resolve();
+          });
+          return;
+        }
+
+        const escapedPath = String(installerPath).replace(/'/g, "''");
+        const psArgs = args.map((arg) => `'${String(arg).replace(/'/g, "''")}'`).join(', ');
+        const psCommand = [
+          `$p = Start-Process -FilePath '${escapedPath}' -ArgumentList ${psArgs} -Verb RunAs -Wait -PassThru`,
+          'if ($null -eq $p) { exit 1 }',
+          'exit $p.ExitCode'
+        ].join('; ');
+
+        execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCommand], { timeout: 900000, windowsHide: true }, (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(stderr || error.message || 'Elevated installer execution failed'));
+            return;
+          }
+          resolve();
+        });
+      });
+    };
+
     return new Promise((resolve, reject) => {
       if (platform.getOS() === 'windows') {
-        // Windows: Run with elevation via shell
-        const cmd = `"${installCmd.cmd}" ${installCmd.args.join(' ')}`;
+        (async () => {
+          const validSilentArgs = (Array.isArray(installCmd.args) && installCmd.args.length > 0)
+            ? installCmd.args
+            : ['--silent', '--msiparams', 'VBOX_START=0 REBOOT=ReallySuppress'];
 
-        exec(cmd, { timeout: 600000 }, (error, stdout, stderr) => {
-          if (error) {
-            // Error code 3010 means "reboot required" — still success
-            if (error.code === 3010) {
-              logger.warn('Orchestrator', 'VirtualBox installed — a reboot may be needed later.');
-              resolve();
-            } else {
-              logger.error('Orchestrator', `VirtualBox install failed: ${stderr || error.message}`);
-              reject(new Error(`VirtualBox installation failed: ${stderr || error.message}`));
+          const attempts = [
+            { label: 'default-silent-elevated', args: validSilentArgs, elevated: true },
+            { label: 'default-silent', args: validSilentArgs, elevated: false },
+            { label: 'silent-elevated-no-msi', args: ['--silent'], elevated: true },
+            { label: 'silent-no-msi', args: ['--silent'], elevated: false }
+          ];
+
+          let lastError = null;
+
+          for (const attempt of attempts) {
+            try {
+              logger.info('Orchestrator', `VirtualBox install attempt: ${attempt.label}`);
+              await _runWindowsInstaller(attempt.args, attempt.elevated);
+
+              // Verify after each attempt.
+              await virtualbox.init();
+              if (virtualbox.isInstalled()) {
+                logger.success('Orchestrator', 'VirtualBox installed successfully');
+                resolve();
+                return;
+              }
+            } catch (err) {
+              lastError = err;
+              logger.warn('Orchestrator', `Install attempt failed (${attempt.label}): ${err.message}`);
+
+              // Exit code 3010 means reboot required; treat as soft success if VBox is now visible.
+              if (String(err.message || '').includes('3010')) {
+                await virtualbox.init();
+                if (virtualbox.isInstalled()) {
+                  logger.warn('Orchestrator', 'VirtualBox installed — system reboot may be required later.');
+                  resolve();
+                  return;
+                }
+              }
             }
-          } else {
-            logger.success('Orchestrator', 'VirtualBox installed successfully');
-            resolve();
           }
-        });
+
+          // Final verification before hard fail.
+          await virtualbox.init();
+          if (virtualbox.isInstalled()) {
+            logger.success('Orchestrator', 'VirtualBox detected after install attempts.');
+            resolve();
+            return;
+          }
+
+          const errMsg = lastError?.message || 'Unknown installer failure';
+          logger.error('Orchestrator', `VirtualBox install failed: ${errMsg}`);
+          reject(new Error(`VirtualBox installation failed: ${errMsg}`));
+        })();
       } else {
         // Linux: Use dpkg
         execFile(installCmd.cmd, installCmd.args, { timeout: 600000 }, (error, stdout, stderr) => {

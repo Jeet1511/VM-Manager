@@ -11,6 +11,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const logger = require('../core/logger');
 const virtualbox = require('../adapters/virtualbox');
 const { configureGuestFeatures } = require('./guestAdditions');
@@ -46,24 +47,29 @@ async function createAndConfigureVM(config, onProgress = null) {
     osType = 'Ubuntu_64',
     network = 'nat',
     sharedFolderPath,
-    username = 'user',
-    password = 'password',
+    username = 'guest',
+    password = 'guest',
     unattended = true,
     graphicsController = 'vmsvga',
     vram = 128,
-    audioController = 'hda'
+    audioController = 'hda',
+    startFullscreen = true,
+    accelerate3d = false,
+    clipboardMode = 'bidirectional',
+    dragAndDrop = 'bidirectional',
+    autoStartVm = false
   } = config;
 
   // ─── Pre-flight validation ────────────────────────────────────────
-  logger.info('VMManager', '═══ Starting VM Creation ═══');
-  logger.info('VMManager', `VM Name: ${name}`);
+  logger.info('VMManager', '═══ Starting V Os Creation ═══');
+  logger.info('VMManager', `V Os Name: ${name}`);
   logger.info('VMManager', `Install Path: ${installPath}`);
-  logger.info('VMManager', `Resources: ${ram}MB RAM, ${cpus} CPUs, ${disk}MB Disk`);
+  logger.info('VMManager', `Requested resources: ${ram}MB RAM, ${cpus} CPUs, ${disk}MB Disk`);
 
   _emitProgress(onProgress, 'validate', 'Validating configuration...', 0);
 
   if (!name || typeof name !== 'string' || !name.trim()) {
-    throw new Error('VM name is required.');
+    throw new Error('V Os name is required.');
   }
   if (!installPath || typeof installPath !== 'string') {
     throw new Error('Install path is required.');
@@ -78,16 +84,36 @@ async function createAndConfigureVM(config, onProgress = null) {
     throw new Error(`Invalid disk size: ${disk}. Minimum is 10240 MB.`);
   }
 
+  const hostTotalRamMb = Math.max(1024, Math.floor(os.totalmem() / (1024 * 1024)));
+  const hostCpuCores = Math.max(1, os.cpus()?.length || 1);
+  const safeMaxRamMb = Math.max(1024, Math.floor(hostTotalRamMb * 0.5));
+  const safeMaxCpus = Math.max(1, hostCpuCores - 1);
+  const effectiveRam = Math.max(1024, Math.min(ram, safeMaxRamMb));
+  const effectiveCpus = Math.max(1, Math.min(cpus, safeMaxCpus));
+
+  if (effectiveRam !== ram || effectiveCpus !== cpus) {
+    logger.warn(
+      'VMManager',
+      `Adjusted resources for host responsiveness: RAM ${ram}→${effectiveRam} MB, CPU ${cpus}→${effectiveCpus} core(s)`
+    );
+    _emitProgress(
+      onProgress,
+      'validate',
+      `Adjusted resources for smoother host performance (RAM ${effectiveRam} MB, CPU ${effectiveCpus}).`,
+      5
+    );
+  }
+
   // Check if VM already exists — auto-cleanup from failed previous runs
   if (await virtualbox.vmExists(name)) {
-    logger.warn('VMManager', `VM "${name}" already exists — removing old/partial VM...`);
-    _emitProgress(onProgress, 'validate', 'Cleaning up previous partial VM...', 2);
+    logger.warn('VMManager', `V Os "${name}" already exists — removing old/partial V Os...`);
+    _emitProgress(onProgress, 'validate', 'Cleaning up previous partial V Os...', 2);
     try {
       await virtualbox.deleteVM(name);
-      logger.success('VMManager', `Old VM "${name}" removed — starting fresh`);
+      logger.success('VMManager', `Old V Os "${name}" removed — starting fresh`);
     } catch (err) {
-      logger.error('VMManager', `Could not remove old VM: ${err.message}`);
-      throw new Error(`A VM named "${name}" exists and could not be removed. Please delete it manually from VirtualBox Manager.`);
+      logger.error('VMManager', `Could not remove old V Os: ${err.message}`);
+      throw new Error(`A V Os named "${name}" exists and could not be removed. Please delete it manually from VirtualBox Manager.`);
     }
   }
 
@@ -100,17 +126,18 @@ async function createAndConfigureVM(config, onProgress = null) {
   await fs.promises.mkdir(installPath, { recursive: true });
 
   // ─── Step 1: Create VM ────────────────────────────────────────────
-  _emitProgress(onProgress, 'create', 'Creating virtual machine...', 10);
+  _emitProgress(onProgress, 'create', 'Creating virtual OS...', 10);
   await virtualbox.createVM(name, osType, installPath);
 
   // ─── Step 2: Configure Hardware ───────────────────────────────────
   _emitProgress(onProgress, 'configure', 'Configuring hardware...', 20);
   await virtualbox.configureVM(name, {
-    ram,
-    cpus,
+    ram: effectiveRam,
+    cpus: effectiveCpus,
     vram,
     graphicsController,
     audioController,
+    accelerate3d: accelerate3d ? 'on' : 'off',
     ioapic: 'on',
     acpi: 'on',
     pae: 'on',
@@ -142,7 +169,14 @@ async function createAndConfigureVM(config, onProgress = null) {
 
   // ─── Step 6: Configure Guest Features ─────────────────────────────
   _emitProgress(onProgress, 'guest', 'Setting up Guest Additions features...', 60);
-  await configureGuestFeatures(name);
+  await configureGuestFeatures(name, {
+    fullscreen: startFullscreen !== false,
+    accelerate3d: accelerate3d === true,
+    graphicsController,
+    vram,
+    clipboardMode,
+    dragAndDrop
+  });
 
   // ─── Step 7: Shared Folder ────────────────────────────────────────
   let sharedFolderResult = null;
@@ -167,7 +201,7 @@ async function createAndConfigureVM(config, onProgress = null) {
         `usermod -aG video ${username} 2>/dev/null`,
         `mkdir -p /home/${username}/.config/autostart`,
         `echo -e "[Desktop Entry]\\nType=Application\\nName=VBoxClient\\nExec=/usr/bin/VBoxClient-all\\nX-GNOME-Autostart-enabled=true\\nNoDisplay=true" > /home/${username}/.config/autostart/vboxclient.desktop`,
-        'grep -q vboxsf /etc/fstab || echo "shared /media/sf_shared vboxsf defaults,uid=1000,gid=1000,_netdev 0 0" >> /etc/fstab',
+        'grep -q vboxsf /etc/fstab || echo "shared /media/sf_shared vboxsf rw,_netdev,umask=0007 0 0" >> /etc/fstab',
         'mkdir -p /media/sf_shared',
         `su - ${username} -c "gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null" 2>/dev/null`,
       ].join(' ; ')
@@ -177,30 +211,54 @@ async function createAndConfigureVM(config, onProgress = null) {
   }
 
   // ─── Step 9: Start VM ────────────────────────────────────────────
-  _emitProgress(onProgress, 'start', 'Starting virtual machine...', 90);
-  await virtualbox.startVM(name);
+  if (autoStartVm) {
+    _emitProgress(onProgress, 'start', 'Starting virtual OS...', 90);
+    await virtualbox.startVM(name);
 
-  const running = await _waitForVMState(name, 'running', 45000, 3000);
-  if (!running) {
-    throw new Error('VM start command completed but VM did not reach running state. Check VirtualBox logs for details.');
+    const running = await _waitForVMState(name, 'running', 45000, 3000);
+    if (!running) {
+      throw new Error('V Os start command completed but V Os did not reach running state. Check VirtualBox logs for details.');
+    }
+
+    try {
+      await virtualbox.applyRuntimeIntegration(name, {
+        clipboardMode: clipboardMode || 'bidirectional',
+        dragAndDrop: dragAndDrop || 'bidirectional',
+        guestDisplayFullscreen: startFullscreen !== false,
+        waitForGuestAdditionsMs: startFullscreen !== false ? 120000 : 0
+      });
+    } catch (err) {
+      logger.warn('VMManager', `Runtime display integration warning: ${err.message}`);
+    }
+  } else {
+    _emitProgress(onProgress, 'start', 'Auto-start disabled. V Os was prepared and left powered off.', 90);
   }
 
   // ─── Complete ────────────────────────────────────────────────────
-  _emitProgress(onProgress, 'complete', 'VM is up and running!', 100);
+  _emitProgress(
+    onProgress,
+    'complete',
+    autoStartVm ? 'V Os is up and running!' : 'V Os is prepared. Start it manually when ready.',
+    100
+  );
 
   const result = {
     vmName: name,
     installPath,
     diskPath,
-    resources: { ram, cpus, disk },
+    resources: { ram: effectiveRam, cpus: effectiveCpus, disk },
     network,
     sharedFolder: sharedFolderResult,
     credentials: { username, password },
-    status: 'running'
+    status: autoStartVm ? 'running' : 'poweroff'
   };
 
-  logger.success('VMManager', '═══ VM Creation Complete ═══');
-  logger.info('VMManager', `VM "${name}" is now installing Ubuntu automatically.`);
+  logger.success('VMManager', '═══ V Os Creation Complete ═══');
+  if (autoStartVm) {
+    logger.info('VMManager', `V Os "${name}" is now installing Ubuntu automatically.`);
+  } else {
+    logger.info('VMManager', `V Os "${name}" was prepared and left powered off (auto-start disabled).`);
+  }
   logger.info('VMManager', `Login credentials: ${username} / ${password}`);
   if (sharedFolderResult) {
     logger.info('VMManager', `Shared folder: ${sharedFolderResult.guestMountPoint}`);

@@ -8,14 +8,16 @@ process.on('uncaughtException', (err) => {
   console.error(err.stack);
 });
 
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeImage, screen, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execSync, exec } = require('child_process');
+const { execSync, exec, execFile } = require('child_process');
 const os = require('os');
+const https = require('https');
+const { URL } = require('url');
 const logger = require('./core/logger');
 const orchestrator = require('./core/orchestrator');
-const { UBUNTU_RELEASES, OS_CATALOG, VM_DEFAULTS, getDefaultInstallPath, getDefaultSharedFolderPath, getOSCategories } = require('./core/config');
+const { UBUNTU_RELEASES, OS_CATALOG, VM_DEFAULTS, getDefaultInstallPath, getDefaultSharedFolderPath, getOSCategories, getDownloadDir } = require('./core/config');
 const { runSystemCheck } = require('./services/systemChecker');
 const { refreshOfficialCatalog } = require('./services/osCatalogUpdater');
 const virtualbox = require('./adapters/virtualbox');
@@ -29,10 +31,79 @@ let runtimeOSCatalog = { ...OS_CATALOG };
 let isCatalogRefreshRunning = false;
 let catalogRefreshTimer = null;
 let isExitShutdownInProgress = false;
+const runtimeIntegrationQueue = new Map();
+const runtimeIntegrationLastScheduledAt = new Map();
+const vmLastKnownState = new Map();
+
+function getCatalogCacheFilePath() {
+  return path.join(app.getPath('userData'), 'os-catalog-cache.json');
+}
+
+function readCatalogCacheFromDisk() {
+  try {
+    const cachePath = getCatalogCacheFilePath();
+    if (!fs.existsSync(cachePath)) return null;
+    const raw = fs.readFileSync(cachePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    const catalog = parsed.catalog;
+    if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) {
+      return null;
+    }
+
+    return {
+      catalog,
+      updatedAt: parsed.updatedAt || null
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeCatalogCacheToDisk(catalog) {
+  const cachePath = getCatalogCacheFilePath();
+  await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
+  await fs.promises.writeFile(
+    cachePath,
+    JSON.stringify({
+      updatedAt: new Date().toISOString(),
+      catalog: catalog || {}
+    }, null, 2),
+    'utf8'
+  );
+}
+
+async function persistRuntimeCatalog(reason = 'update') {
+  try {
+    await writeCatalogCacheToDisk(runtimeOSCatalog);
+    logger.debug('CatalogUpdater', `Catalog cache saved (${reason}).`);
+  } catch (err) {
+    logger.warn('CatalogUpdater', `Failed to save catalog cache (${reason}): ${err.message}`);
+  }
+}
+
+function loadRuntimeCatalogFromCache() {
+  const cached = readCatalogCacheFromDisk();
+  if (!cached?.catalog) return false;
+
+  runtimeOSCatalog = {
+    ...OS_CATALOG,
+    ...cached.catalog
+  };
+
+  logger.info(
+    'CatalogUpdater',
+    `Loaded cached OS catalog (${Object.keys(runtimeOSCatalog).length} entries${cached.updatedAt ? `, updated ${cached.updatedAt}` : ''}).`
+  );
+  return true;
+}
 
 function getUiPrefsFilePath() {
   return path.join(app.getPath('userData'), 'ui-prefs.json');
 }
+
+let uiPrefsWriteQueue = Promise.resolve();
 
 function readUiPrefsFromDisk() {
   try {
@@ -40,7 +111,43 @@ function readUiPrefsFromDisk() {
     if (!fs.existsSync(prefsPath)) return {};
     const raw = fs.readFileSync(prefsPath, 'utf8');
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    const prefs = (parsed && typeof parsed === 'object') ? parsed : {};
+    prefs.theme = 'dark';
+    prefs.visualEffectsMode = String(prefs.visualEffectsMode || '').trim().toLowerCase() === 'full' ? 'full' : 'lite';
+    prefs.defaultUserUsername = String(prefs.defaultUserUsername || 'user').trim() || 'user';
+    prefs.defaultUserPassword = String(prefs.defaultUserPassword ?? '');
+    prefs.guestUsername = String(prefs.guestUsername || prefs.username || 'guest').trim() || 'guest';
+    prefs.guestPassword = String(prefs.guestPassword ?? prefs.password ?? '');
+    prefs.username = prefs.guestUsername;
+    prefs.password = prefs.guestPassword;
+    prefs.language = ['en', 'hi'].includes(String(prefs.language || '').toLowerCase()) ? String(prefs.language).toLowerCase() : 'en';
+    prefs.startupView = ['dashboard', 'machines', 'wizard', 'library', 'snapshots', 'storage', 'network', 'settings', 'download', 'credits'].includes(String(prefs.startupView || '').toLowerCase())
+      ? String(prefs.startupView).toLowerCase()
+      : 'dashboard';
+    prefs.notificationLevel = ['all', 'important', 'minimal'].includes(String(prefs.notificationLevel || '').toLowerCase())
+      ? String(prefs.notificationLevel).toLowerCase()
+      : 'important';
+    prefs.adminModePolicy = ['auto', 'manual'].includes(String(prefs.adminModePolicy || '').toLowerCase())
+      ? String(prefs.adminModePolicy).toLowerCase()
+      : 'auto';
+    prefs.autoRepairLevel = ['none', 'safe', 'full'].includes(String(prefs.autoRepairLevel || '').toLowerCase())
+      ? String(prefs.autoRepairLevel).toLowerCase()
+      : 'safe';
+    prefs.maxHostRamPercent = Math.max(40, Math.min(95, parseInt(prefs.maxHostRamPercent, 10) || 75));
+    prefs.maxHostCpuPercent = Math.max(40, Math.min(95, parseInt(prefs.maxHostCpuPercent, 10) || 75));
+    prefs.vmDefaultPreset = ['beginner', 'balanced', 'advanced'].includes(String(prefs.vmDefaultPreset || '').toLowerCase())
+      ? String(prefs.vmDefaultPreset).toLowerCase()
+      : 'balanced';
+    prefs.credentialStorage = ['keychain', 'session'].includes(String(prefs.credentialStorage || '').toLowerCase())
+      ? String(prefs.credentialStorage).toLowerCase()
+      : 'keychain';
+    prefs.telemetryEnabled = prefs.telemetryEnabled === true;
+    prefs.trustedPaths = String(prefs.trustedPaths || '').trim();
+    prefs.logLevel = ['error', 'warning', 'info', 'debug'].includes(String(prefs.logLevel || '').toLowerCase())
+      ? String(prefs.logLevel).toLowerCase()
+      : 'info';
+    prefs.logRetentionDays = Math.max(1, Math.min(365, parseInt(prefs.logRetentionDays, 10) || 14));
+    return prefs;
   } catch {
     return {};
   }
@@ -48,8 +155,13 @@ function readUiPrefsFromDisk() {
 
 async function writeUiPrefsToDisk(prefs) {
   const prefsPath = getUiPrefsFilePath();
-  await fs.promises.mkdir(path.dirname(prefsPath), { recursive: true });
-  await fs.promises.writeFile(prefsPath, JSON.stringify(prefs, null, 2), 'utf8');
+  const writeTask = async () => {
+    await fs.promises.mkdir(path.dirname(prefsPath), { recursive: true });
+    await fs.promises.writeFile(prefsPath, JSON.stringify(prefs, null, 2), 'utf8');
+  };
+
+  uiPrefsWriteQueue = uiPrefsWriteQueue.then(writeTask, writeTask);
+  return uiPrefsWriteQueue;
 }
 
 function getCategoriesFromCatalog(catalog) {
@@ -60,6 +172,381 @@ function getCategoriesFromCatalog(catalog) {
     categories[category].push(name);
   }
   return categories;
+}
+
+function applyPreferredVirtualBoxPath(prefs = {}) {
+  try {
+    if (typeof virtualbox?.setPreferredManagePath !== 'function') return;
+    const rawPath = prefs && typeof prefs === 'object' ? prefs.virtualBoxPath : '';
+    virtualbox.setPreferredManagePath(rawPath || '');
+  } catch {}
+}
+
+function parsePathList(rawValue = '') {
+  return String(rawValue || '')
+    .split(/[;\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function normalizePathForTrust(pathValue = '') {
+  const normalized = String(pathValue || '').trim().replace(/\//g, '\\');
+  if (!normalized) return '';
+  const dequoted = normalized.replace(/^"+|"+$/g, '');
+  const withoutTrailing = /^[a-z]:\\$/i.test(dequoted) ? dequoted : dequoted.replace(/[\\]+$/, '');
+  return withoutTrailing.toLowerCase();
+}
+
+function isPathTrustedByPrefs(candidatePath = '', prefs = {}) {
+  const candidate = normalizePathForTrust(candidatePath);
+  if (!candidate) return true;
+  const trustedRoots = parsePathList(prefs?.trustedPaths || '')
+    .map(normalizePathForTrust)
+    .filter(Boolean);
+  if (trustedRoots.length === 0) return true;
+  return trustedRoots.some((root) => candidate === root || candidate.startsWith(`${root}\\`));
+}
+
+function mergePathListString(existingValue = '', candidates = []) {
+  const merged = [];
+  const seen = new Set();
+  const pushUnique = (value) => {
+    const item = String(value || '').trim();
+    if (!item) return;
+    const key = item.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  };
+
+  parsePathList(existingValue).forEach(pushUnique);
+  (Array.isArray(candidates) ? candidates : []).forEach(pushUnique);
+  return merged.join('; ');
+}
+
+function applyLoggerPreferences(prefs = {}) {
+  const level = String(prefs?.logLevel || 'info').toLowerCase();
+  const levelMap = {
+    debug: 0,
+    info: 1,
+    warning: 2,
+    error: 3
+  };
+  logger.minLevel = Number.isInteger(levelMap[level]) ? levelMap[level] : 1;
+}
+
+async function pruneLogFilesByRetention(retentionDays = 14) {
+  const days = Math.max(1, Math.min(365, parseInt(retentionDays, 10) || 14));
+  const cutoffMs = Date.now() - (days * 24 * 60 * 60 * 1000);
+  try {
+    await fs.promises.mkdir(logger.logDir, { recursive: true });
+    const entries = await fs.promises.readdir(logger.logDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const name = String(entry.name || '');
+      if (!name.includes('.log')) continue;
+      const fullPath = path.join(logger.logDir, name);
+      try {
+        const stats = await fs.promises.stat(fullPath);
+        if (stats.mtimeMs < cutoffMs) {
+          await fs.promises.unlink(fullPath);
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+async function collectWindowsLogicalDisks() {
+  const script = [
+    "$items = Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,VolumeName,FileSystem,DriveType,Size,FreeSpace",
+    "if ($null -eq $items) { @() | ConvertTo-Json -Compress } else { $items | ConvertTo-Json -Compress }"
+  ].join('; ');
+
+  const output = await new Promise((resolve, reject) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 * 4 },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error(stderr?.trim() || err.message));
+          return;
+        }
+        resolve(String(stdout || '').trim());
+      }
+    );
+  });
+
+  if (!output) return [];
+  const parsed = JSON.parse(output);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+async function collectHostPartitions() {
+  const mapDriveType = (code) => {
+    const type = Number(code || 0);
+    if (type === 2) return 'removable';
+    if (type === 3) return 'fixed';
+    if (type === 4) return 'network';
+    if (type === 5) return 'cdrom';
+    if (type === 6) return 'ramdisk';
+    return 'unknown';
+  };
+
+  if (process.platform === 'win32') {
+    try {
+      const disks = await collectWindowsLogicalDisks();
+      const items = disks
+        .map((row) => {
+          const deviceId = String(row.DeviceID || '').trim();
+          if (!deviceId) return null;
+          const mountPath = deviceId.endsWith(':') ? `${deviceId}\\` : deviceId;
+          const sizeBytes = Math.max(0, Number(row.Size || 0));
+          const freeBytes = Math.max(0, Number(row.FreeSpace || 0));
+          const usedBytes = Math.max(0, sizeBytes - freeBytes);
+          const totalGb = Number((sizeBytes / (1024 ** 3)).toFixed(2));
+          const freeGb = Number((freeBytes / (1024 ** 3)).toFixed(2));
+          const usedGb = Number((usedBytes / (1024 ** 3)).toFixed(2));
+          return {
+            deviceId,
+            mountPath,
+            volumeName: String(row.VolumeName || '').trim(),
+            fileSystem: String(row.FileSystem || '').trim(),
+            driveTypeCode: Number(row.DriveType || 0),
+            driveType: mapDriveType(row.DriveType),
+            sizeBytes,
+            freeBytes,
+            usedBytes,
+            totalGb,
+            freeGb,
+            usedGb,
+            usedPercent: sizeBytes > 0 ? Math.round((usedBytes / sizeBytes) * 100) : 0
+          };
+        })
+        .filter(Boolean);
+
+      return items.sort((a, b) => {
+        if (a.driveType === 'fixed' && b.driveType !== 'fixed') return -1;
+        if (a.driveType !== 'fixed' && b.driveType === 'fixed') return 1;
+        return Number(b.freeBytes || 0) - Number(a.freeBytes || 0);
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  try {
+    const rawDf = await new Promise((resolve, reject) => {
+      execFile('df', ['-kP'], { timeout: 12000, maxBuffer: 1024 * 1024 * 2 }, (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error(stderr?.trim() || err.message));
+          return;
+        }
+        resolve(String(stdout || ''));
+      });
+    });
+
+    const lines = rawDf.split(/\r?\n/).filter((line) => line.trim());
+    return lines.slice(1).map((line) => {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 6) return null;
+      const sizeBytes = Math.max(0, Number(parts[1] || 0) * 1024);
+      const usedBytes = Math.max(0, Number(parts[2] || 0) * 1024);
+      const freeBytes = Math.max(0, Number(parts[3] || 0) * 1024);
+      return {
+        deviceId: parts[0],
+        mountPath: parts[5],
+        volumeName: '',
+        fileSystem: '',
+        driveTypeCode: 3,
+        driveType: 'fixed',
+        sizeBytes,
+        freeBytes,
+        usedBytes,
+        totalGb: Number((sizeBytes / (1024 ** 3)).toFixed(2)),
+        freeGb: Number((freeBytes / (1024 ** 3)).toFixed(2)),
+        usedGb: Number((usedBytes / (1024 ** 3)).toFixed(2)),
+        usedPercent: sizeBytes > 0 ? Math.round((usedBytes / sizeBytes) * 100) : 0
+      };
+    }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function recommendAutoPathsFromScan(partitions = [], currentPrefs = {}) {
+  const isValidDirectory = (candidate) => {
+    const value = String(candidate || '').trim();
+    if (!value) return false;
+    try {
+      return fs.existsSync(value) && fs.statSync(value).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+
+  const bestPartition = [...(Array.isArray(partitions) ? partitions : [])]
+    .filter((item) => item && String(item.driveType || '').toLowerCase() === 'fixed' && Number(item.freeBytes || 0) > 0)
+    .sort((a, b) => Number(b.freeBytes || 0) - Number(a.freeBytes || 0))[0]
+    || null;
+
+  const defaultRoot = path.parse(getDefaultInstallPath()).root || process.cwd();
+  const rootMount = String(bestPartition?.mountPath || defaultRoot).trim() || defaultRoot;
+  const autoRoot = path.join(rootMount, 'VM Xposed');
+  const fallbackInstallPath = path.join(autoRoot, 'V Os');
+  const fallbackDownloadPath = path.join(autoRoot, 'Downloads');
+  const fallbackSharedPath = path.join(autoRoot, 'Shared');
+
+  return {
+    installPath: isValidDirectory(currentPrefs.installPath) ? String(currentPrefs.installPath).trim() : fallbackInstallPath,
+    downloadPath: isValidDirectory(currentPrefs.downloadPath) ? String(currentPrefs.downloadPath).trim() : fallbackDownloadPath,
+    sharedFolderPath: isValidDirectory(currentPrefs.sharedFolderPath) ? String(currentPrefs.sharedFolderPath).trim() : fallbackSharedPath,
+    primaryPartition: bestPartition
+      ? {
+          mountPath: bestPartition.mountPath,
+          freeGb: bestPartition.freeGb,
+          totalGb: bestPartition.totalGb,
+          fileSystem: bestPartition.fileSystem || '',
+          volumeName: bestPartition.volumeName || ''
+        }
+      : null
+  };
+}
+
+function detectVmPathCandidates(partitions = [], vmStorageItems = [], preferredInstallPath = '') {
+  const unique = [];
+  const seen = new Set();
+  const addPath = (candidatePath = '') => {
+    const normalized = String(candidatePath || '').trim();
+    if (!normalized) return;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) return;
+    try {
+      if (!fs.existsSync(normalized) || !fs.statSync(normalized).isDirectory()) return;
+    } catch {
+      return;
+    }
+    seen.add(key);
+    unique.push(normalized);
+  };
+
+  (Array.isArray(vmStorageItems) ? vmStorageItems : []).forEach((item) => {
+    addPath(item?.vmDir || '');
+    if (item?.cfgFile) {
+      addPath(path.dirname(String(item.cfgFile)));
+    }
+  });
+
+  addPath(path.join(os.homedir(), 'VirtualBox VMs'));
+
+  (Array.isArray(partitions) ? partitions : [])
+    .filter((entry) => String(entry?.driveType || '').toLowerCase() === 'fixed')
+    .forEach((entry) => {
+      const root = String(entry?.mountPath || '').trim();
+      if (!root) return;
+      addPath(path.join(root, 'VirtualBox VMs'));
+    });
+
+  addPath(preferredInstallPath);
+  return unique;
+}
+
+async function runFullSystemScan() {
+  const warnings = [];
+  const timestamp = new Date().toISOString();
+  const currentPrefs = readUiPrefsFromDisk();
+  applyPreferredVirtualBoxPath(currentPrefs);
+
+  const partitions = await collectHostPartitions();
+  const recommendations = recommendAutoPathsFromScan(partitions, currentPrefs);
+
+  const ensureDirectory = async (targetPath, label) => {
+    const value = String(targetPath || '').trim();
+    if (!value) return;
+    try {
+      await fs.promises.mkdir(value, { recursive: true });
+    } catch (err) {
+      warnings.push(`${label} could not be prepared: ${err.message}`);
+    }
+  };
+
+  await ensureDirectory(recommendations.installPath, 'Install path');
+  await ensureDirectory(recommendations.downloadPath, 'Download path');
+  await ensureDirectory(recommendations.sharedFolderPath, 'Shared folder path');
+
+  let vboxPath = '';
+  let vboxVersion = null;
+  try {
+    await virtualbox.init();
+    if (virtualbox.isInstalled()) {
+      vboxPath = String(virtualbox.vboxManagePath || '').trim();
+      vboxVersion = await virtualbox.getVersion();
+    }
+  } catch (err) {
+    warnings.push(`VirtualBox detection warning: ${err.message}`);
+  }
+
+  let vmStorage = { success: true, totalBytes: 0, totalGb: 0, items: [] };
+  if (vboxPath) {
+    try {
+      vmStorage = await collectVmStorageUsage();
+    } catch (err) {
+      vmStorage = { success: false, totalBytes: 0, totalGb: 0, items: [] };
+      warnings.push(`V Os path detection warning: ${err.message}`);
+    }
+  }
+
+  const detectedVmPaths = detectVmPathCandidates(partitions, vmStorage.items, recommendations.installPath);
+
+  let systemReport = null;
+  try {
+    systemReport = await runSystemCheck(recommendations.installPath, {
+      preferredVBoxPath: vboxPath || currentPrefs.virtualBoxPath || ''
+    });
+  } catch (err) {
+    warnings.push(`System report warning: ${err.message}`);
+  }
+
+  const mergedPrefs = {
+    ...currentPrefs,
+    installPath: recommendations.installPath,
+    downloadPath: recommendations.downloadPath,
+    sharedFolderPath: recommendations.sharedFolderPath,
+    enableSharedFolder: !!recommendations.sharedFolderPath,
+    virtualBoxPath: vboxPath || String(currentPrefs.virtualBoxPath || '').trim(),
+    trustedPaths: mergePathListString(currentPrefs.trustedPaths, [recommendations.sharedFolderPath, ...detectedVmPaths]),
+    lastFullScanAt: timestamp,
+    fullScanPartitionCount: partitions.length,
+    fullScanDetectedVmPathCount: detectedVmPaths.length,
+    autoDetectedVmPaths: detectedVmPaths.join('; '),
+    preferredVmPath: detectedVmPaths[0] || ''
+  };
+
+  await writeUiPrefsToDisk(mergedPrefs);
+  applyPreferredVirtualBoxPath(mergedPrefs);
+  applyLoggerPreferences(mergedPrefs);
+  await pruneLogFilesByRetention(mergedPrefs.logRetentionDays);
+
+  return {
+    success: true,
+    timestamp,
+    warnings,
+    prefs: mergedPrefs,
+    recommendations,
+    partitions,
+    systemReport,
+    virtualBox: {
+      installed: !!vboxPath,
+      path: vboxPath,
+      version: vboxVersion
+    },
+    vmStorage: {
+      totalBytes: Number(vmStorage?.totalBytes || 0),
+      totalGb: Number(vmStorage?.totalGb || 0),
+      items: Array.isArray(vmStorage?.items) ? vmStorage.items : []
+    },
+    detectedVmPaths
+  };
 }
 
 function resolveAppIconPath() {
@@ -155,6 +642,326 @@ function resolveAppIcon() {
   return createFallbackAppIcon();
 }
 
+const UPDATE_REPO_OWNER = 'Jeet1511';
+const UPDATE_REPO_NAME = 'VM-Manager';
+const UPDATE_REPO_BRANCH = 'main';
+const UPDATE_INSTALLER_DIR = 'Installer';
+const UPDATE_PATCH_NOTES_DIR = 'Patch notes';
+const GITHUB_UPDATES_PAGE = `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/tree/${encodeURIComponent(UPDATE_REPO_BRANCH)}`;
+
+function normalizeVersionString(version) {
+  return String(version || '').trim().replace(/^v/i, '');
+}
+
+function parseVersionParts(version) {
+  const base = normalizeVersionString(version).split('-')[0];
+  const parts = base.split('.').map((part) => parseInt(part, 10));
+  return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+}
+
+function isVersionNewer(latestVersion, currentVersion) {
+  const latest = parseVersionParts(latestVersion);
+  const current = parseVersionParts(currentVersion);
+  for (let i = 0; i < 3; i++) {
+    if (latest[i] > current[i]) return true;
+    if (latest[i] < current[i]) return false;
+  }
+  return false;
+}
+
+function compareVersions(a, b) {
+  const left = parseVersionParts(a);
+  const right = parseVersionParts(b);
+  for (let i = 0; i < 3; i++) {
+    if (left[i] > right[i]) return 1;
+    if (left[i] < right[i]) return -1;
+  }
+  return 0;
+}
+
+function encodeRepoPath(repoPath) {
+  return String(repoPath || '')
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
+function buildRepoContentsApiUrl(repoPath) {
+  const encodedPath = encodeRepoPath(repoPath);
+  const base = `https://api.github.com/repos/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/contents`;
+  return `${base}/${encodedPath}?ref=${encodeURIComponent(UPDATE_REPO_BRANCH)}`;
+}
+
+function buildRepoTreePageUrl(repoPath) {
+  const encodedPath = encodeRepoPath(repoPath);
+  if (!encodedPath) return GITHUB_UPDATES_PAGE;
+  return `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/tree/${encodeURIComponent(UPDATE_REPO_BRANCH)}/${encodedPath}`;
+}
+
+function extractVersionFromName(name) {
+  const match = String(name || '').match(/v?(\d+\.\d+\.\d+)/i);
+  return match ? normalizeVersionString(match[1]) : '';
+}
+
+function isTrustedRepoAssetUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    const host = parsed.hostname.toLowerCase();
+    const allowedHosts = [
+      'raw.githubusercontent.com',
+      'objects.githubusercontent.com',
+      'github.com'
+    ];
+    return allowedHosts.includes(host) || host.endsWith('.githubusercontent.com');
+  } catch {
+    return false;
+  }
+}
+
+function fetchJsonWithRedirects(url, redirectCount = 0) {
+  const MAX_REDIRECTS = 5;
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `VM-Xposed-Updater/${app.getVersion() || '0.0.0'}`
+      },
+      timeout: 15000
+    }, (response) => {
+      const statusCode = Number(response.statusCode || 0);
+      if ([301, 302, 303, 307, 308].includes(statusCode) && response.headers.location) {
+        if (redirectCount >= MAX_REDIRECTS) {
+          response.resume();
+          reject(new Error('Too many redirects while checking updates.'));
+          return;
+        }
+        const nextUrl = new URL(response.headers.location, url).toString();
+        response.resume();
+        fetchJsonWithRedirects(nextUrl, redirectCount + 1).then(resolve).catch(reject);
+        return;
+      }
+
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => {
+        if (statusCode < 200 || statusCode >= 300) {
+          const details = body ? ` ${body.slice(0, 240)}` : '';
+          reject(new Error(`Update check failed (${statusCode}).${details}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(body || '{}'));
+        } catch (err) {
+          reject(new Error(`Invalid update response: ${err.message}`));
+        }
+      });
+    });
+    request.on('timeout', () => request.destroy(new Error('Update check timed out.')));
+    request.on('error', reject);
+  });
+}
+
+function fetchTextWithRedirects(url, redirectCount = 0) {
+  const MAX_REDIRECTS = 5;
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, {
+      headers: { 'User-Agent': `VM-Xposed-Updater/${app.getVersion() || '0.0.0'}` },
+      timeout: 20000
+    }, (response) => {
+      const statusCode = Number(response.statusCode || 0);
+      if ([301, 302, 303, 307, 308].includes(statusCode) && response.headers.location) {
+        if (redirectCount >= MAX_REDIRECTS) {
+          response.resume();
+          reject(new Error('Too many redirects while reading patch notes.'));
+          return;
+        }
+        const nextUrl = new URL(response.headers.location, url).toString();
+        response.resume();
+        fetchTextWithRedirects(nextUrl, redirectCount + 1).then(resolve).catch(reject);
+        return;
+      }
+
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => {
+        if (statusCode < 200 || statusCode >= 300) {
+          reject(new Error(`Patch notes fetch failed (${statusCode}).`));
+          return;
+        }
+        resolve(String(body || '').trim());
+      });
+    });
+    request.on('timeout', () => request.destroy(new Error('Patch notes request timed out.')));
+    request.on('error', reject);
+  });
+}
+
+function pickLatestVersionedFile(entries = [], predicate = () => true) {
+  return entries
+    .filter((entry) => entry?.type === 'file' && predicate(entry))
+    .map((entry) => ({
+      ...entry,
+      parsedVersion: extractVersionFromName(entry.name)
+    }))
+    .filter((entry) => !!entry.parsedVersion)
+    .sort((a, b) => compareVersions(b.parsedVersion, a.parsedVersion))[0] || null;
+}
+
+async function checkForLatestReleaseUpdate() {
+  const currentVersion = app.getVersion();
+  const installerEntries = await fetchJsonWithRedirects(buildRepoContentsApiUrl(UPDATE_INSTALLER_DIR));
+  const patchNoteEntries = await fetchJsonWithRedirects(buildRepoContentsApiUrl(UPDATE_PATCH_NOTES_DIR));
+
+  if (!Array.isArray(installerEntries) || installerEntries.length === 0) {
+    throw new Error(`No installers found in "${UPDATE_INSTALLER_DIR}" folder.`);
+  }
+
+  const latestInstaller = pickLatestVersionedFile(installerEntries, (entry) => /\.exe$/i.test(String(entry?.name || '')));
+  if (!latestInstaller) {
+    throw new Error(`No versioned installer file found in "${UPDATE_INSTALLER_DIR}". Use names like VM-Xposed-Setup-v1.0.1.exe.`);
+  }
+
+  const patchFiles = Array.isArray(patchNoteEntries)
+    ? patchNoteEntries
+      .filter((entry) => entry?.type === 'file' && /\.(txt|md)$/i.test(String(entry?.name || '')))
+      .map((entry) => ({ ...entry, parsedVersion: extractVersionFromName(entry.name) }))
+      .filter((entry) => !!entry.parsedVersion)
+    : [];
+  patchFiles.sort((a, b) => compareVersions(b.parsedVersion, a.parsedVersion));
+
+  let selectedPatch = patchFiles.find((entry) => entry.parsedVersion === latestInstaller.parsedVersion) || null;
+  if (!selectedPatch && patchFiles.length > 0) selectedPatch = patchFiles[0];
+
+  let releaseNotes = '';
+  if (selectedPatch?.download_url) {
+    try {
+      releaseNotes = await fetchTextWithRedirects(selectedPatch.download_url);
+    } catch (err) {
+      releaseNotes = `Patch notes could not be loaded: ${err.message}`;
+    }
+  }
+
+  const latestVersion = normalizeVersionString(latestInstaller.parsedVersion || '');
+  const hasUpdate = Boolean(latestVersion && isVersionNewer(latestVersion, currentVersion));
+
+  return {
+    success: true,
+    currentVersion: normalizeVersionString(currentVersion),
+    latestVersion: latestVersion || normalizeVersionString(currentVersion),
+    hasUpdate,
+    releaseName: `v${latestVersion}`,
+    publishedAt: '',
+    releaseNotes: String(releaseNotes || '').trim(),
+    installerName: String(latestInstaller?.name || ''),
+    installerUrl: String(latestInstaller?.download_url || ''),
+    installerSize: Number(latestInstaller?.size || 0),
+    patchNotesName: String(selectedPatch?.name || ''),
+    patchNotesUrl: String(selectedPatch?.download_url || ''),
+    patchHistory: patchFiles.map((entry) => ({
+      version: String(entry.parsedVersion || ''),
+      name: String(entry.name || ''),
+      url: String(entry.download_url || '')
+    })),
+    releasesPage: buildRepoTreePageUrl(UPDATE_INSTALLER_DIR),
+    patchNotesPage: buildRepoTreePageUrl(UPDATE_PATCH_NOTES_DIR)
+  };
+}
+
+function downloadFileWithRedirects(url, destinationPath, redirectCount = 0) {
+  const MAX_REDIRECTS = 5;
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, {
+      headers: { 'User-Agent': `VM-Xposed-Updater/${app.getVersion() || '0.0.0'}` },
+      timeout: 30000
+    }, (response) => {
+      const statusCode = Number(response.statusCode || 0);
+      if ([301, 302, 303, 307, 308].includes(statusCode) && response.headers.location) {
+        if (redirectCount >= MAX_REDIRECTS) {
+          response.resume();
+          reject(new Error('Too many redirects while downloading update installer.'));
+          return;
+        }
+        const nextUrl = new URL(response.headers.location, url).toString();
+        response.resume();
+        downloadFileWithRedirects(nextUrl, destinationPath, redirectCount + 1).then(resolve).catch(reject);
+        return;
+      }
+
+      if (statusCode < 200 || statusCode >= 300) {
+        response.resume();
+        reject(new Error(`Installer download failed (${statusCode}).`));
+        return;
+      }
+
+      fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+      const fileStream = fs.createWriteStream(destinationPath);
+      response.pipe(fileStream);
+      fileStream.on('finish', () => fileStream.close(() => resolve({ success: true, filePath: destinationPath })));
+      fileStream.on('error', (err) => {
+        try { fs.unlinkSync(destinationPath); } catch {}
+        reject(err);
+      });
+      response.on('error', (err) => {
+        try { fs.unlinkSync(destinationPath); } catch {}
+        reject(err);
+      });
+    });
+    request.on('timeout', () => request.destroy(new Error('Installer download timed out.')));
+    request.on('error', reject);
+  });
+}
+
+async function downloadAndInstallLatestRelease(payload = {}) {
+  const installerUrl = String(payload.installerUrl || '').trim();
+  const targetVersion = normalizeVersionString(payload.version || '');
+  const updateInfo = installerUrl
+    ? (() => {
+      let installerName = 'VM-Xposed-Installer.exe';
+      try {
+        const parsedUrl = new URL(installerUrl);
+        installerName = path.basename(parsedUrl.pathname) || installerName;
+      } catch {}
+      return {
+        success: true,
+        currentVersion: normalizeVersionString(app.getVersion()),
+        latestVersion: targetVersion || '',
+        installerUrl,
+        installerName
+      };
+    })()
+    : (() => null)();
+
+  const resolvedUpdateInfo = updateInfo || await checkForLatestReleaseUpdate();
+
+  if (!resolvedUpdateInfo.installerUrl) {
+    throw new Error('No installer asset is published for the latest release.');
+  }
+
+  const extension = path.extname(resolvedUpdateInfo.installerName || '.exe') || '.exe';
+  const safeVersion = normalizeVersionString(resolvedUpdateInfo.latestVersion || resolvedUpdateInfo.currentVersion || 'latest').replace(/[^\w.-]/g, '_');
+  const installerPath = path.join(app.getPath('temp'), `VM-Xposed-Installer-${safeVersion}${extension}`);
+  await downloadFileWithRedirects(resolvedUpdateInfo.installerUrl, installerPath);
+
+  const launchError = await shell.openPath(installerPath);
+  if (launchError) {
+    throw new Error(launchError);
+  }
+
+  setTimeout(() => {
+    try { app.quit(); } catch {}
+  }, 900);
+
+  return {
+    success: true,
+    installerPath,
+    launched: true,
+    latestVersion: resolvedUpdateInfo.latestVersion || resolvedUpdateInfo.currentVersion
+  };
+}
+
 function parseVmNamesFromList(rawOutput) {
   return String(rawOutput || '')
     .split('\n')
@@ -167,12 +974,326 @@ function parseVmNamesFromList(rawOutput) {
     .filter(Boolean);
 }
 
+async function getGuestDisplayFullscreenPreference(vmName) {
+  try {
+    const guestPrefOut = await virtualbox._run(['getextradata', vmName, 'VMXposed/GuestDisplayFullscreen']);
+    const prefMatch = String(guestPrefOut || '').match(/Value:\s*(.+)/i);
+    if (prefMatch && prefMatch[1]) {
+      const value = prefMatch[1].trim().toLowerCase();
+      return value !== 'off';
+    }
+  } catch {}
+
+  try {
+    const legacyOut = await virtualbox._run(['getextradata', vmName, 'GUI/Fullscreen']);
+    const legacyMatch = String(legacyOut || '').match(/Value:\s*(.+)/i);
+    if (legacyMatch && legacyMatch[1]) {
+      const value = legacyMatch[1].trim().toLowerCase();
+      return value !== 'off';
+    }
+  } catch {}
+
+  return true;
+}
+
+async function getVmIntegrationModePreference(vmName, key) {
+  try {
+    const out = await virtualbox._run(['getextradata', vmName, key]);
+    const match = String(out || '').match(/Value:\s*(.+)/i);
+    if (match && match[1]) {
+      const value = match[1].trim().toLowerCase();
+      if (['disabled', 'hosttoguest', 'guesttohost', 'bidirectional'].includes(value)) {
+        return value;
+      }
+    }
+  } catch {}
+  return '';
+}
+
+async function getPreferredRuntimeIntegrationModes(vmName, vmInfo = null) {
+  const normalizeIntegrationMode = (raw, fallback = 'bidirectional') => {
+    const value = String(raw || '').toLowerCase();
+    return ['disabled', 'hosttoguest', 'guesttohost', 'bidirectional'].includes(value) ? value : fallback;
+  };
+
+  const info = vmInfo || await virtualbox.getVMInfo(vmName);
+  const persistedClipboard = await getVmIntegrationModePreference(vmName, 'VMXposed/ClipboardMode');
+  const persistedDnD = await getVmIntegrationModePreference(vmName, 'VMXposed/DragAndDropMode');
+
+  return {
+    clipboardMode: persistedClipboard || normalizeIntegrationMode(info.clipboard || info['clipboard-mode']),
+    dragAndDrop: persistedDnD || normalizeIntegrationMode(info.draganddrop || info['drag-and-drop'])
+  };
+}
+
+function getPrimaryDisplayResolution() {
+  try {
+    const primary = screen.getPrimaryDisplay();
+    const size = primary?.workAreaSize || primary?.size || {};
+    const width = Math.max(1024, parseInt(size.width || 0, 10) || 0);
+    const height = Math.max(768, parseInt(size.height || 0, 10) || 0);
+    if (width > 0 && height > 0) {
+      return { width, height };
+    }
+  } catch {}
+  return { width: 1920, height: 1080 };
+}
+
+async function waitForVmState(vmName, desiredState = 'running', timeoutMs = 45000, intervalMs = 1500) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const state = String(await virtualbox.getVMState(vmName) || '').toLowerCase();
+      if (state === String(desiredState || '').toLowerCase()) return true;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
+function scheduleDeferredRuntimeIntegration(vmName, runtimeOptions = {}, delayMs = 4000) {
+  const targetVm = String(vmName || '').trim();
+  if (!targetVm || runtimeIntegrationQueue.has(targetVm)) return;
+
+  const cooldownMs = Math.max(5000, Number(runtimeOptions.cooldownMs || 0) || 30000);
+  const now = Date.now();
+  const last = Number(runtimeIntegrationLastScheduledAt.get(targetVm) || 0);
+  if (now - last < cooldownMs) return;
+
+  runtimeIntegrationQueue.set(targetVm, true);
+  runtimeIntegrationLastScheduledAt.set(targetVm, now);
+  setTimeout(async () => {
+    try {
+      const state = String(await virtualbox.getVMState(targetVm) || '').toLowerCase();
+      if (state !== 'running') return;
+
+      const result = await virtualbox.applyRuntimeIntegration(targetVm, {
+        ...runtimeOptions,
+        waitForGuestAdditionsMs: Math.max(120000, Number(runtimeOptions.waitForGuestAdditionsMs || 0))
+      });
+      if (Array.isArray(result?.warnings) && result.warnings.length > 0) {
+        logger.warn('App', `Deferred runtime integration warnings for "${targetVm}": ${result.warnings.join(' | ')}`);
+      }
+    } catch (err) {
+      logger.warn('App', `Deferred runtime integration failed for "${targetVm}": ${err.message}`);
+    } finally {
+      runtimeIntegrationQueue.delete(targetVm);
+    }
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function rememberVmState(vmName, state = 'unknown') {
+  const targetVm = String(vmName || '').trim();
+  if (!targetVm) return;
+  const normalized = String(state || 'unknown').toLowerCase();
+  vmLastKnownState.set(targetVm, normalized);
+  if (normalized !== 'running') {
+    runtimeIntegrationLastScheduledAt.delete(targetVm);
+    runtimeIntegrationQueue.delete(targetVm);
+  }
+}
+
+function shouldAutoApplyOnStart(vmName, state = 'unknown') {
+  const targetVm = String(vmName || '').trim();
+  if (!targetVm) return false;
+  const normalized = String(state || 'unknown').toLowerCase();
+  const previous = String(vmLastKnownState.get(targetVm) || 'unknown').toLowerCase();
+  rememberVmState(targetVm, normalized);
+  return normalized === 'running' && previous !== 'running';
+}
+
+function normalizeFilePathForCompare(filePath) {
+  return path.resolve(String(filePath || '')).replace(/\\/g, '/').toLowerCase();
+}
+
+function findVboxFilesInFolder(rootFolder, maxDepth = 4) {
+  const results = [];
+  const root = path.resolve(rootFolder);
+
+  function walk(currentDir, depth) {
+    if (depth > maxDepth) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const full = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, depth + 1);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.vbox')) {
+        results.push(full);
+      }
+    }
+  }
+
+  walk(root, 0);
+  return results;
+}
+
+function readVmNameFromVboxFile(vboxFilePath) {
+  try {
+    const xml = fs.readFileSync(vboxFilePath, 'utf8');
+    const match = xml.match(/<Machine[^>]*\sname="([^"]+)"/i);
+    if (match && match[1]) return match[1].trim();
+  } catch {}
+  return path.basename(vboxFilePath, '.vbox');
+}
+
+async function findRegisteredVmByCfgFile(vboxFilePath) {
+  const wanted = normalizeFilePathForCompare(vboxFilePath);
+  const listRaw = await virtualbox._run(['list', 'vms']);
+  const vmNames = parseVmNamesFromList(listRaw);
+
+  for (const vmName of vmNames) {
+    try {
+      const info = await virtualbox.getVMInfo(vmName);
+      const cfg = info?.CfgFile ? normalizeFilePathForCompare(info.CfgFile) : '';
+      if (cfg && cfg === wanted) {
+        return vmName;
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+async function resolveVmFromFolder(folderPath, options = {}) {
+  const { registerIfNeeded = false } = options;
+  const targetFolder = String(folderPath || '').trim();
+
+  if (!targetFolder) {
+    return { success: false, error: 'Folder path is required.' };
+  }
+
+  if (!fs.existsSync(targetFolder) || !fs.statSync(targetFolder).isDirectory()) {
+    return { success: false, error: 'Selected path is not a valid folder.' };
+  }
+
+  await virtualbox.init();
+
+  const vboxFiles = findVboxFilesInFolder(targetFolder, 4);
+  if (vboxFiles.length === 0) {
+    return {
+      success: false,
+      error: 'No VirtualBox machine file (.vbox) found in selected folder.'
+    };
+  }
+
+  const selectedVboxFile = vboxFiles[0];
+  const vmNameFromFile = readVmNameFromVboxFile(selectedVboxFile);
+  const alreadyRegisteredByCfg = await findRegisteredVmByCfgFile(selectedVboxFile);
+  if (alreadyRegisteredByCfg) {
+    return {
+      success: true,
+      vmName: alreadyRegisteredByCfg,
+      vboxFile: selectedVboxFile,
+      registered: true,
+      imported: false
+    };
+  }
+
+  if (!registerIfNeeded) {
+    return {
+      success: true,
+      vmName: vmNameFromFile,
+      vboxFile: selectedVboxFile,
+      registered: false,
+      imported: false
+    };
+  }
+
+  try {
+    await virtualbox._run(['registervm', selectedVboxFile]);
+  } catch (err) {
+    const existing = await findRegisteredVmByCfgFile(selectedVboxFile);
+    if (!existing) {
+      return { success: false, error: `Failed to register V Os from folder: ${err.message}` };
+    }
+  }
+
+  const registeredName = await findRegisteredVmByCfgFile(selectedVboxFile);
+  if (!registeredName) {
+    return {
+      success: false,
+      error: 'V Os registration command completed, but V Os could not be detected in VirtualBox list.'
+    };
+  }
+
+  return {
+    success: true,
+    vmName: registeredName,
+    vboxFile: selectedVboxFile,
+    registered: true,
+    imported: true
+  };
+}
+
+async function scanDownloadedVMs(rootPath) {
+  const requestedRoot = String(rootPath || '').trim();
+  if (!requestedRoot) {
+    return { success: true, candidates: [] };
+  }
+
+  if (!fs.existsSync(requestedRoot)) {
+    return { success: true, candidates: [] };
+  }
+
+  let rootStats = null;
+  try {
+    rootStats = fs.statSync(requestedRoot);
+  } catch {
+    return { success: true, candidates: [] };
+  }
+
+  if (!rootStats?.isDirectory()) {
+    return { success: true, candidates: [] };
+  }
+
+  await virtualbox.init();
+
+  const vboxFiles = findVboxFilesInFolder(requestedRoot, 6);
+  const seen = new Set();
+  const candidates = [];
+
+  for (const vboxFile of vboxFiles) {
+    const normalized = normalizeFilePathForCompare(vboxFile);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+
+    let registeredVmName = null;
+    try {
+      registeredVmName = await findRegisteredVmByCfgFile(vboxFile);
+    } catch {}
+
+    const vmNameFromFile = readVmNameFromVboxFile(vboxFile);
+    candidates.push({
+      vmName: registeredVmName || vmNameFromFile,
+      vboxFile,
+      folderPath: path.dirname(vboxFile),
+      registered: !!registeredVmName,
+      registeredVmName: registeredVmName || null
+    });
+  }
+
+  candidates.sort((a, b) => String(a.vmName || '').localeCompare(String(b.vmName || '')));
+
+  return {
+    success: true,
+    rootPath: requestedRoot,
+    candidates
+  };
+}
+
 async function refreshCatalogInBackground(reason = 'manual') {
   if (isCatalogRefreshRunning) return;
   isCatalogRefreshRunning = true;
   try {
     const refreshed = await refreshOfficialCatalog(runtimeOSCatalog, logger);
     runtimeOSCatalog = refreshed.catalog;
+    await persistRuntimeCatalog(`background:${reason}`);
     logger.info('CatalogUpdater', `Background catalog refresh (${reason}) complete. Added ${refreshed.totalAdded || 0} entries.`);
   } catch (err) {
     logger.warn('CatalogUpdater', `Background catalog refresh (${reason}) failed: ${err.message}`);
@@ -198,7 +1319,7 @@ async function shutdownRunningVMsOnExit() {
     const runningVms = parseVmNamesFromList(runningRaw);
     if (runningVms.length === 0) return;
 
-    logger.info('App', `Stopping ${runningVms.length} running VM(s) before exit...`);
+    logger.info('App', `Stopping ${runningVms.length} running V Os before exit...`);
 
     for (const vmName of runningVms) {
       try {
@@ -233,7 +1354,7 @@ async function shutdownRunningVMsOnExit() {
       }
     }
   } catch (err) {
-    logger.warn('App', `Failed to stop running VMs on exit: ${err.message}`);
+    logger.warn('App', `Failed to stop running V Os on exit: ${err.message}`);
   }
 }
 
@@ -256,20 +1377,46 @@ function isRunningAsAdmin() {
  * Restart the app with admin privileges (Windows UAC elevation).
  */
 function restartAsAdmin() {
-  if (process.platform !== 'win32') return;
-  
-  const appPath = process.argv[0];
-  const args = process.argv.slice(1).join(' ');
-  
+  if (process.platform !== 'win32') {
+    return { success: false, error: 'Administrator elevation is only supported on Windows.' };
+  }
+
+  const exePath = app.getPath('exe');
+  const args = process.argv.slice(1);
+
+  const escapedExePath = String(exePath).replace(/'/g, "''");
+  const psArgList = args
+    .map((arg) => `'${String(arg).replace(/'/g, "''")}'`)
+    .join(', ');
+  const psCommand = [
+    `$proc = Start-Process -FilePath '${escapedExePath}' -ArgumentList @(${psArgList}) -Verb RunAs -PassThru`,
+    'if ($null -eq $proc) { exit 1 }',
+    'exit 0'
+  ].join('; ');
+
   try {
-    // Use PowerShell to trigger UAC
-    exec(`powershell -Command "Start-Process '${appPath}' -ArgumentList '${args}' -Verb RunAs"`, (err) => {
-      if (!err) {
-        app.quit();
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCommand],
+      { windowsHide: true, timeout: 30000 },
+      (err) => {
+        if (!err) {
+          logger.info('App', 'Restarting in Administrator mode...');
+          try {
+            app.releaseSingleInstanceLock();
+          } catch {}
+          app.quit();
+          return;
+        }
+
+        logger.warn('App', `Admin relaunch request failed or was cancelled: ${err.message}`);
       }
-    });
+    );
+
+    return { success: true, restarting: true };
   } catch (err) {
     logger.error('App', `Failed to restart as admin: ${err.message}`);
+    return { success: false, error: err.message };
   }
 }
 
@@ -310,7 +1457,7 @@ function getPermissionsReport() {
       report.checks.push({
         name: 'VBox Kernel Driver',
         status: isRunning ? 'granted' : 'required',
-        description: isRunning ? 'VBoxSup driver is loaded and running' : 'VBoxSup driver is stopped — VMs cannot start'
+        description: isRunning ? 'VBoxSup driver is loaded and running' : 'VBoxSup driver is stopped — V Os cannot start'
       });
     } catch {
       report.checks.push({ name: 'VBox Kernel Driver', status: 'unknown', description: 'Could not check VBoxSup driver status' });
@@ -352,6 +1499,258 @@ function getPermissionsReport() {
   return report;
 }
 
+async function runPowerShellJson(command) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+      { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 * 2 },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error(stderr?.trim() || err.message));
+          return;
+        }
+        try {
+          const rawOutput = String(stdout || '').trim();
+          const candidate = rawOutput || '{}';
+          try {
+            resolve(JSON.parse(candidate));
+            return;
+          } catch {
+            const firstBrace = candidate.indexOf('{');
+            const lastBrace = candidate.lastIndexOf('}');
+            if (firstBrace >= 0 && lastBrace > firstBrace) {
+              try {
+                resolve(JSON.parse(candidate.slice(firstBrace, lastBrace + 1)));
+              } catch {
+                resolve({});
+              }
+              return;
+            }
+            resolve({});
+          }
+        } catch (parseErr) {
+          reject(new Error(`Invalid JSON from PowerShell: ${parseErr.message}`));
+        }
+      }
+    );
+  });
+}
+
+async function getRealtimeHostMetrics() {
+  if (process.platform !== 'win32') {
+    return {
+      success: true,
+      timestamp: new Date().toISOString(),
+      diskReadBytesPerSec: 0,
+      diskWriteBytesPerSec: 0,
+      netRxBytesPerSec: 0,
+      netTxBytesPerSec: 0,
+      adapters: []
+    };
+  }
+
+  const normalizeMetrics = (metrics = {}) => {
+    const rawAdapters = Array.isArray(metrics.adapters)
+      ? metrics.adapters
+      : (metrics.adapters && typeof metrics.adapters === 'object' ? [metrics.adapters] : []);
+    return {
+      success: metrics.success !== false,
+      timestamp: metrics.timestamp || new Date().toISOString(),
+      diskReadBytesPerSec: Number(metrics.diskReadBytesPerSec || 0),
+      diskWriteBytesPerSec: Number(metrics.diskWriteBytesPerSec || 0),
+      netRxBytesPerSec: Number(metrics.netRxBytesPerSec || 0),
+      netTxBytesPerSec: Number(metrics.netTxBytesPerSec || 0),
+      adapters: rawAdapters.map((adapter) => ({
+        name: String(adapter.Name || adapter.name || ''),
+        bytesReceivedPerSec: Number(adapter.BytesReceivedPersec || adapter.bytesReceivedPerSec || 0),
+        bytesSentPerSec: Number(adapter.BytesSentPersec || adapter.bytesSentPerSec || 0),
+        bytesTotalPerSec: Number(adapter.BytesTotalPersec || adapter.bytesTotalPerSec || 0)
+      }))
+    };
+  };
+  const scoreMetrics = (metrics = {}) => {
+    const adapterCount = Array.isArray(metrics.adapters) ? metrics.adapters.length : 0;
+    const networkThroughput = Number(metrics.netRxBytesPerSec || 0) + Number(metrics.netTxBytesPerSec || 0);
+    const diskThroughput = Number(metrics.diskReadBytesPerSec || 0) + Number(metrics.diskWriteBytesPerSec || 0);
+    return (adapterCount * 10) + (networkThroughput > 0 ? 4 : 0) + (diskThroughput > 0 ? 2 : 0);
+  };
+
+  const psScript = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$diskRead = 0; $diskWrite = 0; $rx = 0; $tx = 0; $adapters = @()",
+    "$excludePattern = 'Loopback|isatap|Teredo|Pseudo|VMware|VirtualBox Host-Only|Npcap|Bluetooth|vEthernet|Hyper-V|TAP-Windows|Host-Only|docker|vethernet'",
+    "try {",
+    "  $disk = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk | Where-Object { $_.Name -eq '_Total' } | Select-Object -First 1 DiskReadBytesPersec,DiskWriteBytesPersec",
+    "  if ($disk) {",
+    "    if ($disk.PSObject.Properties['DiskReadBytesPersec']) { $diskRead = [double]$disk.DiskReadBytesPersec }",
+    "    if ($disk.PSObject.Properties['DiskWriteBytesPersec']) { $diskWrite = [double]$disk.DiskWriteBytesPersec }",
+    "  }",
+    "} catch {}",
+    "try {",
+    "  $netRows = @(Get-CimInstance Win32_PerfFormattedData_Tcpip_NetworkInterface)",
+    "  if ($netRows.Count -eq 0) {",
+    "    $netRows = @(Get-CimInstance Win32_PerfFormattedData_Counters_NetworkInterface)",
+    "  }",
+    "  $netRows = @($netRows | Where-Object { $_.Name -and $_.Name -notmatch $excludePattern })",
+    "  foreach ($row in $netRows) {",
+    "    $recv = 0; $sent = 0",
+    "    if ($row.PSObject.Properties['BytesReceivedPersec']) { $recv = [double]$row.BytesReceivedPersec } elseif ($row.PSObject.Properties['BytesReceivedPerSec']) { $recv = [double]$row.BytesReceivedPerSec }",
+    "    if ($row.PSObject.Properties['BytesSentPersec']) { $sent = [double]$row.BytesSentPersec } elseif ($row.PSObject.Properties['BytesSentPerSec']) { $sent = [double]$row.BytesSentPerSec }",
+    "    $total = $recv + $sent",
+    "    $rx += $recv; $tx += $sent",
+    "    $adapters += [PSCustomObject]@{ Name = [string]$row.Name; BytesReceivedPersec = $recv; BytesSentPersec = $sent; BytesTotalPersec = $total }",
+    "  }",
+    "  $adapters = @($adapters | Sort-Object -Property BytesTotalPersec -Descending | Select-Object -First 8)",
+    "} catch {}",
+    "[PSCustomObject]@{",
+    "  success = $true",
+    "  timestamp = (Get-Date).ToString('o')",
+    "  diskReadBytesPerSec = [double]$diskRead",
+    "  diskWriteBytesPerSec = [double]$diskWrite",
+    "  netRxBytesPerSec = [double]$rx",
+    "  netTxBytesPerSec = [double]$tx",
+    "  adapters = $adapters",
+    "} | ConvertTo-Json -Compress -Depth 4"
+  ].join('; ');
+
+  const fallbackScript = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$diskRead = 0; $diskWrite = 0; $rx = 0; $tx = 0; $adapters = @()",
+    "$excludePattern = 'Loopback|isatap|Teredo|Pseudo|VMware|VirtualBox Host-Only|Npcap|Bluetooth|vEthernet|Hyper-V|TAP-Windows|Host-Only|docker|vethernet'",
+    "try {",
+    "  $diskCounter = Get-Counter -Counter @('\\PhysicalDisk(_Total)\\Disk Read Bytes/sec','\\PhysicalDisk(_Total)\\Disk Write Bytes/sec') -SampleInterval 1 -MaxSamples 1",
+    "  foreach ($sample in $diskCounter.CounterSamples) {",
+    "    if ($sample.Path -like '*Disk Read Bytes/sec') { $diskRead = [double]$sample.CookedValue }",
+    "    if ($sample.Path -like '*Disk Write Bytes/sec') { $diskWrite = [double]$sample.CookedValue }",
+    "  }",
+    "} catch {}",
+    "try {",
+    "  $netCounter = Get-Counter -Counter @('\\Network Interface(*)\\Bytes Received/sec','\\Network Interface(*)\\Bytes Sent/sec') -SampleInterval 1 -MaxSamples 1",
+    "  $map = @{}",
+    "  foreach ($sample in $netCounter.CounterSamples) {",
+    "    $name = [string]$sample.InstanceName",
+    "    if (-not $name -or $name -match $excludePattern) { continue }",
+    "    if (-not $map.ContainsKey($name)) {",
+    "      $map[$name] = [PSCustomObject]@{ Name = $name; BytesReceivedPersec = 0; BytesSentPersec = 0; BytesTotalPersec = 0 }",
+    "    }",
+    "    if ($sample.Path -like '*Bytes Received/sec') {",
+    "      $map[$name].BytesReceivedPersec = [double]$sample.CookedValue",
+    "    } elseif ($sample.Path -like '*Bytes Sent/sec') {",
+    "      $map[$name].BytesSentPersec = [double]$sample.CookedValue",
+    "    }",
+    "  }",
+    "  foreach ($item in $map.Values) {",
+    "    $item.BytesTotalPersec = [double]$item.BytesReceivedPersec + [double]$item.BytesSentPersec",
+    "    $rx += [double]$item.BytesReceivedPersec",
+    "    $tx += [double]$item.BytesSentPersec",
+    "    $adapters += $item",
+    "  }",
+    "  $adapters = @($adapters | Sort-Object -Property BytesTotalPersec -Descending | Select-Object -First 8)",
+    "} catch {}",
+    "[PSCustomObject]@{",
+    "  success = $true",
+    "  timestamp = (Get-Date).ToString('o')",
+    "  diskReadBytesPerSec = [double]$diskRead",
+    "  diskWriteBytesPerSec = [double]$diskWrite",
+    "  netRxBytesPerSec = [double]$rx",
+    "  netTxBytesPerSec = [double]$tx",
+    "  adapters = $adapters",
+    "} | ConvertTo-Json -Compress -Depth 4"
+  ].join('; ');
+
+  let primaryMetrics = null;
+  let fallbackMetrics = null;
+  try {
+    primaryMetrics = normalizeMetrics(await runPowerShellJson(psScript));
+  } catch {}
+  try {
+    fallbackMetrics = normalizeMetrics(await runPowerShellJson(fallbackScript));
+  } catch {}
+
+  if (primaryMetrics && fallbackMetrics) {
+    return scoreMetrics(fallbackMetrics) > scoreMetrics(primaryMetrics)
+      ? fallbackMetrics
+      : primaryMetrics;
+  }
+  if (fallbackMetrics) return fallbackMetrics;
+  if (primaryMetrics) return primaryMetrics;
+
+  return {
+    success: false,
+    timestamp: new Date().toISOString(),
+    diskReadBytesPerSec: 0,
+    diskWriteBytesPerSec: 0,
+    netRxBytesPerSec: 0,
+    netTxBytesPerSec: 0,
+    adapters: []
+  };
+}
+
+function getDirectorySizeBytes(rootDir) {
+  if (!rootDir || !fs.existsSync(rootDir)) return 0;
+  let total = 0;
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.toLowerCase() === 'logs') continue;
+        stack.push(full);
+      } else if (entry.isFile()) {
+        try {
+          total += fs.statSync(full).size;
+        } catch {}
+      }
+    }
+  }
+  return total;
+}
+
+async function collectVmStorageUsage() {
+  await virtualbox.init();
+  const listRaw = await virtualbox._run(['list', 'vms']);
+  const vmNames = parseVmNamesFromList(listRaw);
+  const items = [];
+  for (const vmName of vmNames) {
+    try {
+      const info = await virtualbox.getVMInfo(vmName);
+      const cfgFile = String(info?.CfgFile || '').replace(/"/g, '');
+      const vmDir = cfgFile ? path.dirname(cfgFile) : '';
+      const sizeBytes = vmDir ? getDirectorySizeBytes(vmDir) : 0;
+      items.push({
+        name: vmName,
+        cfgFile,
+        vmDir,
+        sizeBytes,
+        sizeGb: Number((sizeBytes / (1024 ** 3)).toFixed(2))
+      });
+    } catch {
+      items.push({
+        name: vmName,
+        cfgFile: '',
+        vmDir: '',
+        sizeBytes: 0,
+        sizeGb: 0
+      });
+    }
+  }
+  const totalBytes = items.reduce((sum, item) => sum + Number(item.sizeBytes || 0), 0);
+  return {
+    success: true,
+    totalBytes,
+    totalGb: Number((totalBytes / (1024 ** 3)).toFixed(2)),
+    items
+  };
+}
+
 // ─── Window Creation ───────────────────────────────────────────────────
 
 /**
@@ -365,7 +1764,8 @@ function createWindow() {
     minHeight: 650,
     title: 'VM Xposed',
     icon: resolveAppIcon(),
-    backgroundColor: '#00000000', // Transparent for glass effects
+    backgroundColor: '#0f1115',
+    darkTheme: true,
     vibrancy: 'sidebar',          // macOS Vibrancy
     visualEffectState: 'active',  // Force acrylic state
     show: false,  // Show after ready-to-show to prevent white flash
@@ -469,13 +1869,13 @@ function buildAppMenu() {
           }
         },
         {
-          label: '🗑️ Delete Existing VMs',
+          label: '🗑️ Delete Existing V Os',
           click: async () => {
             const result = await dialog.showMessageBox(mainWindow, {
               type: 'warning',
-              title: 'Delete VMs',
-              message: 'This will list and optionally delete VM Xposed VMs. Continue?',
-              buttons: ['Cancel', 'Show VMs'],
+              title: 'Delete V Os',
+              message: 'This will list and optionally delete VM Xposed V Os. Continue?',
+              buttons: ['Cancel', 'Show V Os'],
               defaultId: 0,
               cancelId: 0
             });
@@ -491,9 +1891,19 @@ function buildAppMenu() {
       submenu: [
         {
           label: 'Open Log File',
-          click: () => {
-            const logDir = path.join(app.getPath('userData'), 'logs');
-            shell.openPath(logDir);
+          click: async () => {
+            const logFile = logger.ensureLogFile();
+            if (!logFile) {
+              logger.warn('App', 'Could not prepare log file, opening log folder instead.');
+              await shell.openPath(logger.logDir);
+              return;
+            }
+
+            const openResult = await shell.openPath(logFile);
+            if (openResult) {
+              logger.warn('App', `Could not open log file: ${openResult}`);
+              await shell.openPath(logger.logDir);
+            }
           }
         },
         {
@@ -515,7 +1925,7 @@ function buildAppMenu() {
               type: 'info',
               title: 'About VM Xposed',
               message: 'VM Xposed v1.0.0',
-              detail: `One-click virtual machine setup with full automation.\n\nPlatform: ${process.platform} ${process.arch}\nElectron: ${process.versions.electron}\nNode: ${process.versions.node}\nAdmin: ${isAdmin ? 'Yes' : 'No'}`
+              detail: `One-click virtual OS setup with full automation.\n\nPlatform: ${process.platform} ${process.arch}\nElectron: ${process.versions.electron}\nNode: ${process.versions.node}\nAdmin: ${isAdmin ? 'Yes' : 'No'}`
             });
           }
         }
@@ -531,6 +1941,9 @@ function buildAppMenu() {
  * Register all IPC handlers for renderer ↔ main communication.
  */
 function registerIPC() {
+  const startupPrefs = readUiPrefsFromDisk();
+  applyPreferredVirtualBoxPath(startupPrefs);
+  applyLoggerPreferences(startupPrefs);
 
   // ─── Get initial configuration (defaults, versions) ─────────────
   ipcMain.handle('config:getDefaults', async () => {
@@ -540,7 +1953,8 @@ function registerIPC() {
       osCatalog: runtimeOSCatalog,
       osCategories: getCategoriesFromCatalog(runtimeOSCatalog),
       defaultInstallPath: getDefaultInstallPath(),
-      defaultSharedFolder: getDefaultSharedFolderPath()
+      defaultSharedFolder: getDefaultSharedFolderPath(),
+      defaultDownloadDir: getDownloadDir()
     };
   });
 
@@ -558,19 +1972,115 @@ function registerIPC() {
         if (value === undefined || value === null) return fallback;
         return String(value).trim();
       };
+      const sanitizeEnum = (value, allowed, fallback) => {
+        const normalized = String(value ?? '').trim().toLowerCase();
+        return allowed.includes(normalized) ? normalized : fallback;
+      };
+      const sanitizeInt = (value, min, max, fallback) => {
+        const parsed = parseInt(value, 10);
+        if (!Number.isFinite(parsed)) return fallback;
+        return Math.max(min, Math.min(max, parsed));
+      };
+      const storedPrefs = readUiPrefsFromDisk();
+      const credentialStorage = sanitizeEnum(
+        prefs.credentialStorage,
+        ['keychain', 'session'],
+        sanitizeEnum(storedPrefs.credentialStorage, ['keychain', 'session'], 'keychain')
+      );
+      const guestUsername = sanitize(
+        prefs.guestUsername,
+        sanitize(storedPrefs.guestUsername, sanitize(storedPrefs.username, 'guest'))
+      ) || 'guest';
+      const defaultUserUsername = sanitize(
+        prefs.defaultUserUsername,
+        sanitize(storedPrefs.defaultUserUsername, 'user')
+      ) || 'user';
+      const guestPassword = credentialStorage === 'session'
+        ? ''
+        : String(prefs.guestPassword ?? storedPrefs.guestPassword ?? storedPrefs.password ?? 'guest') || 'guest';
+      const defaultUserPassword = credentialStorage === 'session'
+        ? ''
+        : String(prefs.defaultUserPassword ?? storedPrefs.defaultUserPassword ?? 'user') || 'user';
 
       const merged = {
-        ...readUiPrefsFromDisk(),
+        ...storedPrefs,
         installPath: sanitize(prefs.installPath),
         sharedFolderPath: sanitize(prefs.sharedFolderPath),
-        username: sanitize(prefs.username, 'user') || 'user',
-        password: String(prefs.password ?? 'password')
+        downloadPath: sanitize(prefs.downloadPath),
+        startFullscreen: prefs.startFullscreen !== false,
+        accelerate3d: prefs.accelerate3d === true,
+        enableSharedFolder: prefs.enableSharedFolder === undefined
+          ? !!storedPrefs.enableSharedFolder
+          : !!prefs.enableSharedFolder,
+        defaultUserUsername,
+        defaultUserPassword,
+        guestUsername,
+        guestPassword,
+        username: guestUsername,
+        password: guestPassword,
+        theme: 'dark',
+        visualEffectsMode: sanitizeEnum(prefs.visualEffectsMode, ['lite', 'full'], sanitizeEnum(storedPrefs.visualEffectsMode, ['lite', 'full'], 'lite')),
+        language: sanitizeEnum(prefs.language, ['en', 'hi'], sanitizeEnum(storedPrefs.language, ['en', 'hi'], 'en')),
+        startupView: sanitizeEnum(prefs.startupView, ['dashboard', 'machines', 'wizard', 'library', 'snapshots', 'storage', 'network', 'settings', 'download', 'credits'], sanitizeEnum(storedPrefs.startupView, ['dashboard', 'machines', 'wizard', 'library', 'snapshots', 'storage', 'network', 'settings', 'download', 'credits'], 'dashboard')),
+        notificationLevel: sanitizeEnum(prefs.notificationLevel, ['all', 'important', 'minimal'], sanitizeEnum(storedPrefs.notificationLevel, ['all', 'important', 'minimal'], 'important')),
+        virtualBoxPath: sanitize(prefs.virtualBoxPath, sanitize(storedPrefs.virtualBoxPath)),
+        adminModePolicy: sanitizeEnum(prefs.adminModePolicy, ['auto', 'manual'], sanitizeEnum(storedPrefs.adminModePolicy, ['auto', 'manual'], 'auto')),
+        autoRepairLevel: sanitizeEnum(prefs.autoRepairLevel, ['none', 'safe', 'full'], sanitizeEnum(storedPrefs.autoRepairLevel, ['none', 'safe', 'full'], 'safe')),
+        maxHostRamPercent: sanitizeInt(prefs.maxHostRamPercent, 40, 95, sanitizeInt(storedPrefs.maxHostRamPercent, 40, 95, 75)),
+        maxHostCpuPercent: sanitizeInt(prefs.maxHostCpuPercent, 40, 95, sanitizeInt(storedPrefs.maxHostCpuPercent, 40, 95, 75)),
+        vmDefaultPreset: sanitizeEnum(prefs.vmDefaultPreset, ['beginner', 'balanced', 'advanced'], sanitizeEnum(storedPrefs.vmDefaultPreset, ['beginner', 'balanced', 'advanced'], 'balanced')),
+        credentialStorage,
+        telemetryEnabled: prefs.telemetryEnabled === undefined ? !!storedPrefs.telemetryEnabled : !!prefs.telemetryEnabled,
+        trustedPaths: sanitize(prefs.trustedPaths, sanitize(storedPrefs.trustedPaths)),
+        logLevel: sanitizeEnum(prefs.logLevel, ['error', 'warning', 'info', 'debug'], sanitizeEnum(storedPrefs.logLevel, ['error', 'warning', 'info', 'debug'], 'info')),
+        logRetentionDays: sanitizeInt(prefs.logRetentionDays, 1, 365, sanitizeInt(storedPrefs.logRetentionDays, 1, 365, 14)),
+        ignoredUpdateVersion: normalizeVersionString(sanitize(prefs.ignoredUpdateVersion, sanitize(storedPrefs.ignoredUpdateVersion))),
+        lastUpdateCheckAt: sanitize(prefs.lastUpdateCheckAt, sanitize(storedPrefs.lastUpdateCheckAt))
       };
 
       await writeUiPrefsToDisk(merged);
+      applyPreferredVirtualBoxPath(merged);
+      applyLoggerPreferences(merged);
+      await pruneLogFilesByRetention(merged.logRetentionDays);
       return { success: true, prefs: merged };
     } catch (err) {
       return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('app:getVersion', async () => {
+    try {
+      return { success: true, version: normalizeVersionString(app.getVersion()) };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('update:check', async () => {
+    try {
+      return await checkForLatestReleaseUpdate();
+    } catch (err) {
+      return { success: false, error: err.message || 'Update check failed.' };
+    }
+  });
+
+  ipcMain.handle('update:downloadAndInstall', async (event, payload = {}) => {
+    try {
+      return await downloadAndInstallLatestRelease(payload || {});
+    } catch (err) {
+      return { success: false, error: err.message || 'Update installation failed.' };
+    }
+  });
+
+  ipcMain.handle('update:getPatchNote', async (event, payload = {}) => {
+    try {
+      const patchUrl = String(payload?.url || '').trim();
+      if (!patchUrl) return { success: false, error: 'Patch note URL is required.' };
+      if (!isTrustedRepoAssetUrl(patchUrl)) return { success: false, error: 'Untrusted patch note URL.' };
+      const text = await fetchTextWithRedirects(patchUrl);
+      return { success: true, text };
+    } catch (err) {
+      return { success: false, error: err.message || 'Failed to load patch note.' };
     }
   });
 
@@ -578,6 +2088,7 @@ function registerIPC() {
     try {
       const refreshed = await refreshOfficialCatalog(runtimeOSCatalog, logger);
       runtimeOSCatalog = refreshed.catalog;
+      await persistRuntimeCatalog('manual');
 
       return {
         success: true,
@@ -592,18 +2103,85 @@ function registerIPC() {
   });
 
   // ─── System check ───────────────────────────────────────────────
-  ipcMain.handle('system:check', async (event, targetPath) => {
-    return await runSystemCheck(targetPath);
+  ipcMain.handle('system:check', async (event, targetPath, options = {}) => {
+    return await runSystemCheck(targetPath, options || {});
+  });
+
+  ipcMain.handle('system:fullScan', async () => {
+    try {
+      return await runFullSystemScan();
+    } catch (err) {
+      return { success: false, error: err.message || 'Full scan failed' };
+    }
+  });
+
+  ipcMain.handle('system:getRealtimeMetrics', async () => {
+    try {
+      return await getRealtimeHostMetrics();
+    } catch (err) {
+      return {
+        success: false,
+        timestamp: new Date().toISOString(),
+        diskReadBytesPerSec: 0,
+        diskWriteBytesPerSec: 0,
+        netRxBytesPerSec: 0,
+        netTxBytesPerSec: 0,
+        adapters: [],
+        error: err.message
+      };
+    }
   });
 
   // ─── Detect VirtualBox ──────────────────────────────────────────
   ipcMain.handle('vbox:detect', async () => {
+    applyPreferredVirtualBoxPath(readUiPrefsFromDisk());
     const installed = await virtualbox.init();
     if (installed) {
       const version = await virtualbox.getVersion();
       return { installed: true, version };
     }
     return { installed: false, version: null };
+  });
+
+  ipcMain.handle('vbox:ensureInstalled', async (event, options = {}) => {
+    try {
+      const result = await orchestrator.ensureVirtualBoxInstalled({
+        downloadDir: options?.downloadDir || '',
+        installerPath: options?.installerPath || '',
+        onProgress: (data) => {
+          try {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('vbox:ensureProgress', data || {});
+            }
+          } catch {}
+        }
+      });
+      return {
+        success: true,
+        installed: true,
+        version: result?.version || null,
+        downloaded: !!result?.downloaded,
+        usedLocalInstaller: !!result?.usedLocalInstaller,
+        installerPath: result?.installerPath || null
+      };
+    } catch (err) {
+      return {
+        success: false,
+        installed: false,
+        code: err?.code || null,
+        error: err.message || 'Failed to ensure VirtualBox installation'
+      };
+    }
+  });
+
+  ipcMain.handle('vbox:pauseDownload', async () => {
+    const paused = orchestrator.pauseVBoxDownload();
+    return { success: paused };
+  });
+
+  ipcMain.handle('vbox:cancelDownload', async () => {
+    const cancelled = orchestrator.cancelVBoxDownload();
+    return { success: cancelled };
   });
 
   // ─── Folder picker dialog ──────────────────────────────────────
@@ -655,8 +2233,7 @@ function registerIPC() {
   });
 
   ipcMain.handle('permissions:restartAsAdmin', async () => {
-    restartAsAdmin();
-    return { restarting: true };
+    return restartAsAdmin();
   });
 
   ipcMain.handle('permissions:isAdmin', async () => {
@@ -699,15 +2276,24 @@ function registerIPC() {
       } catch {}
 
       const vms = [];
+      const seenVmNames = new Set();
+      const { width: displayWidth, height: displayHeight } = getPrimaryDisplayResolution();
       for (const line of vmLines) {
         const match = line.match(/"(.+)"\s+\{(.+)\}/);
         if (!match) continue;
 
         const name = match[1];
         const uuid = match[2];
+        seenVmNames.add(name);
 
         try {
-          const info = await virtualbox.getVMInfo(name);
+          let info = null;
+          try {
+            info = await virtualbox.getVMInfo(name);
+          } catch {
+            info = await virtualbox.getVMInfo(uuid);
+          }
+          const fullscreenEnabled = await getGuestDisplayFullscreenPreference(name);
           const normalizeNetwork = (raw) => {
             const v = String(raw || '').toLowerCase();
             if (v === 'nat' || v.startsWith('nat')) return 'nat';
@@ -747,17 +2333,44 @@ function registerIPC() {
             }
           }
 
+          const rawClipboardMode = normalizeClipboard(info.clipboard || info['clipboard-mode']);
+          const rawDnDMode = normalizeDnD(info.draganddrop || info['drag-and-drop']);
+          let effectiveClipboardMode = rawClipboardMode;
+          let effectiveDnDMode = rawDnDMode;
+          const reportedState = String(info.VMState || 'poweroff').toLowerCase();
+          const isVmRunning = runningVMs.includes(name) || reportedState === 'running';
+          const gaReady = !!info.GuestAdditionsVersion && (parseInt(info.GuestAdditionsRunLevel || '0', 10) >= 2);
+          const shouldAutoApply = shouldAutoApplyOnStart(name, isVmRunning ? 'running' : reportedState);
+          if (isVmRunning && shouldAutoApply) {
+            const persistedModes = await getPreferredRuntimeIntegrationModes(name, info);
+            effectiveClipboardMode = normalizeClipboard(persistedModes.clipboardMode || rawClipboardMode);
+            effectiveDnDMode = normalizeDnD(persistedModes.dragAndDrop || rawDnDMode);
+            scheduleDeferredRuntimeIntegration(name, {
+              clipboardMode: effectiveClipboardMode,
+              dragAndDrop: effectiveDnDMode,
+              width: displayWidth,
+              height: displayHeight,
+              bpp: 32,
+              display: 0,
+              guestDisplayFullscreen: fullscreenEnabled,
+              waitForGuestAdditionsMs: fullscreenEnabled ? 600000 : 180000,
+              cooldownMs: 300000
+            }, 1800);
+          }
+
           vms.push({
             name,
             uuid,
-            state: runningVMs.includes(name) ? 'running' : (info.VMState || 'poweroff'),
+            state: isVmRunning ? 'running' : (info.VMState || 'poweroff'),
             os: info.ostype || 'Unknown',
             ram: parseInt(info.memory) || 0,
             cpus: parseInt(info.cpus) || 0,
             vram: parseInt(info.vram) || 0,
             network: normalizeNetwork(info.nic1),
-            clipboard: normalizeClipboard(info.clipboard || info['clipboard-mode']),
-            draganddrop: normalizeDnD(info.draganddrop || info['drag-and-drop']),
+            clipboard: effectiveClipboardMode,
+            clipboardMode: effectiveClipboardMode,
+            draganddrop: effectiveDnDMode,
+            dragAndDrop: effectiveDnDMode,
             graphicscontroller: info.graphicscontroller || 'unknown',
             audioEnabled: parseAudioEnabled(),
             audioController: info.audiocontroller || 'default',
@@ -765,26 +2378,52 @@ function registerIPC() {
             accelerate3d: (info.accelerate3d || '').toLowerCase() === 'on',
             efiEnabled: (info.firmware || '').toLowerCase() === 'efi',
             nestedVirtualization: (info['nested-hw-virt'] || '').toLowerCase() === 'on',
+            fullscreenEnabled,
             bootOrder: [info.boot1, info.boot2, info.boot3, info.boot4].filter(Boolean),
             sharedFolders,
+            primarySharedFolderPath: sharedFolders[0]?.hostPath || '',
             cfgFile: (info.CfgFile || '').replace(/\\\\/g, '\\'),
             guestAdditionsVersion: info.GuestAdditionsVersion || '',
             guestAdditionsRunLevel: parseInt(info.GuestAdditionsRunLevel || '0', 10) || 0,
             integrationChecks: {
-              guestAdditions: !!info.GuestAdditionsVersion && (parseInt(info.GuestAdditionsRunLevel || '0', 10) >= 2),
+              guestAdditions: gaReady,
               fullscreenReady:
                 ['vmsvga', 'vboxsvga'].includes(String(info.graphicscontroller || '').toLowerCase())
-                && !!info.GuestAdditionsVersion
-                && (parseInt(info.GuestAdditionsRunLevel || '0', 10) >= 2)
+                && gaReady
                 && ((parseInt(info.vram || '0', 10) || 0) >= 128),
-              clipboard: String(info.clipboard || info['clipboard-mode'] || '').toLowerCase() === 'bidirectional',
-              dragDrop: String(info.draganddrop || info['drag-and-drop'] || '').toLowerCase() === 'bidirectional',
-              sharedFolder: sharedFolders.length > 0
+              clipboard: gaReady && String(effectiveClipboardMode || '').toLowerCase() === 'bidirectional',
+              dragDrop: gaReady && String(effectiveDnDMode || '').toLowerCase() === 'bidirectional',
+              sharedFolder: gaReady && sharedFolders.length > 0
             }
           });
         } catch {
-          vms.push({ name, uuid, state: 'unknown', os: 'Unknown', ram: 0, cpus: 0, vram: 0, network: 'none', clipboard: '?', draganddrop: '?', graphicscontroller: '?', sharedFolders: [], cfgFile: '' });
+          rememberVmState(name, 'unknown');
+          vms.push({
+            name,
+            uuid,
+            state: 'unknown',
+            os: 'Unknown',
+            ram: 0,
+            cpus: 0,
+            vram: 0,
+            network: 'none',
+            clipboard: '?',
+            clipboardMode: '?',
+            draganddrop: '?',
+            dragAndDrop: '?',
+            graphicscontroller: '?',
+            sharedFolders: [],
+            primarySharedFolderPath: '',
+            cfgFile: ''
+          });
         }
+      }
+
+      for (const trackedVm of Array.from(vmLastKnownState.keys())) {
+        if (seenVmNames.has(trackedVm)) continue;
+        vmLastKnownState.delete(trackedVm);
+        runtimeIntegrationLastScheduledAt.delete(trackedVm);
+        runtimeIntegrationQueue.delete(trackedVm);
       }
 
       return { success: true, vms };
@@ -793,9 +2432,41 @@ function registerIPC() {
     }
   });
 
+  ipcMain.handle('vm:resolveFromFolder', async (event, folderPath, options = {}) => {
+    try {
+      return await resolveVmFromFolder(folderPath, {
+        registerIfNeeded: !!options?.registerIfNeeded
+      });
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('vm:scanDownloaded', async (event, rootPath) => {
+    try {
+      return await scanDownloadedVMs(rootPath);
+    } catch (err) {
+      return { success: false, candidates: [], error: err.message };
+    }
+  });
+
+  ipcMain.handle('vm:storageUsage', async () => {
+    try {
+      return await collectVmStorageUsage();
+    } catch (err) {
+      return { success: false, totalBytes: 0, totalGb: 0, items: [], error: err.message };
+    }
+  });
+
   ipcMain.handle('vm:start', async (event, vmName) => {
     try {
-      await bootFixer.prebootValidateAndFix(vmName);
+      const uiPrefs = readUiPrefsFromDisk();
+      const repairLevel = ['none', 'safe', 'full'].includes(String(uiPrefs.autoRepairLevel || '').toLowerCase())
+        ? String(uiPrefs.autoRepairLevel).toLowerCase()
+        : 'safe';
+      if (repairLevel !== 'none') {
+        await bootFixer.prebootValidateAndFix(vmName);
+      }
 
       // Auto-fix VBoxSup driver if stopped
       try {
@@ -809,7 +2480,46 @@ function registerIPC() {
         logger.warn('App', `VBoxSup check failed: ${e.message}`);
       }
 
-      await virtualbox.startVM(vmName);
+      const startVmNow = async () => {
+        await virtualbox.startVM(vmName);
+        await waitForVmState(vmName, 'running', 45000, 2000);
+      };
+      try {
+        await startVmNow();
+      } catch (startErr) {
+        if (repairLevel === 'full') {
+          await bootFixer.prebootValidateAndFix(vmName);
+          await startVmNow();
+        } else {
+          throw startErr;
+        }
+      }
+      rememberVmState(vmName, 'running');
+
+      try {
+        const vmInfo = await virtualbox.getVMInfo(vmName);
+        const integrationModes = await getPreferredRuntimeIntegrationModes(vmName, vmInfo);
+        const fullscreenEnabled = await getGuestDisplayFullscreenPreference(vmName);
+        const { width, height } = getPrimaryDisplayResolution();
+        const runtimeOptions = {
+          clipboardMode: integrationModes.clipboardMode,
+          dragAndDrop: integrationModes.dragAndDrop,
+          width,
+          height,
+          bpp: 32,
+          display: 0,
+          guestDisplayFullscreen: fullscreenEnabled,
+          waitForGuestAdditionsMs: fullscreenEnabled ? 600000 : 180000
+        };
+        await virtualbox.applyRuntimeIntegration(vmName, {
+          ...runtimeOptions,
+          waitForGuestAdditionsMs: 0
+        });
+        scheduleDeferredRuntimeIntegration(vmName, runtimeOptions, 4500);
+      } catch (integrationErr) {
+        logger.warn('App', `Runtime guest display integration warning: ${integrationErr.message}`);
+      }
+
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
@@ -819,11 +2529,13 @@ function registerIPC() {
   ipcMain.handle('vm:stop', async (event, vmName) => {
     try {
       await virtualbox._run(['controlvm', vmName, 'acpipowerbutton']);
+      rememberVmState(vmName, 'poweroff');
       return { success: true };
     } catch (err) {
       // Force power off if ACPI fails
       try {
         await virtualbox._run(['controlvm', vmName, 'poweroff']);
+        rememberVmState(vmName, 'poweroff');
         return { success: true };
       } catch (err2) {
         return { success: false, error: err2.message };
@@ -834,6 +2546,7 @@ function registerIPC() {
   ipcMain.handle('vm:pause', async (event, vmName) => {
     try {
       await virtualbox._run(['controlvm', vmName, 'pause']);
+      rememberVmState(vmName, 'paused');
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
@@ -843,6 +2556,30 @@ function registerIPC() {
   ipcMain.handle('vm:resume', async (event, vmName) => {
     try {
       await virtualbox._run(['controlvm', vmName, 'resume']);
+      rememberVmState(vmName, 'running');
+      try {
+        const vmInfo = await virtualbox.getVMInfo(vmName);
+        const integrationModes = await getPreferredRuntimeIntegrationModes(vmName, vmInfo);
+        const fullscreenEnabled = await getGuestDisplayFullscreenPreference(vmName);
+        const { width, height } = getPrimaryDisplayResolution();
+        const runtimeOptions = {
+          clipboardMode: integrationModes.clipboardMode,
+          dragAndDrop: integrationModes.dragAndDrop,
+          width,
+          height,
+          bpp: 32,
+          display: 0,
+          guestDisplayFullscreen: fullscreenEnabled,
+          waitForGuestAdditionsMs: fullscreenEnabled ? 600000 : 180000
+        };
+        await virtualbox.applyRuntimeIntegration(vmName, {
+          ...runtimeOptions,
+          waitForGuestAdditionsMs: 0
+        });
+        scheduleDeferredRuntimeIntegration(vmName, runtimeOptions, 3000);
+      } catch (integrationErr) {
+        logger.warn('App', `Runtime integration after resume warning: ${integrationErr.message}`);
+      }
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
@@ -860,27 +2597,213 @@ function registerIPC() {
 
   ipcMain.handle('vm:edit', async (event, vmName, settings) => {
     try {
+      settings = settings || {};
+      const uiPrefs = readUiPrefsFromDisk();
+      const warnings = [];
+      const runSoft = async (label, runner) => {
+        try {
+          await runner();
+        } catch (err) {
+          warnings.push(`${label}: ${err.message}`);
+        }
+      };
+
       const vmInfo = await virtualbox.getVMInfo(vmName);
       const vmState = (vmInfo?.VMState || '').toLowerCase();
-      const hardwareKeys = ['ram', 'cpus', 'vram', 'graphicsController', 'audioController', 'networkMode', 'bootOrder', 'audioEnabled', 'usbEnabled', 'accelerate3d', 'efiEnabled', 'nestedVirtualization', 'sharedFolders'];
-      const requestedHardwareEdit = hardwareKeys.some((key) => settings[key] !== undefined);
+      const normalizeNetwork = (raw) => {
+        const value = String(raw || '').toLowerCase();
+        if (value === 'nat' || value.startsWith('nat')) return 'nat';
+        if (value === 'bridged' || value.startsWith('bridged')) return 'bridged';
+        if (value === 'intnet' || value === 'internal') return 'internal';
+        if (value === 'hostonly' || value.startsWith('hostonly')) return 'hostonly';
+        return 'nat';
+      };
+      const normalizeIntegrationMode = (raw, fallback = 'disabled') => {
+        const value = String(raw || '').toLowerCase();
+        return ['disabled', 'hosttoguest', 'guesttohost', 'bidirectional'].includes(value) ? value : fallback;
+      };
+      const normalizeBootOrder = (bootOrder) => {
+        if (!Array.isArray(bootOrder)) return [];
+        return bootOrder
+          .map((entry) => String(entry || '').trim().toLowerCase())
+          .filter(Boolean)
+          .slice(0, 4);
+      };
+      const normalizeSharedFolders = (folders) => {
+        if (!Array.isArray(folders)) return [];
+        return folders
+          .map((folder) => {
+            const name = String(folder?.name || '').trim().toLowerCase();
+            const hostPath = String(folder?.hostPath || '')
+              .trim()
+              .replace(/\//g, '\\')
+              .toLowerCase();
+            const normalizedHostPath = /^[a-z]:\\$/i.test(hostPath)
+              ? hostPath
+              : hostPath.replace(/[\\]+$/, '');
+            if (!name || !normalizedHostPath) return null;
+            return `${name}::${normalizedHostPath}`;
+          })
+          .filter(Boolean)
+          .sort();
+      };
+      const parseAudioEnabled = () => {
+        const explicit = String(vmInfo.audioenabled || '').toLowerCase();
+        if (explicit) return explicit === 'on';
+        const audio = String(vmInfo.audio || '').toLowerCase();
+        if (!audio) return false;
+        return !['off', 'false', 'disabled', 'none'].includes(audio);
+      };
+
+      const currentSharedFolders = [];
+      for (const [key, val] of Object.entries(vmInfo)) {
+        if (!key.startsWith('SharedFolderNameMachineMapping')) continue;
+        const idx = key.replace('SharedFolderNameMachineMapping', '');
+        currentSharedFolders.push({
+          name: val,
+          hostPath: vmInfo[`SharedFolderPathMachineMapping${idx}`] || ''
+        });
+      }
+
+      const currentHardware = {
+        ram: parseInt(vmInfo.memory || '0', 10) || 0,
+        cpus: parseInt(vmInfo.cpus || '0', 10) || 0,
+        vram: parseInt(vmInfo.vram || '0', 10) || 0,
+        graphicsController: String(vmInfo.graphicscontroller || 'vmsvga').toLowerCase(),
+        audioController: String(vmInfo.audiocontroller || 'hda').toLowerCase(),
+        networkMode: normalizeNetwork(vmInfo.nic1),
+        bootOrder: normalizeBootOrder([vmInfo.boot1, vmInfo.boot2, vmInfo.boot3, vmInfo.boot4]),
+        audioEnabled: parseAudioEnabled(),
+        usbEnabled: (String(vmInfo.usb || '').toLowerCase() === 'on') || ['usbohci', 'usbehci', 'usbxhci'].some(k => (vmInfo[k] || '').toLowerCase() === 'on'),
+        accelerate3d: String(vmInfo.accelerate3d || '').toLowerCase() === 'on',
+        efiEnabled: String(vmInfo.firmware || '').toLowerCase() === 'efi',
+        nestedVirtualization: String(vmInfo['nested-hw-virt'] || '').toLowerCase() === 'on',
+        sharedFolders: normalizeSharedFolders(currentSharedFolders)
+      };
+
+      const requestedHardwareEdit = (
+        (settings.ram !== undefined && (parseInt(settings.ram, 10) || 0) !== currentHardware.ram) ||
+        (settings.cpus !== undefined && (parseInt(settings.cpus, 10) || 0) !== currentHardware.cpus) ||
+        (settings.vram !== undefined && (parseInt(settings.vram, 10) || 0) !== currentHardware.vram) ||
+        (settings.graphicsController !== undefined && String(settings.graphicsController || '').toLowerCase() !== currentHardware.graphicsController) ||
+        (settings.audioController !== undefined && String(settings.audioController || '').toLowerCase() !== currentHardware.audioController) ||
+        (settings.networkMode !== undefined && normalizeNetwork(settings.networkMode) !== currentHardware.networkMode) ||
+        (settings.bootOrder !== undefined && normalizeBootOrder(settings.bootOrder).join('|') !== currentHardware.bootOrder.join('|')) ||
+        (settings.audioEnabled !== undefined && !!settings.audioEnabled !== currentHardware.audioEnabled) ||
+        (settings.usbEnabled !== undefined && !!settings.usbEnabled !== currentHardware.usbEnabled) ||
+        (settings.accelerate3d !== undefined && !!settings.accelerate3d !== currentHardware.accelerate3d) ||
+        (settings.efiEnabled !== undefined && !!settings.efiEnabled !== currentHardware.efiEnabled) ||
+        (settings.nestedVirtualization !== undefined && !!settings.nestedVirtualization !== currentHardware.nestedVirtualization) ||
+        (settings.sharedFolders !== undefined && normalizeSharedFolders(settings.sharedFolders).join('|') !== currentHardware.sharedFolders.join('|'))
+      );
 
       if (vmState && vmState !== 'poweroff' && requestedHardwareEdit) {
         return {
           success: false,
-          error: 'Power off the VM before editing hardware settings (RAM/CPU/graphics/network/USB/shared folders).'
+          error: 'Power off the V Os before editing hardware settings (RAM/CPU/graphics/network/USB/shared folders).'
         };
       }
 
+      if (Array.isArray(settings.sharedFolders)) {
+        const untrustedShare = settings.sharedFolders.find((share) => {
+          const hostPath = String(share?.hostPath || '').trim();
+          if (!hostPath) return false;
+          return !isPathTrustedByPrefs(hostPath, uiPrefs);
+        });
+        if (untrustedShare) {
+          return {
+            success: false,
+            error: `Shared folder path "${String(untrustedShare.hostPath || '').trim()}" is outside Trusted Paths.`
+          };
+        }
+      }
+
       if (vmState && vmState !== 'poweroff' && !requestedHardwareEdit) {
+        const persistedModes = await getPreferredRuntimeIntegrationModes(vmName, vmInfo);
+        const runtimeClipboard = settings.clipboardMode
+          ? normalizeIntegrationMode(settings.clipboardMode, 'bidirectional')
+          : persistedModes.clipboardMode;
+        const runtimeDnD = settings.dragAndDrop
+          ? normalizeIntegrationMode(settings.dragAndDrop, 'bidirectional')
+          : persistedModes.dragAndDrop;
+        const currentDnD = normalizeIntegrationMode(vmInfo.draganddrop || vmInfo['drag-and-drop'], 'disabled');
+        const runtimeFullscreen = typeof settings.fullscreenEnabled === 'boolean'
+          ? settings.fullscreenEnabled
+          : await getGuestDisplayFullscreenPreference(vmName);
+
         if (settings.clipboardMode) {
-          await virtualbox._run(['controlvm', vmName, 'clipboard', settings.clipboardMode]);
+          await runSoft('Clipboard persistent apply failed', () => virtualbox._run(['modifyvm', vmName, '--clipboard', settings.clipboardMode]));
+          await runSoft('Clipboard preference save failed', () => virtualbox._run(['setextradata', vmName, 'VMXposed/ClipboardMode', settings.clipboardMode]));
         }
         if (settings.dragAndDrop) {
-          await virtualbox._run(['controlvm', vmName, 'draganddrop', settings.dragAndDrop]);
+          await runSoft('Drag & drop persistent apply failed', () => virtualbox._run(['modifyvm', vmName, '--draganddrop', settings.dragAndDrop]));
+          await runSoft('Drag & drop preference save failed', () => virtualbox._run(['setextradata', vmName, 'VMXposed/DragAndDropMode', settings.dragAndDrop]));
+        }
+        if (typeof settings.fullscreenEnabled === 'boolean') {
+          await runSoft('Guest display fullscreen preference apply failed', () => virtualbox._run(['setextradata', vmName, 'VMXposed/GuestDisplayFullscreen', settings.fullscreenEnabled ? 'on' : 'off']));
+          await runSoft('VirtualBox window fullscreen disable apply failed', () => virtualbox._run(['setextradata', vmName, 'GUI/Fullscreen', 'off']));
+        }
+        const { width, height } = getPrimaryDisplayResolution();
+        const runtimeResult = await virtualbox.applyRuntimeIntegration(vmName, {
+          clipboardMode: runtimeClipboard,
+          dragAndDrop: runtimeDnD,
+          width,
+          height,
+          bpp: 32,
+          display: 0,
+          guestDisplayFullscreen: runtimeFullscreen,
+          waitForGuestAdditionsMs: runtimeFullscreen ? 60000 : 0
+        });
+        scheduleDeferredRuntimeIntegration(vmName, {
+          clipboardMode: runtimeClipboard,
+          dragAndDrop: runtimeDnD,
+          width,
+          height,
+          bpp: 32,
+          display: 0,
+          guestDisplayFullscreen: runtimeFullscreen,
+          waitForGuestAdditionsMs: runtimeFullscreen ? 600000 : 180000
+        }, 2500);
+        if (Array.isArray(runtimeResult?.warnings) && runtimeResult.warnings.length > 0) {
+          warnings.push(...runtimeResult.warnings.map((warning) => `Runtime integration warning: ${warning}`));
         }
 
-        return { success: true, runtimeApplied: true };
+        const requestedGuestToHostDnD = settings.dragAndDrop !== undefined
+          && runtimeDnD !== currentDnD
+          && ['guesttohost', 'bidirectional'].includes(runtimeDnD);
+        if (requestedGuestToHostDnD) {
+          const guestUser = String(uiPrefs.guestUsername || uiPrefs.username || '').trim();
+          const guestPass = String(uiPrefs.guestPassword ?? uiPrefs.password ?? '');
+          if (!guestUser || !guestPass) {
+            warnings.push('Guest-to-host drag & drop needs OS admin credentials. Set them in VM Xposed Settings > Account, then run Fix All.');
+          } else {
+            let guestReady = false;
+            try {
+              guestReady = await virtualbox.waitForGuestReady(vmName, guestUser, guestPass, 45000);
+            } catch (guestReadyErr) {
+              warnings.push(`Guest readiness check failed: ${guestReadyErr.message}`);
+            }
+            if (!guestReady) {
+              warnings.push('Guest-to-host drag & drop needs an active guest login session. Sign in to the V Os, then run Fix All once.');
+            } else {
+              try {
+                await configureGuestInside(vmName, guestUser, guestPass, null, {
+                  configureSharedFolder: false,
+                  sharedFolderName: 'shared'
+                });
+              } catch (guestErr) {
+                const detail = String(guestErr?.message || 'Unknown error');
+                if (/wayland|sessionx11|xorg/i.test(detail)) {
+                  warnings.push('Guest session is on Wayland. Guest-to-host drag & drop requires Xorg. Log out/restart the V Os with Xorg, then run Fix All.');
+                } else {
+                  warnings.push(`Guest drag-drop service verification failed: ${detail}`);
+                }
+              }
+            }
+          }
+        }
+
+        return { success: true, runtimeApplied: true, warnings };
       }
 
       const args = ['modifyvm', vmName];
@@ -889,8 +2812,6 @@ function registerIPC() {
       if (settings.vram) args.push('--vram', String(settings.vram));
       if (settings.graphicsController) args.push('--graphicscontroller', settings.graphicsController);
       if (settings.audioController) args.push('--audiocontroller', settings.audioController);
-      if (settings.clipboardMode) args.push('--clipboard', settings.clipboardMode);
-      if (settings.dragAndDrop) args.push('--draganddrop', settings.dragAndDrop);
       if (typeof settings.audioEnabled === 'boolean') args.push('--audio-enabled', settings.audioEnabled ? 'on' : 'off');
       if (typeof settings.usbEnabled === 'boolean') {
         args.push('--usb', settings.usbEnabled ? 'on' : 'off');
@@ -907,7 +2828,18 @@ function registerIPC() {
         args.push('--boot1', b1, '--boot2', b2, '--boot3', b3, '--boot4', b4);
       }
 
-      await virtualbox._run(args);
+      if (args.length > 2) {
+        await virtualbox._run(args);
+      }
+
+      if (settings.clipboardMode) {
+        await runSoft('Clipboard apply failed', () => virtualbox._run(['modifyvm', vmName, '--clipboard', settings.clipboardMode]));
+        await runSoft('Clipboard preference save failed', () => virtualbox._run(['setextradata', vmName, 'VMXposed/ClipboardMode', settings.clipboardMode]));
+      }
+      if (settings.dragAndDrop) {
+        await runSoft('Drag & drop apply failed', () => virtualbox._run(['modifyvm', vmName, '--draganddrop', settings.dragAndDrop]));
+        await runSoft('Drag & drop preference save failed', () => virtualbox._run(['setextradata', vmName, 'VMXposed/DragAndDropMode', settings.dragAndDrop]));
+      }
 
       if (settings.networkMode) {
         if (settings.networkMode === 'nat' || settings.networkMode === 'bridged') {
@@ -943,8 +2875,20 @@ function registerIPC() {
         }
       }
 
-      return { success: true };
+      if (typeof settings.fullscreenEnabled === 'boolean') {
+        await runSoft('Guest display fullscreen preference apply failed', () => virtualbox._run(['setextradata', vmName, 'VMXposed/GuestDisplayFullscreen', settings.fullscreenEnabled ? 'on' : 'off']));
+        await runSoft('VirtualBox window fullscreen disable apply failed', () => virtualbox._run(['setextradata', vmName, 'GUI/Fullscreen', 'off']));
+      }
+
+      return { success: true, warnings };
     } catch (err) {
+      const raw = String(err?.message || 'Unknown error');
+      if (/E_ACCESSDENIED|The object is not ready|get_ClipboardFileTransfersEnabled/i.test(raw)) {
+        return {
+          success: false,
+          error: 'VirtualBox denied this setting update right now (session/permission lock). Close any open V Os/VirtualBox windows for this V Os and try again, or run VM Xposed as Administrator.'
+        };
+      }
       return { success: false, error: err.message };
     }
   });
@@ -952,6 +2896,7 @@ function registerIPC() {
   ipcMain.handle('vm:getDetails', async (event, vmName) => {
     try {
       const info = await virtualbox.getVMInfo(vmName);
+      const fullscreenEnabled = await getGuestDisplayFullscreenPreference(vmName);
       const normalizeNetwork = (raw) => {
         const v = String(raw || '').toLowerCase();
         if (v === 'nat' || v.startsWith('nat')) return 'nat';
@@ -1008,8 +2953,10 @@ function registerIPC() {
           accelerate3d: (info.accelerate3d || '').toLowerCase() === 'on',
           efiEnabled: (info.firmware || '').toLowerCase() === 'efi',
           nestedVirtualization: (info['nested-hw-virt'] || '').toLowerCase() === 'on',
+          fullscreenEnabled,
           bootOrder: [info.boot1, info.boot2, info.boot3, info.boot4].filter(Boolean),
-          sharedFolders
+          sharedFolders,
+          primarySharedFolderPath: sharedFolders[0]?.hostPath || ''
         }
       };
     } catch (err) {
@@ -1034,6 +2981,46 @@ function registerIPC() {
         '--mode', 'all',
         '--register'
       ]);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('vm:snapshots:list', async (event, vmName) => {
+    try {
+      await virtualbox.init();
+      const snapshots = await virtualbox.listSnapshots(vmName);
+      return { success: true, snapshots };
+    } catch (err) {
+      return { success: false, snapshots: [], error: err.message };
+    }
+  });
+
+  ipcMain.handle('vm:snapshots:create', async (event, vmName, snapshotName) => {
+    try {
+      await virtualbox.init();
+      await virtualbox.createSnapshot(vmName, snapshotName);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('vm:snapshots:restore', async (event, vmName, snapshotRef) => {
+    try {
+      await virtualbox.init();
+      await virtualbox.restoreSnapshot(vmName, snapshotRef);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('vm:snapshots:delete', async (event, vmName, snapshotRef) => {
+    try {
+      await virtualbox.init();
+      await virtualbox.deleteSnapshot(vmName, snapshotRef);
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
@@ -1088,15 +3075,66 @@ function registerIPC() {
     }
   });
 
+  ipcMain.handle('vm:users:delete', async (event, payload) => {
+    try {
+      return await accountManager.deleteUser(payload.vmName, payload.guestUser, payload.guestPass, payload.username);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
   ipcMain.handle('vm:showInExplorer', async (event, vmName) => {
     try {
-      const info = await virtualbox.getVMInfo(vmName);
-      const cfgFile = info.CfgFile;
-      if (cfgFile) {
-        const dir = path.dirname(cfgFile.replace(/"/g, ''));
-        shell.openPath(dir);
+      const normalizeFsPath = (rawValue) => {
+        let value = String(rawValue || '').trim();
+        if (!value) return '';
+        value = value.replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, '');
+        if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
+          value = value.slice(1, -1).trim();
+        }
+        return path.normalize(value);
+      };
+
+      const payload = (vmName && typeof vmName === 'object') ? vmName : {};
+      const targetVmName = String(
+        (typeof vmName === 'string' ? vmName : payload.vmName) || ''
+      ).trim();
+      const requestedVmDir = normalizeFsPath(payload.vmDir || '');
+      const info = targetVmName ? await virtualbox.getVMInfo(targetVmName) : null;
+
+      const candidateDirs = [
+        requestedVmDir,
+        info?.CfgFile ? path.dirname(normalizeFsPath(info.CfgFile)) : '',
+        normalizeFsPath(info?.LogFld || ''),
+        normalizeFsPath(info?.SnapFld || '')
+      ].filter(Boolean);
+
+      const existingDir = candidateDirs.find((candidate) => {
+        try {
+          if (!candidate) return false;
+          if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) return true;
+          if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+            return fs.existsSync(path.dirname(candidate));
+          }
+          return false;
+        } catch {
+          return false;
+        }
+      });
+
+      if (!existingDir) {
+        return {
+          success: false,
+          error: 'V Os folder was not found on disk. It may have been moved, renamed, or deleted.'
+        };
       }
-      return { success: true };
+
+      const openResult = await shell.openPath(existingDir);
+      if (openResult) {
+        return { success: false, error: openResult };
+      }
+
+      return { success: true, path: existingDir };
     } catch (err) {
       return { success: false, error: err.message };
     }
@@ -1104,41 +3142,75 @@ function registerIPC() {
 
   ipcMain.handle('vm:guest:configure', async (event, vmName, payload = {}) => {
     try {
+      const uiPrefs = readUiPrefsFromDisk();
       const {
-        guestUser = 'user',
-        guestPass = 'password',
+        guestUser = 'guest',
+        guestPass = 'guest',
         sharedFolderPath = '',
         sharedFolderName = 'shared',
         enableSharedFolder = true,
-        autoStartVm = true
+        autoStartVm = false,
+        startFullscreen = true,
+        accelerate3d = false,
+        quickRepair = false,
+        clipboardMode = 'bidirectional',
+        dragAndDrop = 'bidirectional'
       } = payload;
 
       const vmState = (await virtualbox.getVMState(vmName) || '').toLowerCase();
       const notes = [];
 
+      try {
+        await virtualbox._run(['setextradata', vmName, 'VMXposed/ClipboardMode', clipboardMode || 'bidirectional']);
+        await virtualbox._run(['setextradata', vmName, 'VMXposed/DragAndDropMode', dragAndDrop || 'bidirectional']);
+      } catch (prefErr) {
+        notes.push(`Saved integration preference warning: ${prefErr.message}`);
+      }
+
       if (vmState === 'running') {
         try {
-          const runtime = await virtualbox.applyRuntimeIntegration(vmName, {
-            clipboardMode: 'bidirectional',
-            dragAndDrop: 'bidirectional',
-            width: 1920,
-            height: 1080,
-            bpp: 32,
-            display: 0
-          });
+          const { width, height } = getPrimaryDisplayResolution();
+          const runtimeOptions = {
+            clipboardMode: clipboardMode || 'bidirectional',
+            dragAndDrop: dragAndDrop || 'bidirectional',
+            guestDisplayFullscreen: startFullscreen !== false,
+            waitForGuestAdditionsMs: startFullscreen !== false ? 120000 : 0
+          };
+          if (startFullscreen !== false) {
+            runtimeOptions.width = width;
+            runtimeOptions.height = height;
+            runtimeOptions.bpp = 32;
+            runtimeOptions.display = 0;
+          }
+          const runtime = await virtualbox.applyRuntimeIntegration(vmName, runtimeOptions);
+          scheduleDeferredRuntimeIntegration(vmName, {
+            ...runtimeOptions,
+            waitForGuestAdditionsMs: startFullscreen !== false ? 600000 : 180000
+          }, 3000);
           notes.push(runtime.warnings?.length
             ? `Runtime integration applied with warnings: ${runtime.warnings.join(' | ')}`
-            : 'Applied runtime clipboard/drag-drop/display integration for running VM.');
+            : 'Applied runtime clipboard/drag-drop/display integration for running V Os.');
         } catch (runtimeErr) {
           notes.push(`Runtime clipboard/drag-drop apply warning: ${runtimeErr.message}`);
         }
       } else {
-        await configureGuestFeatures(vmName);
-        notes.push('Applied host-side Guest Additions VM settings (graphics, clipboard, drag-drop).');
+        await configureGuestFeatures(vmName, {
+          fullscreen: startFullscreen !== false,
+          clipboardMode: clipboardMode || 'bidirectional',
+          dragAndDrop: dragAndDrop || 'bidirectional',
+          accelerate3d: accelerate3d === true
+        });
+        notes.push('Applied host-side Guest Additions V Os settings (graphics, clipboard, drag-drop).');
       }
 
       let sharedFolderResult = null;
       if (enableSharedFolder && sharedFolderPath && sharedFolderPath.trim()) {
+        if (!isPathTrustedByPrefs(sharedFolderPath.trim(), uiPrefs)) {
+          return {
+            success: false,
+            error: 'Shared folder path is outside Trusted Paths. Update VM Xposed Settings > Security & Privacy first.'
+          };
+        }
         sharedFolderResult = await setupSharedFolder(vmName, sharedFolderPath.trim(), sharedFolderName || 'shared');
         notes.push('Configured host shared folder mapping.');
       }
@@ -1146,22 +3218,64 @@ function registerIPC() {
       const state = await virtualbox.getVMState(vmName);
       if (state !== 'running' && autoStartVm) {
         await virtualbox.startVM(vmName);
-        notes.push('VM started automatically for in-guest setup.');
+        notes.push('V Os started automatically for in-guest setup.');
+        if (quickRepair) {
+          return {
+            success: true,
+            pendingInGuest: true,
+            message: 'Host-side integration was applied and V Os was started. Log in to the V Os, then run Fix All again to finish in-guest shared-folder and guest-service setup.',
+            notes,
+            sharedFolder: sharedFolderResult
+          };
+        }
       }
 
-      const gaReady = await virtualbox.waitForGuestAdditions(vmName, 600000);
+      if (state !== 'running' && !autoStartVm) {
+        return {
+          success: true,
+          pendingInGuest: true,
+          message: 'Host-side integration was applied. Start the V Os, sign in, then run Guest Setup again to finish in-guest clipboard/drag-drop/display/shared-folder services.',
+          notes,
+          sharedFolder: sharedFolderResult
+        };
+      }
+
+      const gaWaitTimeout = quickRepair ? 45000 : 600000;
+      const guestWaitTimeout = quickRepair ? 45000 : 240000;
+
+      const gaReady = await virtualbox.waitForGuestAdditions(vmName, gaWaitTimeout);
       if (!gaReady) {
+        if (quickRepair) {
+          notes.push('Guest Additions not ready yet for in-guest steps.');
+          return {
+            success: true,
+            pendingInGuest: true,
+            message: 'Host-side settings were applied, but Guest Additions are not ready yet. Log in to the V Os and run Fix All again. If you still see the "Try Ubuntu / Install Ubuntu" screen, boot from the installed disk first.',
+            notes,
+            sharedFolder: sharedFolderResult
+          };
+        }
         return {
           success: false,
           error: 'Guest Additions are not ready yet. Wait for OS login, then try Guest Setup again.'
         };
       }
 
-      const guestReady = await virtualbox.waitForGuestReady(vmName, guestUser, guestPass, 240000);
+      const guestReady = await virtualbox.waitForGuestReady(vmName, guestUser, guestPass, guestWaitTimeout);
       if (!guestReady) {
+        if (quickRepair) {
+          notes.push('Guest login/session not ready for in-guest commands.');
+          return {
+            success: true,
+            pendingInGuest: true,
+            message: 'Host-side settings were applied, but guest login/session is not ready yet. Sign in to the V Os and run Fix All again. If you still see the "Try Ubuntu / Install Ubuntu" screen, boot from the installed disk first.',
+            notes,
+            sharedFolder: sharedFolderResult
+          };
+        }
         return {
           success: false,
-          error: 'Guest OS is not ready for in-guest commands. Verify credentials and that the VM has finished booting.'
+          error: 'Guest OS is not ready for in-guest commands. Verify credentials and that the V Os has finished booting.'
         };
       }
 
@@ -1169,16 +3283,27 @@ function registerIPC() {
         configureSharedFolder: !!(enableSharedFolder && sharedFolderResult),
         sharedFolderName: sharedFolderName || 'shared'
       });
+      const guestChecks = result?.checks || {};
 
       try {
-        const runtimeFinal = await virtualbox.applyRuntimeIntegration(vmName, {
-          clipboardMode: 'bidirectional',
-          dragAndDrop: 'bidirectional',
-          width: 1920,
-          height: 1080,
-          bpp: 32,
-          display: 0
-        });
+        const { width, height } = getPrimaryDisplayResolution();
+        const runtimeFinalOptions = {
+          clipboardMode: clipboardMode || 'bidirectional',
+          dragAndDrop: dragAndDrop || 'bidirectional',
+          guestDisplayFullscreen: startFullscreen !== false,
+          waitForGuestAdditionsMs: startFullscreen !== false ? 90000 : 0
+        };
+        if (startFullscreen !== false) {
+          runtimeFinalOptions.width = width;
+          runtimeFinalOptions.height = height;
+          runtimeFinalOptions.bpp = 32;
+          runtimeFinalOptions.display = 0;
+        }
+        const runtimeFinal = await virtualbox.applyRuntimeIntegration(vmName, runtimeFinalOptions);
+        scheduleDeferredRuntimeIntegration(vmName, {
+          ...runtimeFinalOptions,
+          waitForGuestAdditionsMs: startFullscreen !== false ? 600000 : 180000
+        }, 3000);
         if (runtimeFinal.warnings?.length) {
           notes.push(`Final runtime integration warnings: ${runtimeFinal.warnings.join(' | ')}`);
         }
@@ -1199,14 +3324,43 @@ function registerIPC() {
         graphicsController: ['vmsvga', 'vboxsvga'].includes(String(postInfo.graphicscontroller || '').toLowerCase()),
         vram128: (parseInt(postInfo.vram || '0', 10) || 0) >= 128,
         clipboardBidirectional: String(postInfo.clipboard || postInfo['clipboard-mode'] || '').toLowerCase() === 'bidirectional',
-        dragDropBidirectional: String(postInfo.draganddrop || postInfo['drag-and-drop'] || '').toLowerCase() === 'bidirectional'
+        dragDropBidirectional: String(postInfo.draganddrop || postInfo['drag-and-drop'] || '').toLowerCase() === 'bidirectional',
+        sharedMounted: enableSharedFolder ? guestChecks.sharedMounted !== false : true,
+        sessionX11: guestChecks.sessionX11 !== false
       };
+      const sessionType = String(guestChecks.sessionType || result?.sessionType || '').toLowerCase();
+      const waylandActive = sessionType.includes('wayland');
 
-      if (!postChecks.guestAdditions || !postChecks.graphicsController || !postChecks.clipboardBidirectional || !postChecks.dragDropBidirectional) {
+      if (!postChecks.guestAdditions
+        || !postChecks.graphicsController
+        || !postChecks.clipboardBidirectional
+        || !postChecks.dragDropBidirectional
+        || !postChecks.sharedMounted
+        || !postChecks.sessionX11
+        || waylandActive) {
+        const extraNotes = [...notes];
+        if (waylandActive) {
+          extraNotes.push('Wayland session is active in guest. Drag & drop guest→host needs X11. Log out or reboot guest after Guest Setup to switch to Xorg.');
+        }
+        if (quickRepair) {
+          return {
+            success: true,
+            pendingInGuest: true,
+            message: waylandActive
+              ? 'Host-side settings are saved, but guest session is on Wayland. Switch the guest session to Xorg, then run Fix All again.'
+              : 'Host-side settings are saved, but guest-side verification is not complete yet. Log in fully and run Fix All again.',
+            notes: extraNotes,
+            checks: postChecks,
+            details: result,
+            sharedFolder: sharedFolderResult
+          };
+        }
         return {
           success: false,
-          error: 'Guest integration verification failed. Retry Guest Setup after VM boot/login.',
-          notes,
+          error: waylandActive
+            ? 'Guest is currently on Wayland session. Drag & drop guest→host requires X11 (Xorg).'
+            : 'Guest integration verification failed. Retry Guest Setup after V Os boot/login.',
+          notes: extraNotes,
           checks: postChecks,
           details: result
         };
@@ -1227,42 +3381,250 @@ function registerIPC() {
 
   // ─── Start full setup workflow ──────────────────────────────────
   ipcMain.handle('setup:start', async (event, config) => {
-    try {
-      // Forward orchestrator events to renderer
-      const sendToRenderer = (channel, data) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send(channel, data);
-        }
-      };
+    const sendToRenderer = (channel, data) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(channel, data);
+      }
+    };
 
-      // Wire orchestrator events
+    const logHandler = (entry) => sendToRenderer('setup:log', entry);
+
+    try {
+      logger.on('log', logHandler);
+
+      const uiPrefs = readUiPrefsFromDisk();
+      if (config?.enableSharedFolder && String(config?.sharedFolderPath || '').trim()) {
+        if (!isPathTrustedByPrefs(String(config.sharedFolderPath).trim(), uiPrefs)) {
+          throw new Error('Selected shared folder path is outside Trusted Paths. Update VM Xposed Settings > Security & Privacy first.');
+        }
+      }
+
+      if (!config?.customIsoPath && String(config?.isoSource || 'official') !== 'custom') {
+        let resolvedProfile = runtimeOSCatalog?.[config?.osName] || null;
+
+        if (!resolvedProfile || !resolvedProfile.downloadUrl) {
+          try {
+            const refreshed = await refreshOfficialCatalog(runtimeOSCatalog, logger);
+            runtimeOSCatalog = refreshed.catalog;
+            await persistRuntimeCatalog('setup:resolve-os-profile');
+            resolvedProfile = runtimeOSCatalog?.[config?.osName] || null;
+          } catch {}
+        }
+
+        if (resolvedProfile) {
+          config._resolvedOsProfile = {
+            name: config?.osName,
+            ...resolvedProfile
+          };
+        } else {
+          const osName = String(config?.osName || '').trim();
+          const ubuntuMatch = osName.match(/Ubuntu\s+(\d{2}\.\d{2}(?:\.\d+)?)/i);
+          if (ubuntuMatch?.[1]) {
+            const version = ubuntuMatch[1];
+            const filename = `ubuntu-${version}-desktop-amd64.iso`;
+            config._resolvedOsProfile = {
+              name: osName,
+              category: 'Ubuntu',
+              osType: 'Ubuntu_64',
+              filename,
+              downloadUrl: `https://old-releases.ubuntu.com/releases/${version}/${filename}`,
+              sha256Url: `https://old-releases.ubuntu.com/releases/${version}/SHA256SUMS`,
+              unattended: true,
+              defaultUser: 'user',
+              defaultPass: 'password',
+              ram: 4096,
+              cpus: 2,
+              disk: 25600,
+              vram: 128,
+              graphicsController: 'vmsvga',
+              notes: `Ubuntu ${version} fallback profile (old-releases.ubuntu.com)`
+            };
+          }
+        }
+      }
+
+      if (config?.useExistingVm) {
+        sendToRenderer('setup:phase', { id: 'system_check', label: 'System Requirements Check', status: 'active' });
+        sendToRenderer('setup:progress', { phase: 'system_check', message: 'Checking VirtualBox installation...', percent: 10 });
+
+        const ensured = await orchestrator.ensureVirtualBoxInstalled({
+          onProgress: (data) => {
+            if (data?.phase) {
+              sendToRenderer('setup:progress', {
+                phase: data.phase,
+                id: data.phase,
+                message: data.message,
+                percent: data.percent
+              });
+            }
+          }
+        });
+
+        if (!ensured?.success && ensured?.installed === false) {
+          throw new Error(ensured?.error || 'VirtualBox is required to continue.');
+        }
+
+        sendToRenderer('setup:phase', { id: 'system_check', label: 'System Requirements Check', status: 'complete' });
+
+        let vmName = String(config.existingVmName || '').trim();
+        let importedFromFolder = false;
+
+        if (!vmName && config.existingVmFolder) {
+          sendToRenderer('setup:phase', { id: 'create_vm', label: 'Import Existing V Os', status: 'active' });
+          sendToRenderer('setup:progress', { phase: 'create_vm', message: 'Searching selected folder for V Os files...', percent: 20 });
+
+          const resolved = await resolveVmFromFolder(config.existingVmFolder, { registerIfNeeded: true });
+          if (!resolved?.success) {
+            throw new Error(resolved?.error || 'Could not detect a V Os from selected folder.');
+          }
+
+          vmName = resolved.vmName;
+          importedFromFolder = !!resolved.imported;
+          sendToRenderer('setup:progress', {
+            phase: 'create_vm',
+            message: importedFromFolder
+              ? `Imported V Os "${vmName}" from selected folder.`
+              : `Using V Os "${vmName}" from selected folder.`,
+            percent: 100
+          });
+          sendToRenderer('setup:phase', { id: 'create_vm', label: 'Import Existing V Os', status: 'complete' });
+        }
+
+        if (!vmName) {
+          throw new Error('Select an existing V Os from list or choose a V Os folder first.');
+        }
+
+        const exists = await virtualbox.vmExists(vmName);
+        if (!exists) {
+          throw new Error(`V Os "${vmName}" was not found in VirtualBox.`);
+        }
+
+        sendToRenderer('setup:phase', { id: 'guest_config', label: 'Configuring Guest Integration', status: 'active' });
+        sendToRenderer('setup:progress', { phase: 'guest_config', message: `Applying integration settings for "${vmName}"...`, percent: 65 });
+
+        const existingVmState = (await virtualbox.getVMState(vmName) || '').toLowerCase();
+        await virtualbox._run([
+          'setextradata',
+          vmName,
+          'VMXposed/ClipboardMode',
+          config.clipboardMode || 'bidirectional'
+        ]);
+        await virtualbox._run([
+          'setextradata',
+          vmName,
+          'VMXposed/DragAndDropMode',
+          config.dragAndDrop || 'bidirectional'
+        ]);
+        if (existingVmState === 'running') {
+          const { width, height } = getPrimaryDisplayResolution();
+          await virtualbox.applyRuntimeIntegration(vmName, {
+            clipboardMode: config.clipboardMode || 'bidirectional',
+            dragAndDrop: config.dragAndDrop || 'bidirectional',
+            width,
+            height,
+            bpp: 32,
+            display: 0,
+            guestDisplayFullscreen: config.startFullscreen !== false,
+            waitForGuestAdditionsMs: config.startFullscreen !== false ? 120000 : 0
+          });
+          scheduleDeferredRuntimeIntegration(vmName, {
+            clipboardMode: config.clipboardMode || 'bidirectional',
+            dragAndDrop: config.dragAndDrop || 'bidirectional',
+            width,
+            height,
+            bpp: 32,
+            display: 0,
+            guestDisplayFullscreen: config.startFullscreen !== false,
+            waitForGuestAdditionsMs: config.startFullscreen !== false ? 600000 : 180000
+          }, 3500);
+          await virtualbox._run([
+            'setextradata',
+            vmName,
+            'VMXposed/GuestDisplayFullscreen',
+            config.startFullscreen !== false ? 'on' : 'off'
+          ]);
+        } else {
+          await configureGuestFeatures(vmName, {
+            fullscreen: config.startFullscreen !== false,
+            clipboardMode: config.clipboardMode || 'bidirectional',
+            dragAndDrop: config.dragAndDrop || 'bidirectional',
+            accelerate3d: config.accelerate3d === true
+          });
+
+          await virtualbox.configureVM(vmName, {
+            clipboardMode: config.clipboardMode || 'bidirectional',
+            dragAndDrop: config.dragAndDrop || 'bidirectional'
+          });
+        }
+
+        let sharedFolder = null;
+        if (config.sharedFolderPath && String(config.sharedFolderPath).trim()) {
+          sharedFolder = await setupSharedFolder(vmName, String(config.sharedFolderPath).trim());
+        }
+
+        sendToRenderer('setup:phase', { id: 'guest_config', label: 'Configuring Guest Integration', status: 'complete' });
+
+        const state = (await virtualbox.getVMState(vmName) || '').toLowerCase();
+        const shouldAutoStartVm = config?.autoStartVm === true;
+        if (state !== 'running' && shouldAutoStartVm) {
+          sendToRenderer('setup:phase', { id: 'wait_boot', label: 'Starting Existing V Os', status: 'active' });
+          sendToRenderer('setup:progress', { phase: 'wait_boot', message: `Starting existing V Os "${vmName}"...`, percent: 85 });
+          await virtualbox.startVM(vmName);
+          sendToRenderer('setup:phase', { id: 'wait_boot', label: 'Starting Existing V Os', status: 'complete' });
+        } else if (state !== 'running') {
+          sendToRenderer('setup:phase', { id: 'wait_boot', label: 'Starting Existing V Os', status: 'skipped' });
+          sendToRenderer('setup:progress', { phase: 'wait_boot', message: `V Os "${vmName}" was not auto-started. Start it manually when ready.`, percent: 100 });
+        }
+
+        const result = {
+          success: true,
+          reusedExisting: true,
+          importedFromFolder,
+          vmName,
+          sharedFolder,
+          credentials: {
+            username: config.username || 'user',
+            password: config.password || 'password'
+          }
+        };
+
+        sendToRenderer('setup:phase', { id: 'complete', label: 'Setup Complete', status: 'complete' });
+        sendToRenderer('setup:progress', {
+          phase: 'complete',
+          message: state === 'running' || shouldAutoStartVm
+            ? `Existing V Os "${vmName}" is ready.`
+            : `Existing V Os "${vmName}" is configured and ready to start manually.`,
+          percent: 100
+        });
+        sendToRenderer('setup:complete', result);
+        return result;
+      }
+
       orchestrator.on('phase', (data) => sendToRenderer('setup:phase', data));
       orchestrator.on('progress', (data) => sendToRenderer('setup:progress', data));
       orchestrator.on('error', (data) => sendToRenderer('setup:error', data));
       orchestrator.on('complete', (data) => sendToRenderer('setup:complete', data));
 
-      // Wire logger events to renderer (user sees ALL logs)
-      const logHandler = (entry) => sendToRenderer('setup:log', entry);
-      logger.on('log', logHandler);
-
       const result = await orchestrator.runSetup(config, config._resumeFrom || null);
-
-      // Cleanup listeners
       orchestrator.removeAllListeners();
       logger.removeListener('log', logHandler);
-
       return result;
     } catch (err) {
-      // Cleanup listeners even on error
       orchestrator.removeAllListeners();
+      logger.removeListener('log', logHandler);
       return { success: false, error: err.message };
     }
   });
 
   // ─── Cancel setup ───────────────────────────────────────────────
+  ipcMain.handle('setup:pause', async () => {
+    const paused = orchestrator.pause();
+    return { paused };
+  });
+
   ipcMain.handle('setup:cancel', async () => {
-    orchestrator.cancel();
-    return { cancelled: true };
+    const cancelled = orchestrator.cancel();
+    return { cancelled };
   });
 
   // ─── Get setup phases (for UI display) ──────────────────────────
@@ -1305,15 +3667,25 @@ if (!gotLock) {
 app.whenReady().then(async () => {
   if (process.platform === 'win32') {
     app.setAppUserModelId('com.jeet.vmxposed');
+    nativeTheme.themeSource = 'dark';
   }
 
   // Initialize logger
   await logger.init();
+  const startupPrefs = readUiPrefsFromDisk();
+  applyLoggerPreferences(startupPrefs);
+  await pruneLogFilesByRetention(startupPrefs.logRetentionDays);
+  applyPreferredVirtualBoxPath(startupPrefs);
   logger.info('App', 'VM Xposed starting...');
   logger.info('App', `Platform: ${process.platform} ${process.arch}`);
   logger.info('App', `Electron: ${process.versions.electron}`);
   logger.info('App', `Node: ${process.versions.node}`);
   logger.info('App', `Administrator: ${isRunningAsAdmin() ? 'YES' : 'NO'}`);
+
+  const cacheLoaded = loadRuntimeCatalogFromCache();
+  if (!cacheLoaded) {
+    logger.info('CatalogUpdater', 'No cached OS catalog found — using bundled defaults.');
+  }
 
   registerIPC();
   createWindow();

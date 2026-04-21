@@ -1,0 +1,279 @@
+:root {
+  --bg: #0A0D12;
+  --surface: #0F141B;
+  --surface-hover: #151C24;
+  --surface-elevated: #151C24;
+  --surface-glass: rgba(15, 20, 27, 0.72);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-soft: rgba(255, 255, 255, 0.03);
+  --text: #E6EDF3;
+  --text-secondary: #9AA4B2;
+  --text-muted: #6B7280;
+  --primary: #4C8DFF;
+  --primary-hover: #3a75e0;
+  --secondary: #7C5CFF; 
+  --secondary-hover: #6748e6;
+  --danger: #cf3f4c;
+  --success: #22a06b;
+  --warn: #d7a13b;
+  --radius: 8px;
+  --font-ui: 'Inter', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --transition: 200ms ease;
+  --motion-flow-primary-opacity: 0.03;
+  --motion-flow-secondary-opacity: 0.02;
+}
+
+/* VM XPOSED DASHBOARD LAYOUT */
+
+.vm-dashboard {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  grid-template-rows: auto 1fr;
+  gap: 24px;
+  padding: 24px;
+  height: 100%;
+  overflow-y: auto;
+  color: var(--text);
+}
+
+.vm-header-row {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.vm-title {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  color: var(--text);
+  margin: 0;
+}
+
+.vm-panel {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  transition: transform var(--transition), border-color var(--transition);
+}
+
+.vm-panel:hover {
+  transform: translateY(-2px);
+  border-color: var(--border);
+}
+
+.vm-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Stats grid */
+.vm-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 16px;
+}
+
+.vm-stat-card {
+  background: var(--surface-elevated);
+  padding: 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vm-stat-value {
+  font-size: 28px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.vm-stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.vm-stat-graph {
+  height: 24px;
+  width: 100%;
+  background: linear-gradient(to right, rgba(76, 141, 255, 0.1), rgba(124, 92, 255, 0.1));
+  border-bottom: 2px solid var(--primary);
+  border-radius: 2px 2px 0 0;
+  margin-top: 8px;
+}
+
+/* Machine List */
+.vm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vm-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--surface-elevated);
+  border-radius: 6px;
+  border: 1px solid transparent;
+  transition: var(--transition);
+  cursor: pointer;
+}
+
+.vm-list-item:hover {
+  border-color: var(--border);
+  background: var(--surface-hover);
+}
+
+.vm-list-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.vm-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.vm-status-dot.active {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(34, 160, 107, 0.4);
+}
+
+.vm-list-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.vm-list-metrics {
+  display: flex;
+  gap: 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.vm-list-actions {
+  opacity: 0;
+  transition: opacity var(--transition);
+  display: flex;
+  gap: 8px;
+}
+
+.vm-list-item:hover .vm-list-actions {
+  opacity: 1;
+}
+
+.vm-action-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.vm-action-btn:hover {
+  background: var(--surface);
+  color: var(--primary);
+}
+
+/* Right sidebar / Sub grid */
+.vm-side-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* Activity Log */
+.vm-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.vm-log-item {
+  display: flex;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+
+.vm-log-time {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  min-width: 60px;
+}
+
+/* EMPTY STATE */
+.vm-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 300px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.vm-empty-icon {
+  margin-bottom: 16px;
+  color: var(--text-secondary);
+}
+
+/* SYSTEM BACKGROUND ANIMATION - INFRASTRUCTURE FLOW */
+.sys-flow-bg {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.sys-flow-line {
+  position: absolute;
+  width: 150vw;
+  height: 2px;
+  left: -25vw;
+  opacity: 0.03;
+  background: linear-gradient(90deg, transparent, var(--primary), var(--secondary), transparent);
+  animation: flowMotion 15s linear infinite;
+  filter: blur(2px);
+  transform-origin: center;
+}
+
+.sys-flow-line:nth-child(1) { top: 20%; animation-duration: 20s; transform: rotate(-5deg); }
+.sys-flow-line:nth-child(2) { top: 50%; animation-duration: 15s; transform: rotate(2deg); opacity: 0.05; }
+.sys-flow-line:nth-child(3) { top: 80%; animation-duration: 25s; transform: rotate(-2deg); background: linear-gradient(90deg, transparent, var(--secondary), var(--primary), transparent); }
+
+@keyframes flowMotion {
+  0% { transform: translateX(-10%) }
+  50% { transform: translateX(10%) }
+  100% { transform: translateX(-10%) }
+}
+
+.layout-app {
+  position: relative;
+  z-index: 1; 
+  background: transparent;
+}
