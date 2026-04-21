@@ -1395,6 +1395,10 @@ function restartAsAdmin() {
   ].join('; ');
 
   try {
+    app.releaseSingleInstanceLock();
+  } catch {}
+
+  try {
     execFile(
       'powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCommand],
@@ -1402,20 +1406,19 @@ function restartAsAdmin() {
       (err) => {
         if (!err) {
           logger.info('App', 'Restarting in Administrator mode...');
-          try {
-            app.releaseSingleInstanceLock();
-          } catch {}
           app.quit();
           return;
         }
 
         logger.warn('App', `Admin relaunch request failed or was cancelled: ${err.message}`);
+        app.requestSingleInstanceLock();
       }
     );
 
     return { success: true, restarting: true };
   } catch (err) {
     logger.error('App', `Failed to restart as admin: ${err.message}`);
+    app.requestSingleInstanceLock();
     return { success: false, error: err.message };
   }
 }

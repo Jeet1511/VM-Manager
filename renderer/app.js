@@ -3457,7 +3457,7 @@ function _renderSettings(initialState = {}) {
   const vmDefaultPreset = String(pick('vmDefaultPreset', 'balanced'));
   const credentialStorage = String(pick('credentialStorage', 'keychain'));
   const telemetryEnabled = pick('telemetryEnabled', false) === true;
-  const trustedPaths = String(pick('trustedPaths', sharedFolderPath || ''));
+  const trustedPaths = String(pick('trustedPaths', ''));
   const logLevel = String(pick('logLevel', 'info'));
   const logRetentionDays = Math.max(1, Math.min(365, parseInt(pick('logRetentionDays', 14), 10) || 14));
   const ignoredUpdateVersion = _normalizeVersionText(String(pick('ignoredUpdateVersion', '')));

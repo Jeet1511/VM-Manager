@@ -47,4 +47,11 @@ System Requirements
   4 GB RAM minimum (8 GB recommended)
 
 ---
+
+Hotfix Updates
+--------------
+• Fixed an issue where the "Continue with Admin Privilege" action would fail to restart the application due to a race condition with the Single Instance Lock.
+• Resolved a bug where VirtualBox integration settings (such as Drag & Drop and Clipboard Sync) failed to save because of an incorrect default validation against Trusted Paths in production environments.
+
+---
 Thank you for using VM Xposed.
