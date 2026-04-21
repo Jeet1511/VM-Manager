@@ -1,6 +1,6 @@
 {
   "name": "vm-xposed",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "One-click cross-platform VM setup automation using VirtualBox",
   "main": "main.js",
   "scripts": {
@@ -63,10 +63,10 @@
       "allowToChangeInstallationDirectory": false,
       "installerIcon": "logos/icon-installer.ico",
       "uninstallerIcon": "logos/icon-installer.ico",
-      "artifactName": "VM-Xposed-Setup.exe"
+      "artifactName": "VM-Xposed-Setup-v${version}.exe"
     },
     "portable": {
-      "artifactName": "VM-Xposed-Portable.exe"
+      "artifactName": "VM-Xposed-Portable-v${version}.exe"
     }
   }
 }

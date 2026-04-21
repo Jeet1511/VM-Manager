@@ -34,7 +34,7 @@ Public update source is now repository folders:
 
 ### Windows Setup Installer
 
-[![Download Windows Installer](https://img.shields.io/badge/Download-Windows%20Installer-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/raw/main/Installer/VM-Xposed-Setup-v1.0.0.exe)
+[![Download Windows Installer](https://img.shields.io/badge/Download-Windows%20Installer-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/raw/main/Installer/VM-Xposed-Setup-v1.0.1.exe)
 
 - Click the button above to directly download the latest Windows installer (.exe).
 
@@ -67,7 +67,7 @@ Output installer is generated in `dist/`.
 - Upload patch notes to `Patch notes/` using this format:
   - `patch-vX.Y.Z.txt` (or `.md`)
 - Keep installer and patch note versions matched (same `X.Y.Z`).
-- VM Xposed Update section auto-detects the highest version and shows matching patch notes.
+- VM Xposed Update section auto-detects the newest installer in `Installer/` and picks the best matching patch notes.
 - VM Xposed also loads full patch history from `Patch notes/` so users can browse previous updates.
 
 ## License

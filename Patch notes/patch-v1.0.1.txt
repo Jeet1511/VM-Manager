@@ -1,0 +1,11 @@
+VM Xposed v1.0.1 — Reliability Release
+
+Fixed:
+- Admin relaunch flow now handles UAC confirmation properly and no longer reports success before elevation actually starts.
+- Admin floating action recovers if relaunch does not complete, so users are not stuck in a fake restarting state.
+- Drag-and-drop runtime integration now retries intelligently when Guest Additions/session readiness causes temporary failures.
+- Update checker now detects the newest installer from Installer/ by GitHub commit recency, independent of installer filename.
+
+Improved:
+- Installer artifact naming now includes version (VM-Xposed-Setup-vX.Y.Z.exe).
+- About dialog version now reads directly from app version metadata.

@@ -33,6 +33,7 @@ let catalogRefreshTimer = null;
 let isExitShutdownInProgress = false;
 const runtimeIntegrationQueue = new Map();
 const runtimeIntegrationLastScheduledAt = new Map();
+const runtimeIntegrationRetryCounts = new Map();
 const vmLastKnownState = new Map();
 
 function getCatalogCacheFilePath() {
@@ -693,6 +694,17 @@ function buildRepoContentsApiUrl(repoPath) {
   return `${base}/${encodedPath}?ref=${encodeURIComponent(UPDATE_REPO_BRANCH)}`;
 }
 
+function buildRepoCommitsApiUrl(repoPath) {
+  const normalizedPath = String(repoPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const base = `https://api.github.com/repos/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/commits`;
+  const query = [
+    `sha=${encodeURIComponent(UPDATE_REPO_BRANCH)}`,
+    `path=${encodeURIComponent(normalizedPath)}`,
+    'per_page=1'
+  ].join('&');
+  return `${base}?${query}`;
+}
+
 function buildRepoTreePageUrl(repoPath) {
   const encodedPath = encodeRepoPath(repoPath);
   if (!encodedPath) return GITHUB_UPDATES_PAGE;
@@ -702,6 +714,44 @@ function buildRepoTreePageUrl(repoPath) {
 function extractVersionFromName(name) {
   const match = String(name || '').match(/v?(\d+\.\d+\.\d+)/i);
   return match ? normalizeVersionString(match[1]) : '';
+}
+
+function parseGitHubTimestamp(value) {
+  const ts = Date.parse(String(value || ''));
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+async function fetchLatestCommitForRepoPath(repoPath) {
+  try {
+    const result = await fetchJsonWithRedirects(buildRepoCommitsApiUrl(repoPath));
+    const first = Array.isArray(result) ? result[0] : null;
+    if (!first || typeof first !== 'object') {
+      return { sha: '', date: '' };
+    }
+    return {
+      sha: String(first.sha || ''),
+      date: String(first?.commit?.committer?.date || first?.commit?.author?.date || '')
+    };
+  } catch {
+    return { sha: '', date: '' };
+  }
+}
+
+async function enrichRepoEntriesWithLatestCommit(entries = [], basePath = '') {
+  const list = Array.isArray(entries) ? entries : [];
+  return Promise.all(list.map(async (entry) => {
+    const pathFromEntry = String(entry?.path || '').trim();
+    const name = String(entry?.name || '').trim();
+    const repoPath = pathFromEntry || [String(basePath || '').trim(), name].filter(Boolean).join('/');
+    const latestCommit = repoPath ? await fetchLatestCommitForRepoPath(repoPath) : { sha: '', date: '' };
+    return {
+      ...entry,
+      parsedVersion: extractVersionFromName(name),
+      latestCommitSha: latestCommit.sha,
+      latestCommitDate: latestCommit.date,
+      latestCommitTs: parseGitHubTimestamp(latestCommit.date)
+    };
+  }));
 }
 
 function isTrustedRepoAssetUrl(value) {
@@ -799,40 +849,55 @@ function fetchTextWithRedirects(url, redirectCount = 0) {
   });
 }
 
-function pickLatestVersionedFile(entries = [], predicate = () => true) {
+function pickLatestInstallerFile(entries = [], predicate = () => true) {
   return entries
     .filter((entry) => entry?.type === 'file' && predicate(entry))
-    .map((entry) => ({
-      ...entry,
-      parsedVersion: extractVersionFromName(entry.name)
-    }))
-    .filter((entry) => !!entry.parsedVersion)
-    .sort((a, b) => compareVersions(b.parsedVersion, a.parsedVersion))[0] || null;
+    .sort((a, b) => {
+      const commitDiff = (Number(b.latestCommitTs) || 0) - (Number(a.latestCommitTs) || 0);
+      if (commitDiff !== 0) return commitDiff;
+      const versionDiff = compareVersions(b.parsedVersion || '0.0.0', a.parsedVersion || '0.0.0');
+      if (versionDiff !== 0) return versionDiff;
+      const sizeDiff = (Number(b.size) || 0) - (Number(a.size) || 0);
+      if (sizeDiff !== 0) return sizeDiff;
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    })[0] || null;
 }
 
 async function checkForLatestReleaseUpdate() {
   const currentVersion = app.getVersion();
-  const installerEntries = await fetchJsonWithRedirects(buildRepoContentsApiUrl(UPDATE_INSTALLER_DIR));
-  const patchNoteEntries = await fetchJsonWithRedirects(buildRepoContentsApiUrl(UPDATE_PATCH_NOTES_DIR));
+  const installerEntriesRaw = await fetchJsonWithRedirects(buildRepoContentsApiUrl(UPDATE_INSTALLER_DIR));
+  const patchNoteEntriesRaw = await fetchJsonWithRedirects(buildRepoContentsApiUrl(UPDATE_PATCH_NOTES_DIR));
 
-  if (!Array.isArray(installerEntries) || installerEntries.length === 0) {
+  if (!Array.isArray(installerEntriesRaw) || installerEntriesRaw.length === 0) {
     throw new Error(`No installers found in "${UPDATE_INSTALLER_DIR}" folder.`);
   }
 
-  const latestInstaller = pickLatestVersionedFile(installerEntries, (entry) => /\.exe$/i.test(String(entry?.name || '')));
+  const installerFiles = installerEntriesRaw
+    .filter((entry) => entry?.type === 'file' && /\.exe$/i.test(String(entry?.name || '')));
+  const installerEntries = await enrichRepoEntriesWithLatestCommit(installerFiles, UPDATE_INSTALLER_DIR);
+  const latestInstaller = pickLatestInstallerFile(installerEntries, () => true);
   if (!latestInstaller) {
-    throw new Error(`No versioned installer file found in "${UPDATE_INSTALLER_DIR}". Use names like VM-Xposed-Setup-v1.0.1.exe.`);
+    throw new Error(`No installer (.exe) file found in "${UPDATE_INSTALLER_DIR}".`);
   }
 
-  const patchFiles = Array.isArray(patchNoteEntries)
-    ? patchNoteEntries
+  const patchFilesRaw = Array.isArray(patchNoteEntriesRaw)
+    ? patchNoteEntriesRaw
       .filter((entry) => entry?.type === 'file' && /\.(txt|md)$/i.test(String(entry?.name || '')))
-      .map((entry) => ({ ...entry, parsedVersion: extractVersionFromName(entry.name) }))
-      .filter((entry) => !!entry.parsedVersion)
     : [];
-  patchFiles.sort((a, b) => compareVersions(b.parsedVersion, a.parsedVersion));
+  const patchFiles = await enrichRepoEntriesWithLatestCommit(patchFilesRaw, UPDATE_PATCH_NOTES_DIR);
+  patchFiles.sort((a, b) => {
+    const versionDiff = compareVersions(b.parsedVersion || '0.0.0', a.parsedVersion || '0.0.0');
+    if (versionDiff !== 0) return versionDiff;
+    const commitDiff = (Number(b.latestCommitTs) || 0) - (Number(a.latestCommitTs) || 0);
+    if (commitDiff !== 0) return commitDiff;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  const versionedPatchFiles = patchFiles.filter((entry) => !!entry.parsedVersion);
 
-  let selectedPatch = patchFiles.find((entry) => entry.parsedVersion === latestInstaller.parsedVersion) || null;
+  let selectedPatch = null;
+  if (latestInstaller.parsedVersion) {
+    selectedPatch = versionedPatchFiles.find((entry) => entry.parsedVersion === latestInstaller.parsedVersion) || null;
+  }
   if (!selectedPatch && patchFiles.length > 0) selectedPatch = patchFiles[0];
 
   let releaseNotes = '';
@@ -844,7 +909,11 @@ async function checkForLatestReleaseUpdate() {
     }
   }
 
-  const latestVersion = normalizeVersionString(latestInstaller.parsedVersion || '');
+  const latestVersion = normalizeVersionString(
+    latestInstaller.parsedVersion
+    || selectedPatch?.parsedVersion
+    || ''
+  );
   const hasUpdate = Boolean(latestVersion && isVersionNewer(latestVersion, currentVersion));
 
   return {
@@ -852,22 +921,32 @@ async function checkForLatestReleaseUpdate() {
     currentVersion: normalizeVersionString(currentVersion),
     latestVersion: latestVersion || normalizeVersionString(currentVersion),
     hasUpdate,
-    releaseName: `v${latestVersion}`,
-    publishedAt: '',
+    releaseName: latestVersion ? `v${latestVersion}` : String(latestInstaller?.name || 'Latest installer'),
+    publishedAt: String(latestInstaller?.latestCommitDate || ''),
     releaseNotes: String(releaseNotes || '').trim(),
     installerName: String(latestInstaller?.name || ''),
     installerUrl: String(latestInstaller?.download_url || ''),
     installerSize: Number(latestInstaller?.size || 0),
+    installerCommitSha: String(latestInstaller?.latestCommitSha || latestInstaller?.sha || ''),
+    installerCommitDate: String(latestInstaller?.latestCommitDate || ''),
     patchNotesName: String(selectedPatch?.name || ''),
     patchNotesUrl: String(selectedPatch?.download_url || ''),
-    patchHistory: patchFiles.map((entry) => ({
+    patchHistory: versionedPatchFiles.map((entry) => ({
       version: String(entry.parsedVersion || ''),
       name: String(entry.name || ''),
-      url: String(entry.download_url || '')
+      url: String(entry.download_url || ''),
+      commitDate: String(entry.latestCommitDate || '')
     })),
     releasesPage: buildRepoTreePageUrl(UPDATE_INSTALLER_DIR),
     patchNotesPage: buildRepoTreePageUrl(UPDATE_PATCH_NOTES_DIR)
   };
+}
+
+function shouldRetryDeferredRuntimeIntegration(warnings = []) {
+  const text = Array.isArray(warnings)
+    ? warnings.map((warning) => String(warning || '').toLowerCase()).join(' | ')
+    : '';
+  return /drag-?and-?drop runtime apply|clipboard\/drag-drop deferred|guest additions readiness check|guest additions wait failed|verr_timeout/.test(text);
 }
 
 function downloadFileWithRedirects(url, destinationPath, redirectCount = 0) {
@@ -1055,29 +1134,56 @@ function scheduleDeferredRuntimeIntegration(vmName, runtimeOptions = {}, delayMs
   const targetVm = String(vmName || '').trim();
   if (!targetVm || runtimeIntegrationQueue.has(targetVm)) return;
 
+  const forceSchedule = runtimeOptions.forceSchedule === true;
   const cooldownMs = Math.max(5000, Number(runtimeOptions.cooldownMs || 0) || 30000);
   const now = Date.now();
   const last = Number(runtimeIntegrationLastScheduledAt.get(targetVm) || 0);
-  if (now - last < cooldownMs) return;
+  if (!forceSchedule && now - last < cooldownMs) return;
 
   runtimeIntegrationQueue.set(targetVm, true);
   runtimeIntegrationLastScheduledAt.set(targetVm, now);
   setTimeout(async () => {
+    let shouldRetry = false;
     try {
       const state = String(await virtualbox.getVMState(targetVm) || '').toLowerCase();
-      if (state !== 'running') return;
+      if (state !== 'running') {
+        runtimeIntegrationRetryCounts.delete(targetVm);
+        return;
+      }
 
       const result = await virtualbox.applyRuntimeIntegration(targetVm, {
         ...runtimeOptions,
         waitForGuestAdditionsMs: Math.max(120000, Number(runtimeOptions.waitForGuestAdditionsMs || 0))
       });
-      if (Array.isArray(result?.warnings) && result.warnings.length > 0) {
-        logger.warn('App', `Deferred runtime integration warnings for "${targetVm}": ${result.warnings.join(' | ')}`);
+      const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+      if (warnings.length > 0) {
+        logger.warn('App', `Deferred runtime integration warnings for "${targetVm}": ${warnings.join(' | ')}`);
+        if (shouldRetryDeferredRuntimeIntegration(warnings)) {
+          const retries = Number(runtimeIntegrationRetryCounts.get(targetVm) || 0);
+          if (retries < 3) {
+            runtimeIntegrationRetryCounts.set(targetVm, retries + 1);
+            shouldRetry = true;
+            logger.info('App', `Scheduling deferred runtime integration retry ${retries + 1}/3 for "${targetVm}".`);
+          }
+        } else {
+          runtimeIntegrationRetryCounts.delete(targetVm);
+        }
+      } else {
+        runtimeIntegrationRetryCounts.delete(targetVm);
       }
     } catch (err) {
       logger.warn('App', `Deferred runtime integration failed for "${targetVm}": ${err.message}`);
     } finally {
       runtimeIntegrationQueue.delete(targetVm);
+      if (shouldRetry) {
+        const retries = Number(runtimeIntegrationRetryCounts.get(targetVm) || 1);
+        const retryDelayMs = Math.min(180000, 30000 * retries);
+        scheduleDeferredRuntimeIntegration(targetVm, {
+          ...runtimeOptions,
+          forceSchedule: true,
+          cooldownMs: 5000
+        }, retryDelayMs);
+      }
     }
   }, Math.max(0, Number(delayMs) || 0));
 }
@@ -1090,6 +1196,7 @@ function rememberVmState(vmName, state = 'unknown') {
   if (normalized !== 'running') {
     runtimeIntegrationLastScheduledAt.delete(targetVm);
     runtimeIntegrationQueue.delete(targetVm);
+    runtimeIntegrationRetryCounts.delete(targetVm);
   }
 }
 
@@ -1376,7 +1483,7 @@ function isRunningAsAdmin() {
 /**
  * Restart the app with admin privileges (Windows UAC elevation).
  */
-function restartAsAdmin() {
+async function restartAsAdmin() {
   if (process.platform !== 'win32') {
     return { success: false, error: 'Administrator elevation is only supported on Windows.' };
   }
@@ -1398,29 +1505,31 @@ function restartAsAdmin() {
     app.releaseSingleInstanceLock();
   } catch {}
 
-  try {
+  const launchResult = await new Promise((resolve) => {
     execFile(
       'powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCommand],
-      { windowsHide: true, timeout: 30000 },
-      (err) => {
-        if (!err) {
-          logger.info('App', 'Restarting in Administrator mode...');
-          app.quit();
-          return;
-        }
-
-        logger.warn('App', `Admin relaunch request failed or was cancelled: ${err.message}`);
-        app.requestSingleInstanceLock();
-      }
+      { windowsHide: true, timeout: 120000 },
+      (err) => resolve({ error: err || null })
     );
+  });
 
-    return { success: true, restarting: true };
-  } catch (err) {
-    logger.error('App', `Failed to restart as admin: ${err.message}`);
+  if (launchResult.error) {
+    const raw = String(launchResult.error.message || '');
+    const cancelled = /1223|canceled|cancelled|operation was canceled/i.test(raw);
+    const errorMessage = cancelled
+      ? 'Administrator elevation was cancelled.'
+      : `Failed to request administrator restart: ${raw}`;
+    logger.warn('App', `Admin relaunch request failed: ${raw}`);
     app.requestSingleInstanceLock();
-    return { success: false, error: err.message };
+    return { success: false, error: errorMessage };
   }
+
+  logger.info('App', 'Restarting in Administrator mode...');
+  setTimeout(() => {
+    try { app.quit(); } catch {}
+  }, 120);
+  return { success: true, restarting: true };
 }
 
 /**
@@ -1927,7 +2036,7 @@ function buildAppMenu() {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: 'About VM Xposed',
-              message: 'VM Xposed v1.0.0',
+              message: `VM Xposed v${normalizeVersionString(app.getVersion())}`,
               detail: `One-click virtual OS setup with full automation.\n\nPlatform: ${process.platform} ${process.arch}\nElectron: ${process.versions.electron}\nNode: ${process.versions.node}\nAdmin: ${isAdmin ? 'Yes' : 'No'}`
             });
           }

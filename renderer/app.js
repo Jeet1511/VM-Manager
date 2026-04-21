@@ -450,6 +450,18 @@ function _ensureAdminFloatingCtaMounted() {
       }
       host.classList.add('is-restarting');
       if (desc) desc.textContent = 'Relaunch request sent. Approve the UAC prompt to continue.';
+      window.setTimeout(async () => {
+        try {
+          const elevated = await window.vmInstaller.isAdmin();
+          if (!elevated) {
+            host.classList.remove('is-restarting');
+            btn.disabled = false;
+            btn.innerHTML = `${Icons.sized(Icons.shieldCheck, 14)} Continue`;
+            if (desc) desc.textContent = 'Admin relaunch did not complete. Approve UAC and try again.';
+            _notify('Could not restart in administrator mode. Please approve the UAC prompt and try again.', 'error');
+          }
+        } catch {}
+      }, 14000);
     } catch (err) {
       btn.disabled = false;
       btn.innerHTML = `${Icons.sized(Icons.shieldCheck, 14)} Continue`;

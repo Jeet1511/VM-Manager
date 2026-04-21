@@ -1,9 +1,9 @@
 Place compiled Windows installers in this folder.
 
-Required naming for auto-update detection:
+Auto-update detection now picks the newest installer by repository commit time,
+so file names can be custom.
+
+Recommended naming (still supported):
 - VM-Xposed-Setup-vX.Y.Z.exe
 
-Example:
-- VM-Xposed-Setup-v1.0.1.exe
-
-The app picks the highest version and offers it in Settings > Updates.
+If no version is present in installer name, VM Xposed falls back to patch notes version.
