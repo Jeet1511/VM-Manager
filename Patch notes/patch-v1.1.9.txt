@@ -1,0 +1,6 @@
+VM Xposed v1.1.9
+
+- Fixed false VBox driver warnings when VirtualBox is installed but driver service is on-demand.
+- Improved driver repair flow: validates runtime health before/after service start with clearer recovery actions.
+- Hardened VM start preflight to detect and surface real VBox runtime failures before launch attempts.
+- Improved system checks to use configured VirtualBox path and avoid blocking setup on non-fatal runtime probe warnings.
