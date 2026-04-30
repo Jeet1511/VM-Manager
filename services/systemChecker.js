@@ -6,10 +6,11 @@
  * Doesn't just pass/fail — explains WHY and WHAT TO DO if something fails.
  */
 
-const os = require('os');
 const fs = require('fs');
 const path = require('path');
+const { execFileSync, execSync } = require('child_process');
 const platform = require('../adapters/platform');
+const virtualbox = require('../adapters/virtualbox');
 const logger = require('../core/logger');
 const { SYSTEM_REQUIREMENTS } = require('../core/config');
 
@@ -43,6 +44,148 @@ function resolvePreferredVBoxManagePath(rawPath = '') {
   }
 
   return '';
+}
+
+function probeVirtualBoxRuntime(vboxPath = '') {
+  const executable = String(vboxPath || '').trim();
+  if (!executable) {
+    return { ok: false, code: 'missing-vboxmanage', message: 'VirtualBox runtime probe skipped: VBoxManage path missing.' };
+  }
+
+  const probes = [
+    ['list', 'hostinfo'],
+    ['list', 'systemproperties']
+  ];
+
+  let lastDetails = '';
+  for (const args of probes) {
+    try {
+      execFileSync(executable, args, {
+        timeout: 10000,
+        windowsHide: true,
+        stdio: 'pipe'
+      });
+
+      // VBoxManage CLI commands succeed without the kernel driver.
+      // On Windows, also verify the kernel driver is actually loadable.
+      if (process.platform === 'win32') {
+        const driverState = detectVBoxDriverServiceState();
+        if (driverState.state === 'stopped') {
+          // Try to start it to verify it can load
+          const startResult = tryStartVBoxDriverService(driverState.serviceName || 'vboxsup');
+          if (startResult.success) {
+            // Re-verify it's running
+            const recheck = detectVBoxDriverServiceState();
+            if (recheck.state !== 'running') {
+              return {
+                ok: false,
+                code: 'driver-runtime',
+                message: 'VirtualBox kernel driver was started but did not reach running state. Reboot or reinstall VirtualBox.'
+              };
+            }
+          } else {
+            // Check if it's a permissions issue
+            const errorMsg = String(startResult.message || '').toLowerCase();
+            if (/access is denied|error 5/i.test(errorMsg)) {
+              return {
+                ok: false,
+                code: 'driver-runtime',
+                message: 'VirtualBox kernel driver is stopped and needs administrator privileges to start. Use admin mode or reboot.'
+              };
+            }
+            return {
+              ok: false,
+              code: 'driver-runtime',
+              message: `VirtualBox kernel driver could not be started: ${startResult.message}. Reboot or reinstall VirtualBox.`
+            };
+          }
+        } else if (driverState.state === 'not-installed') {
+          return {
+            ok: false,
+            code: 'driver-runtime',
+            message: 'VirtualBox kernel driver service is not installed. Reinstall VirtualBox as administrator.'
+          };
+        }
+      }
+
+      return { ok: true, code: 'ok', message: 'VirtualBox runtime is responsive.' };
+    } catch (err) {
+      const details = [
+        String(err?.stdout || ''),
+        String(err?.stderr || ''),
+        String(err?.message || '')
+      ].join('\n').trim();
+      if (details) {
+        lastDetails = details;
+      }
+      if (/vboxdrvstub|supr3hardenedwinrespawn|verr_open_failed|status_object_name_not_found/i.test(details)) {
+        return {
+          ok: false,
+          code: 'driver-runtime',
+          message: 'VirtualBox kernel driver is not available (VBoxDrv/VBoxSup). Reboot the host, then repair/reinstall VirtualBox as administrator.'
+        };
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    code: 'runtime-probe-warning',
+    message: lastDetails ? `VirtualBox runtime probe warning: ${lastDetails}` : 'VirtualBox runtime probe warning.'
+  };
+}
+
+function detectVBoxDriverServiceState() {
+  if (process.platform !== 'win32') {
+    return { state: 'unsupported', serviceName: '' };
+  }
+
+  const candidates = ['vboxsup', 'vboxdrv'];
+  const stopped = [];
+  for (const serviceName of candidates) {
+    try {
+      const output = String(execSync(`sc.exe query ${serviceName}`, { encoding: 'utf8', timeout: 5000 }) || '');
+      if (/RUNNING/i.test(output)) return { state: 'running', serviceName };
+      if (/STOPPED/i.test(output)) stopped.push(serviceName);
+    } catch (err) {
+      const details = [
+        String(err?.stdout || ''),
+        String(err?.stderr || ''),
+        String(err?.message || '')
+      ].join('\n');
+      if (/1060|does not exist/i.test(details)) continue;
+      return { state: 'unknown', serviceName: '', details };
+    }
+  }
+
+  if (stopped.length > 0) return { state: 'stopped', serviceName: stopped[0] };
+  return { state: 'not-installed', serviceName: '' };
+}
+
+function tryStartVBoxDriverService(preferred = '') {
+  if (process.platform !== 'win32') return { success: false, message: 'Unsupported platform' };
+  const candidates = Array.from(new Set(
+    [String(preferred || '').trim().toLowerCase(), 'vboxsup', 'vboxdrv'].filter(Boolean)
+  ));
+  for (const serviceName of candidates) {
+    try {
+      execSync(`sc.exe start ${serviceName}`, { timeout: 10000, stdio: 'pipe' });
+      return { success: true, serviceName, message: `${serviceName.toUpperCase()} driver start requested.` };
+    } catch (err) {
+      const details = [
+        String(err?.stdout || ''),
+        String(err?.stderr || ''),
+        String(err?.message || '')
+      ].join('\n');
+      if (/1056|already running|service has already been started/i.test(details)) {
+        return { success: true, serviceName, message: `${serviceName.toUpperCase()} is already running.` };
+      }
+      if (/1060|does not exist|access is denied|5/i.test(details)) {
+        continue;
+      }
+    }
+  }
+  return { success: false, message: 'Could not start VirtualBox kernel driver service.' };
 }
 
 /**
@@ -169,17 +312,44 @@ async function runSystemCheck(targetPath = null, options = {}) {
   }
 
   // ─── Check 6: VirtualBox Installation ─────────────────────────────
-  const preferredVBoxPath = resolvePreferredVBoxManagePath(options?.preferredVBoxPath || '');
+  const preferredVBoxPath = resolvePreferredVBoxManagePath(
+    options?.preferredVBoxPath
+    || virtualbox?.vboxManagePath
+    || virtualbox?.preferredManagePath
+    || ''
+  );
   const vboxPath = preferredVBoxPath || await platform.findVBoxManage();
+  let runtimeProbe = vboxPath ? probeVirtualBoxRuntime(vboxPath) : { ok: true, code: 'ok', message: '' };
+
+  if (vboxPath && !runtimeProbe.ok && runtimeProbe.code === 'driver-runtime' && process.platform === 'win32') {
+    const serviceState = detectVBoxDriverServiceState();
+    if (serviceState.state === 'stopped' || serviceState.state === 'running') {
+      const startResult = tryStartVBoxDriverService(serviceState.serviceName || 'vboxsup');
+      if (startResult.success) {
+        runtimeProbe = probeVirtualBoxRuntime(vboxPath);
+      }
+    }
+  }
+
+  const runtimeStatus = !vboxPath
+    ? 'info'
+    : runtimeProbe.ok
+      ? 'pass'
+      : (runtimeProbe.code === 'driver-runtime' ? 'fail' : 'warn');
+
   const vboxCheck = {
     name: 'VirtualBox',
     value: vboxPath ? 'Installed' : 'Not installed',
-    status: vboxPath ? 'pass' : 'info',
+    status: runtimeStatus,
     message: vboxPath
-      ? `VirtualBox found at: ${vboxPath}`
+      ? (runtimeProbe.ok ? `VirtualBox found at: ${vboxPath}` : runtimeProbe.message)
       : 'VirtualBox is not installed. It will be downloaded and installed automatically.',
     vboxPath
   };
+
+  if (vboxPath && vboxCheck.status === 'fail') {
+    overallPass = false;
+  }
 
   checks.push(vboxCheck);
   logger.info('SystemCheck', `VirtualBox: ${vboxCheck.value} — ${vboxCheck.status.toUpperCase()}`);

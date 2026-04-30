@@ -175,6 +175,29 @@ const ProgressPanel = {
    */
   renderError(error) {
     const message = typeof error === 'string' ? error : (error.message || 'An unexpected error occurred.');
+    const normalized = String(message || '').toLowerCase();
+    const suggestions = [];
+
+    if (/constructmedia|0x80004005|vboxmanagemisc\.cpp/i.test(normalized)) {
+      suggestions.push('Use a different VM install folder (e.g., D:\\VM Xposed\\V Os) and avoid protected/system folders');
+      suggestions.push('Delete any partial VM with the same name from VirtualBox, then retry setup');
+      suggestions.push('Use a simple VM name without special characters');
+    }
+
+    if (/vboxdrvstub|supr3hardenedwinrespawn|status_object_name_not_found|verr_open_failed/i.test(normalized)) {
+      suggestions.push('Reboot Windows, then run VM Xposed as administrator and try again');
+      suggestions.push('Repair/reinstall VirtualBox (run installer as administrator), then reboot');
+      suggestions.push('From Dashboard warning banner, run Prepare Host to auto-check host blockers before retrying setup');
+      suggestions.push('If Windows Memory Integrity/Core Isolation is ON, temporarily disable it and reinstall VirtualBox');
+    }
+
+    if (suggestions.length === 0) {
+      suggestions.push('Enable virtualization (VT-x/AMD-V) in your BIOS');
+      suggestions.push('Free up disk space');
+      suggestions.push('Run the app as administrator');
+      suggestions.push('Check your internet connection');
+    }
+
     return `
       <div class="glass-card completion-card">
         <div class="completion-icon" style="background: rgba(255,107,107,0.1); border-color: rgba(255,107,107,0.3); color: var(--error)">
@@ -187,10 +210,7 @@ const ProgressPanel = {
           <span class="info-box-icon">${Icons.settings}</span>
           <span>
             <strong>What to do:</strong> Check the error message above. Common fixes:<br>
-            &bull; Enable virtualization (VT-x/AMD-V) in your BIOS<br>
-            &bull; Free up disk space<br>
-            &bull; Run the app as administrator<br>
-            &bull; Check your internet connection
+            ${suggestions.map((item) => `&bull; ${item}`).join('<br>')}
           </span>
         </div>
 

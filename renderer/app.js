@@ -35,7 +35,7 @@ const appState = {
   sharedFolderPath: '',
   language: 'en',
   notificationLevel: 'important',
-  adminModePolicy: 'auto',
+  adminModePolicy: 'manual',
   autoRepairLevel: 'safe',
   maxHostRamPercent: 75,
   maxHostCpuPercent: 75,
@@ -448,6 +448,12 @@ function _ensureAdminFloatingCtaMounted() {
         _notify(result?.error || 'Could not restart in administrator mode.', 'error');
         return;
       }
+      if (result?.restarting !== true) {
+        host.style.display = 'none';
+        await _refreshAdminFloatingCta({ force: true });
+        _notify(result?.message || 'Already running with administrator privileges.', 'success');
+        return;
+      }
       host.classList.add('is-restarting');
       if (desc) desc.textContent = 'Relaunch request sent. Approve the UAC prompt to continue.';
       window.setTimeout(async () => {
@@ -603,7 +609,7 @@ function _normalizeUiPrefs(rawPrefs = {}, options = {}) {
     'dashboard'
   );
   normalized.notificationLevel = normalizeEnum(normalized.notificationLevel, ['all', 'important', 'minimal'], 'important');
-  normalized.adminModePolicy = normalizeEnum(normalized.adminModePolicy, ['auto', 'manual'], 'auto');
+  normalized.adminModePolicy = normalizeEnum(normalized.adminModePolicy, ['auto', 'manual'], 'manual');
   normalized.autoRepairLevel = normalizeEnum(normalized.autoRepairLevel, ['none', 'safe', 'full'], 'safe');
   normalized.maxHostRamPercent = clampInt(normalized.maxHostRamPercent, 40, 95, 75);
   normalized.maxHostCpuPercent = clampInt(normalized.maxHostCpuPercent, 40, 95, 75);
@@ -704,8 +710,27 @@ function _parseTrustedPaths(rawValue = '') {
     .filter(Boolean);
 }
 
+function _mergeTrustedPaths(existingRaw = '', additions = []) {
+  const merged = [];
+  const seen = new Set();
+  const pushUnique = (value) => {
+    const item = String(value || '').trim();
+    if (!item) return;
+    const key = _normalizePathForTrust(item);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  };
+  _parseTrustedPaths(existingRaw).forEach(pushUnique);
+  (Array.isArray(additions) ? additions : []).forEach(pushUnique);
+  return merged.join('; ');
+}
+
 function _normalizePathForTrust(pathValue = '') {
-  const normalized = String(pathValue || '').trim().replace(/\//g, '\\');
+  const raw = String(pathValue || '').trim().replace(/\//g, '\\');
+  const isUnc = raw.startsWith('\\\\');
+  const collapsed = raw.replace(/[\\]+/g, '\\');
+  const normalized = isUnc ? `\\\\${collapsed.replace(/^\\+/, '')}` : collapsed;
   if (!normalized) return '';
   const dequoted = normalized.replace(/^"+|"+$/g, '');
   const withoutTrailing = /^[a-z]:\\$/i.test(dequoted) ? dequoted : dequoted.replace(/[\\]+$/, '');
@@ -2184,8 +2209,10 @@ function _renderOverview() {
             <button class="btn btn-secondary ov-action-btn" id="ovGoStorage">Open Storage</button>
             <button class="btn btn-secondary ov-action-btn" id="ovGoNetwork">Open Network</button>
             <button class="btn btn-secondary ov-action-btn" id="ovGoLibrary">OS Library</button>
+            <button class="btn btn-secondary ov-action-btn" id="ovHostGuide">${Icons.sized(Icons.shield, 14)} Guided Host Fix</button>
             <button class="btn ov-action-btn ov-refresh-btn" id="ovRefreshHealth">${Icons.sized(Icons.refresh, 14)} Refresh Health</button>
           </div>
+          <div class="overview-muted" id="ovHostGuideStatus">Guided Host Fix can open Windows blocker settings when needed.</div>
           <div class="overview-host-grid">
             <div><span>Host</span><strong id="ovHostName">--</strong></div>
             <div><span>OS</span><strong id="ovHostOs">--</strong></div>
@@ -2443,7 +2470,7 @@ async function _initOverview() {
   const metricHistory = { cpu: [], ram: [], disk: [] };
   let lastRealtimeMetrics = null;
   let realtimeRefreshing = false;
-  let lastOverviewCpuPct = 4;
+  let lastOverviewCpuPct = 0;
   const formatDiskRate = (valueMbPerSec) => {
     const value = Number(valueMbPerSec || 0);
     if (!Number.isFinite(value) || value <= 0) return '0 KB/s';
@@ -2474,10 +2501,49 @@ async function _initOverview() {
     const diskWrite = hasRealtime ? Number(realtime.diskWriteBytesPerSec || 0) / (1024 * 1024) : 0;
     const netDown = hasRealtime ? (Number(realtime.netRxBytesPerSec || 0) * 8) / 1000000 : 0;
     const netUp = hasRealtime ? (Number(realtime.netTxBytesPerSec || 0) * 8) / 1000000 : 0;
+    const liveCpuPct = hasRealtime ? clamp(Math.round(Number(realtime.cpuLoadPercent || 0)), 0, 100) : null;
+    const liveRamPct = hasRealtime ? clamp(Math.round(Number(realtime.memoryUsagePercent || 0)), 0, 100) : null;
+    const liveTotalRamGb = hasRealtime ? Number(realtime.totalMemoryGb || 0) : 0;
+    const liveUsedRamGb = hasRealtime ? Number(realtime.usedMemoryGb || 0) : 0;
     const totalDiskRate = diskRead + diskWrite;
     const hostAdapterCount = hasRealtime && Array.isArray(realtime.adapters) ? realtime.adapters.length : 0;
+    if (hasRealtime && Number.isFinite(liveCpuPct)) {
+      lastOverviewCpuPct = liveCpuPct;
+      setText('ovMetricCpu', `${liveCpuPct}%`);
+      setText('ovMetricCpuSub', 'Live host CPU load');
+      setText('ovChartCpuValue', `${liveCpuPct}%`);
+      metricHistory.cpu.push(liveCpuPct);
+      if (metricHistory.cpu.length > 32) metricHistory.cpu.shift();
+      const cpuSeries = metricHistory.cpu.length > 3
+        ? metricHistory.cpu.slice(-24)
+        : buildSeries(liveCpuPct, 10);
+      setSpark('ovCpuSpark', cpuSeries);
+      setChartPath('ovChartCpuPath', cpuSeries, 'ovChartCpuArea');
+    }
+    if (hasRealtime && Number.isFinite(liveRamPct)) {
+      setText('ovMetricRam', `${liveRamPct}%`);
+      setText(
+        'ovMetricRamSub',
+        liveTotalRamGb > 0
+          ? `${Math.max(0, liveUsedRamGb).toFixed(1)} GB / ${liveTotalRamGb.toFixed(1)} GB host used`
+          : 'Live host memory usage'
+      );
+      setText(
+        'ovChartRamValue',
+        liveTotalRamGb > 0
+          ? `${Math.max(0, liveUsedRamGb).toFixed(1)} GB used`
+          : `${liveRamPct}% used`
+      );
+      metricHistory.ram.push(liveRamPct);
+      if (metricHistory.ram.length > 32) metricHistory.ram.shift();
+      const ramSeries = metricHistory.ram.length > 3
+        ? metricHistory.ram.slice(-24)
+        : buildSeries(liveRamPct, 8);
+      setSpark('ovRamSpark', ramSeries);
+      setChartPath('ovChartRamPath', ramSeries, 'ovChartRamArea');
+    }
     _setSystemFlowActivity({
-      cpuUsage: lastOverviewCpuPct,
+      cpuUsage: Number.isFinite(liveCpuPct) ? liveCpuPct : lastOverviewCpuPct,
       netMbps: netDown + netUp,
       diskMBps: totalDiskRate
     });
@@ -2524,7 +2590,24 @@ async function _initOverview() {
   };
 
   const refreshBtn = document.getElementById('ovRefreshHealth');
+  const hostGuideBtn = document.getElementById('ovHostGuide');
   const fullScanBtn = document.getElementById('ovRunFullScan');
+  const setHostGuideStatus = (text) => {
+    const el = document.getElementById('ovHostGuideStatus');
+    if (!el) return;
+    el.textContent = String(text || '').trim() || 'Guided Host Fix can open Windows blocker settings when needed.';
+  };
+  let hostGuideState = {
+    platform: 'unknown',
+    isAdmin: false,
+    hasDriverIssue: false,
+    hasHypervisorConflict: false,
+    hasMemoryIntegrityConflict: false,
+    hasRuntimeIssue: false,
+    hasPendingReboot: false,
+    hasAnyIssue: false,
+    primaryMessage: ''
+  };
   setFullScanMeta(_loadUiPrefs()?.lastFullScanAt || '');
   const runningList = document.getElementById('ovRunningList');
   if (runningList && !runningList.dataset.wired) {
@@ -2577,9 +2660,10 @@ async function _initOverview() {
 
     setHealthBadge('is-neutral', 'Refreshing');
 
-    const [vmResult, systemResult] = await Promise.allSettled([
+    const [vmResult, systemResult, permissionsResult] = await Promise.allSettled([
       window.vmInstaller.listVMs(),
-      window.vmInstaller.checkSystem(appState.installPath || appState.defaults?.defaultInstallPath || '')
+      window.vmInstaller.checkSystem(appState.installPath || appState.defaults?.defaultInstallPath || ''),
+      window.vmInstaller.checkPermissions?.()
     ]);
 
     const vmData = vmResult.status === 'fulfilled' ? vmResult.value : null;
@@ -2591,6 +2675,72 @@ async function _initOverview() {
       : null;
 
     const checks = Array.isArray(report?.checks) ? report.checks : [];
+    const permissions = permissionsResult.status === 'fulfilled' ? permissionsResult.value : null;
+    const permissionChecks = Array.isArray(permissions?.checks) ? permissions.checks : [];
+    const permissionDriverIssue = permissionChecks.find((check) => {
+      const name = String(check?.name || '').toLowerCase();
+      const status = String(check?.status || '').toLowerCase();
+      return name === 'vbox kernel driver' && ['required', 'unavailable', 'warning', 'fail'].includes(status);
+    });
+    const hostBlockers = permissions?.hostBlockers || {};
+    const hostSignals = permissions?.hostSignals || {};
+    const detectedPlatform = String(permissions?.platform || '').toLowerCase()
+      || (String(navigator?.platform || '').toLowerCase().includes('win') ? 'win32' : 'unknown');
+    const fallbackHypervisorConflict = detectedPlatform === 'win32'
+      && (
+        String(hostSignals?.hyperV || '').toLowerCase() === 'enabled'
+        || String(hostSignals?.hypervisorPlatform || '').toLowerCase() === 'enabled'
+        || String(hostSignals?.virtualMachinePlatform || '').toLowerCase() === 'enabled'
+      );
+    const fallbackMemoryIntegrityConflict = detectedPlatform === 'win32'
+      && hostSignals?.memoryIntegrityEnabled === true;
+    const hasDriverIssue = typeof hostBlockers?.hasDriverIssue === 'boolean'
+      ? hostBlockers.hasDriverIssue
+      : !!permissionDriverIssue;
+    const hasHypervisorConflict = typeof hostBlockers?.hasHypervisorConflict === 'boolean'
+      ? hostBlockers.hasHypervisorConflict
+      : fallbackHypervisorConflict;
+    const hasMemoryIntegrityConflict = typeof hostBlockers?.hasMemoryIntegrityConflict === 'boolean'
+      ? hostBlockers.hasMemoryIntegrityConflict
+      : fallbackMemoryIntegrityConflict;
+    const hasRuntimeIssue = hostBlockers?.hasRuntimeIssue === true;
+    const hasPendingReboot = hostBlockers?.hasPendingReboot === true;
+    const hasAnyIssue = hasDriverIssue || hasHypervisorConflict || hasMemoryIntegrityConflict || hasRuntimeIssue || hasPendingReboot;
+    hostGuideState = {
+      platform: detectedPlatform,
+      isAdmin: permissions?.isAdmin === true,
+      hasDriverIssue,
+      hasHypervisorConflict,
+      hasMemoryIntegrityConflict,
+      hasRuntimeIssue,
+      hasPendingReboot,
+      hasAnyIssue,
+      primaryMessage: String(hostBlockers?.primaryMessage || '').trim()
+    };
+    if (hostGuideBtn) {
+      hostGuideBtn.classList.remove('btn-primary', 'btn-secondary');
+      hostGuideBtn.classList.add(hostGuideState.hasAnyIssue ? 'btn-primary' : 'btn-secondary');
+      hostGuideBtn.innerHTML = hostGuideState.hasAnyIssue
+        ? `${Icons.sized(Icons.shield, 14)} Guided Host Fix (Needed)`
+        : `${Icons.sized(Icons.shield, 14)} Guided Host Fix`;
+    }
+    if (hostGuideState.platform !== 'win32') {
+      setHostGuideStatus('Guided Host Fix is for Windows hosts.');
+    } else if (hostGuideState.hasAnyIssue) {
+      const issues = [];
+      if (hostGuideState.hasHypervisorConflict) issues.push('turn off Hyper-V stack');
+      if (hostGuideState.hasMemoryIntegrityConflict) issues.push('turn off Memory Integrity');
+      if (hostGuideState.hasDriverIssue) issues.push('repair VBox driver');
+      if (hostGuideState.hasRuntimeIssue && !hostGuideState.hasDriverIssue) issues.push('repair VirtualBox runtime');
+      if (hostGuideState.hasPendingReboot) issues.push('restart Windows');
+      if (issues.length > 0) {
+        setHostGuideStatus(`Host fix needed: ${issues.join(' · ')}. Click Guided Host Fix and follow the steps.`);
+      } else {
+        setHostGuideStatus(hostGuideState.primaryMessage || 'Host attention is needed. Click Guided Host Fix and follow the steps.');
+      }
+    } else {
+      setHostGuideStatus('Host virtualization checks look healthy.');
+    }
     const sysInfo = report?.systemInfo || {};
     const cpuCheck = getCheck(checks, 'CPU Cores');
     const ramCheck = getCheck(checks, 'System RAM');
@@ -2604,24 +2754,51 @@ async function _initOverview() {
 
     const allocatedCpu = runningVms.reduce((sum, vm) => sum + Number(vm.cpus || 0), 0);
     const runningRamGb = runningVms.reduce((sum, vm) => sum + (Number(vm.ram || 0) / 1024), 0);
-    const cpuUsagePct = runningVms.length === 0 ? 4 : clamp(Math.round((allocatedCpu / Math.max(hostCpu, 1)) * 62 + (runningVms.length * 6)), 8, 96);
+    const liveCpuPct = Number(appState.realtimeMetrics?.cpuLoadPercent);
+    const liveRamPct = Number(appState.realtimeMetrics?.memoryUsagePercent);
+    const liveTotalRam = Number(appState.realtimeMetrics?.totalMemoryGb);
+    const liveUsedRam = Number(appState.realtimeMetrics?.usedMemoryGb);
+
+    const hasLiveCpu = Number.isFinite(liveCpuPct) && liveCpuPct >= 0;
+    const hasLiveRam = Number.isFinite(liveRamPct) && liveRamPct >= 0;
+    const hasLiveRamTotals = Number.isFinite(liveTotalRam) && liveTotalRam > 0 && Number.isFinite(liveUsedRam) && liveUsedRam >= 0;
+
+    const cpuUsagePct = hasLiveCpu
+      ? clamp(Math.round(liveCpuPct), 0, 100)
+      : (runningVms.length === 0 ? 0 : clamp(Math.round((allocatedCpu / Math.max(hostCpu, 1)) * 62 + (runningVms.length * 6)), 6, 96));
     lastOverviewCpuPct = cpuUsagePct;
-    const ramUsagePct = totalRam > 0 ? clamp(Math.round((runningRamGb / totalRam) * 100), 2, 98) : 0;
+    const ramUsagePct = hasLiveRam
+      ? clamp(Math.round(liveRamPct), 0, 100)
+      : (totalRam > 0 ? clamp(Math.round((runningRamGb / totalRam) * 100), 2, 98) : 0);
+    const displayTotalRam = hasLiveRamTotals ? liveTotalRam : totalRam;
+    const displayUsedRam = hasLiveRamTotals
+      ? liveUsedRam
+      : (totalRam > 0 ? Math.max(0, totalRam - freeRam) : runningRamGb);
     const diskFreeGb = parseNumber(diskCheck?.value);
     const estimatedVmStorage = allVms.reduce((sum, vm) => sum + Math.max(8, Math.round((Number(vm.ram || 0) || 1024) / 192)), 0);
     const storageTotal = diskFreeGb > 0 ? Math.round(diskFreeGb + estimatedVmStorage) : 0;
     setText('ovMetricActive', runningVms.length);
     setText('ovRunningCountLabel', `${runningVms.length} active of ${allVms.length} total`);
     setText('ovMetricCpu', `${cpuUsagePct}%`);
-    setText('ovMetricCpuSub', `${allocatedCpu}/${Math.max(hostCpu, 1)} vCPU in active use`);
-    setText('ovMetricRam', totalRam > 0 ? `${ramUsagePct}%` : '--');
-    setText('ovMetricRamSub', totalRam > 0 ? `${runningRamGb.toFixed(1)} GB / ${totalRam} GB allocated` : 'Memory data unavailable');
+    setText(
+      'ovMetricCpuSub',
+      hasLiveCpu
+        ? `Live host CPU load · ${allocatedCpu}/${Math.max(hostCpu, 1)} vCPU assigned to active V Os`
+        : `${allocatedCpu}/${Math.max(hostCpu, 1)} vCPU in active use`
+    );
+    setText('ovMetricRam', (hasLiveRam || displayTotalRam > 0) ? `${ramUsagePct}%` : '--');
+    setText(
+      'ovMetricRamSub',
+      displayTotalRam > 0
+        ? `${displayUsedRam.toFixed(1)} GB / ${displayTotalRam.toFixed(1)} GB host used`
+        : 'Memory data unavailable'
+    );
 
     setText('ovChartCpuValue', `${cpuUsagePct}%`);
-    setText('ovChartRamValue', totalRam > 0 ? `${Math.max(0, (totalRam - freeRam)).toFixed(1)} GB used` : 'Unknown');
+    setText('ovChartRamValue', displayTotalRam > 0 ? `${displayUsedRam.toFixed(1)} GB used` : 'Unknown');
 
     metricHistory.cpu.push(cpuUsagePct);
-    metricHistory.ram.push(totalRam > 0 ? Math.round(((totalRam - freeRam) / totalRam) * 100) : ramUsagePct);
+    metricHistory.ram.push(ramUsagePct);
     if (metricHistory.cpu.length > 32) metricHistory.cpu.shift();
     if (metricHistory.ram.length > 32) metricHistory.ram.shift();
 
@@ -2630,7 +2807,7 @@ async function _initOverview() {
       : buildSeries(cpuUsagePct, runningVms.length > 0 ? 12 : 4);
     const ramSeries = metricHistory.ram.length > 3
       ? metricHistory.ram.slice(-24)
-      : buildSeries(totalRam > 0 ? Math.round(((totalRam - freeRam) / totalRam) * 100) : ramUsagePct, 8);
+      : buildSeries(ramUsagePct, 8);
     setSpark('ovCpuSpark', cpuSeries);
     setSpark('ovRamSpark', ramSeries);
     setChartPath('ovChartCpuPath', cpuSeries, 'ovChartCpuArea');
@@ -2746,6 +2923,93 @@ async function _initOverview() {
   };
   document.getElementById('ovRefreshHealth')?.addEventListener('click', () => {
     safeRefresh();
+  });
+  document.getElementById('ovHostGuide')?.addEventListener('click', async () => {
+    const btn = document.getElementById('ovHostGuide');
+    const originalText = btn?.innerHTML || `${Icons.sized(Icons.shield, 14)} Guided Host Fix`;
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `${Icons.sized(Icons.spinner, 14)} Opening guide...`;
+    }
+    try {
+      await safeRefresh({ withSpinner: false });
+
+      if (String(hostGuideState.platform || '').toLowerCase() !== 'win32') {
+        _notify('Guided Host Fix is available on Windows hosts only.', 'info');
+        return;
+      }
+
+      if (!hostGuideState.hasAnyIssue) {
+        _notify('No host blockers were detected. Try starting your V Os now.', 'success');
+        return;
+      }
+
+      if (!hostGuideState.isAdmin) {
+        window.vmxAdminAccess?.focus?.('Guided host fix runs best with administrator mode.');
+        _notify('Step 1: Click "Continue with Admin Privilege" first.', 'info');
+      }
+
+      if (hostGuideState.hasHypervisorConflict) {
+        const disableResult = await window.vmInstaller.runHostRecoveryAction('disable-hypervisor-stack');
+        if (disableResult?.success) {
+          _notify('Step 2 complete: Hyper-V stack was disabled.', 'success');
+        } else if (disableResult?.requiresAdmin) {
+          _notify(disableResult?.message || 'Administrator mode is required to disable Hyper-V blockers automatically.', 'info');
+        } else {
+          _notify(disableResult?.message || 'Could not disable Hyper-V blockers automatically. Opening Windows Features...', 'info');
+        }
+
+        const featuresResult = await window.vmInstaller.runHostRecoveryAction('open-windows-features');
+        if (featuresResult?.success) {
+          _notify('Step 3: In Windows Features, uncheck Hyper-V, Virtual Machine Platform, and Windows Hypervisor Platform.', 'info');
+        }
+      }
+
+      if (hostGuideState.hasMemoryIntegrityConflict) {
+        const coreIsoResult = await window.vmInstaller.runHostRecoveryAction('open-core-isolation');
+        if (coreIsoResult?.success) {
+          _notify('Step 4: Turn Memory Integrity OFF, then return to VM Xposed.', 'info');
+        } else {
+          _notify(coreIsoResult?.message || 'Could not open Core Isolation settings.', 'error');
+        }
+      }
+
+      if (hostGuideState.hasDriverIssue && !hostGuideState.hasHypervisorConflict && !hostGuideState.hasMemoryIntegrityConflict) {
+        const driverResult = await window.vmInstaller.fixDriver();
+        if (driverResult?.success) {
+          _notify(driverResult.message || 'VBox driver is now ready.', 'success');
+        } else if (driverResult?.requiresAdmin) {
+          _notify(driverResult.message || 'Administrator mode is required to fix the VBox driver.', 'info');
+        } else {
+          _notify(driverResult?.message || 'VBox driver still needs attention. Use Prepare Host from V Os page if needed.', 'error');
+        }
+      }
+
+      if (hostGuideState.hasRuntimeIssue && !hostGuideState.hasDriverIssue && !hostGuideState.hasHypervisorConflict && !hostGuideState.hasMemoryIntegrityConflict) {
+        const prepareResult = await window.vmInstaller.prepareHostRecovery();
+        if (prepareResult?.success) {
+          _notify(prepareResult.message || 'Host recovery checks completed.', 'success');
+        } else if (prepareResult?.requiresAdmin) {
+          _notify(prepareResult?.message || 'Administrator mode is required for runtime recovery actions.', 'info');
+        } else {
+          _notify(prepareResult?.message || 'Host runtime still needs attention. Open the V Os page and use Prepare Host.', 'error');
+        }
+      }
+
+      if (hostGuideState.hasPendingReboot) {
+        _notify('Windows restart is pending. Reboot first, then retry Start V Os.', 'info');
+      }
+
+      _notify('Final step: Restart Windows, open VM Xposed, then press Start V Os.', 'success');
+    } catch (err) {
+      _notify(err?.message || 'Guided host fix failed.', 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
+      await safeRefresh({ withSpinner: false });
+    }
   });
 
   fullScanBtn?.addEventListener('click', async () => {
@@ -3462,7 +3726,7 @@ function _renderSettings(initialState = {}) {
   const startupView = String(pick('startupView', 'dashboard'));
   const notificationLevel = String(pick('notificationLevel', 'important'));
   const virtualBoxPath = String(pick('virtualBoxPath', ''));
-  const adminModePolicy = String(pick('adminModePolicy', 'auto'));
+  const adminModePolicy = String(pick('adminModePolicy', 'manual'));
   const autoRepairLevel = String(pick('autoRepairLevel', 'safe'));
   const maxHostRamPercent = Math.max(40, Math.min(95, parseInt(pick('maxHostRamPercent', 75), 10) || 75));
   const maxHostCpuPercent = Math.max(40, Math.min(95, parseInt(pick('maxHostCpuPercent', 75), 10) || 75));
@@ -3643,9 +3907,9 @@ function _renderSettings(initialState = {}) {
                     <p class="setting-desc">How elevation prompts are handled.</p>
                   </div>
                   <div class="setting-control">
-                    <select class="form-select" id="setAdminModePolicy" data-default="auto">
-                      <option value="auto" ${selected(adminModePolicy, 'auto')}>Auto-prompt when needed</option>
-                      <option value="manual" ${selected(adminModePolicy, 'manual')}>Manual only</option>
+                    <select class="form-select" id="setAdminModePolicy" data-default="manual">
+                      <option value="manual" ${selected(adminModePolicy, 'manual')}>Manual only (Recommended)</option>
+                      <option value="auto" ${selected(adminModePolicy, 'auto')}>Auto-prompt when needed (Legacy)</option>
                     </select>
                   </div>
                 </div>
@@ -4995,6 +5259,18 @@ function _initSettings(initialState = {}) {
     saveGlobalBtn.textContent = 'Saving...';
     try {
       const currentPrefs = _loadUiPrefs();
+      const defaultUserNameInput = document.getElementById('setDefaultUserName')?.value?.trim() || 'user';
+      const guestUserNameInput = document.getElementById('setGuestUserName')?.value?.trim() || 'guest';
+      const linuxUserPattern = /^[a-z_][a-z0-9_-]{0,31}$/i;
+      if (!linuxUserPattern.test(defaultUserNameInput)) {
+        _notify('Default user username is invalid. Use letters/numbers/underscore/hyphen and start with a letter or underscore.', 'error');
+        return;
+      }
+      if (!linuxUserPattern.test(guestUserNameInput)) {
+        _notify('Guest username is invalid. Use letters/numbers/underscore/hyphen and start with a letter or underscore.', 'error');
+        return;
+      }
+
       const prefs = {
         installPath: document.getElementById('setInstallPath')?.value?.trim() || '',
         sharedFolderPath: document.getElementById('setSharedPath')?.value?.trim() || '',
@@ -5002,11 +5278,11 @@ function _initSettings(initialState = {}) {
         startFullscreen: !!document.getElementById('setStartFullscreen')?.checked,
         accelerate3d: !!document.getElementById('setAccelerate3d')?.checked,
         enableSharedFolder: !!(document.getElementById('setSharedPath')?.value?.trim()),
-        defaultUserUsername: document.getElementById('setDefaultUserName')?.value?.trim() || 'user',
+        defaultUserUsername: defaultUserNameInput,
         defaultUserPassword: document.getElementById('setDefaultUserPass')?.value ?? 'user',
-        guestUsername: document.getElementById('setGuestUserName')?.value?.trim() || 'guest',
+        guestUsername: guestUserNameInput,
         guestPassword: document.getElementById('setGuestUserPass')?.value ?? 'guest',
-        username: document.getElementById('setGuestUserName')?.value?.trim() || 'guest',
+        username: guestUserNameInput,
         password: document.getElementById('setGuestUserPass')?.value ?? 'guest',
         theme: 'dark',
         visualEffectsMode: document.getElementById('setVisualEffectsMode')?.value === 'full' ? 'full' : 'lite',
@@ -5014,7 +5290,7 @@ function _initSettings(initialState = {}) {
         startupView: document.getElementById('setStartupView')?.value || 'dashboard',
         notificationLevel: document.getElementById('setNotificationLevel')?.value || 'important',
         virtualBoxPath: document.getElementById('setVBoxPath')?.value?.trim() || '',
-        adminModePolicy: document.getElementById('setAdminModePolicy')?.value || 'auto',
+        adminModePolicy: document.getElementById('setAdminModePolicy')?.value || 'manual',
         autoRepairLevel: document.getElementById('setAutoRepairLevel')?.value || 'safe',
         maxHostRamPercent: clamp(document.getElementById('setMaxHostRamPercent')?.value, 40, 95, 75),
         maxHostCpuPercent: clamp(document.getElementById('setMaxHostCpuPercent')?.value, 40, 95, 75),
@@ -5566,14 +5842,6 @@ async function _ensureAdminForTask(taskName = 'this work') {
     const isAdmin = await _refreshAdminFloatingCta({ force: true });
     if (isAdmin) return true;
 
-    const policy = String(appState.adminModePolicy || _loadUiPrefs().adminModePolicy || 'auto').toLowerCase();
-    if (policy === 'auto' && window.vmInstaller?.restartAsAdmin) {
-      _focusAdminFloatingCta(`"${taskName}" requires administrator mode.`);
-      _notify(`"${taskName}" requires administrator mode. Restarting with admin privilege...`, 'info');
-      const restarted = await window.vmInstaller.restartAsAdmin();
-      if (restarted?.success) return false;
-    }
-
     _focusAdminFloatingCta(`"${taskName}" requires administrator mode.`);
     _notify(`"${taskName}" requires administrator mode. Use Continue with Admin Privilege.`, 'info');
     return false;
@@ -5599,7 +5867,17 @@ async function _runSetup(resumeFrom) {
 
   _clampSetupResourcesToPolicy(appState);
   if (appState.enableSharedFolder && String(appState.sharedFolderPath || '').trim()) {
-    const trusted = _isPathTrustedByPolicy(appState.sharedFolderPath, appState.trustedPaths);
+    const selectedSharePath = String(appState.sharedFolderPath || '').trim();
+    if (!_isPathTrustedByPolicy(selectedSharePath, appState.trustedPaths)) {
+      const mergedTrustedPaths = _mergeTrustedPaths(appState.trustedPaths, [selectedSharePath]);
+      appState.trustedPaths = mergedTrustedPaths;
+      try {
+        await _persistUiPrefsPatch({ trustedPaths: mergedTrustedPaths });
+      } catch (err) {
+        console.warn('Could not persist trusted path patch before setup:', err);
+      }
+    }
+    const trusted = _isPathTrustedByPolicy(selectedSharePath, appState.trustedPaths);
     if (!trusted) {
       _notify('Selected shared folder path is outside Trusted Paths. Update Security & Privacy settings first.', 'error');
       return;
@@ -5976,7 +6254,7 @@ async function initApp() {
     appState.startupView = savedPrefs.startupView || 'dashboard';
     appState.language = savedPrefs.language || 'en';
     appState.notificationLevel = savedPrefs.notificationLevel || 'important';
-    appState.adminModePolicy = savedPrefs.adminModePolicy || 'auto';
+    appState.adminModePolicy = savedPrefs.adminModePolicy || 'manual';
     appState.autoRepairLevel = savedPrefs.autoRepairLevel || 'safe';
     appState.maxHostRamPercent = savedPrefs.maxHostRamPercent || 75;
     appState.maxHostCpuPercent = savedPrefs.maxHostCpuPercent || 75;

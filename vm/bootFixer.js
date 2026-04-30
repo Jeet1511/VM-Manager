@@ -5,6 +5,36 @@ const logger = require('../core/logger');
 const { getAppDataPath } = require('../core/config');
 const virtualbox = require('../adapters/virtualbox');
 
+function _detectVBoxDriverState() {
+  const candidates = ['vboxsup', 'vboxdrv'];
+  const stopped = [];
+  const unknownErrors = [];
+
+  for (const serviceName of candidates) {
+    try {
+      const output = String(execSync(`sc.exe query ${serviceName}`, { encoding: 'utf8', timeout: 5000 }) || '');
+      if (/RUNNING/i.test(output)) {
+        return { state: 'running', serviceName };
+      }
+      if (/STOPPED/i.test(output)) {
+        stopped.push(serviceName);
+      }
+    } catch (err) {
+      const details = [
+        String(err?.stdout || ''),
+        String(err?.stderr || ''),
+        String(err?.message || '')
+      ].join('\n');
+      if (/1060|does not exist/i.test(details)) continue;
+      unknownErrors.push(`${serviceName}: ${details || err.message}`);
+    }
+  }
+
+  if (stopped.length > 0) return { state: 'stopped', serviceName: stopped[0] };
+  if (unknownErrors.length > 0) return { state: 'unknown', serviceName: '', details: unknownErrors[0] };
+  return { state: 'not-installed', serviceName: '' };
+}
+
 function _asBool(value) {
   if (typeof value === 'boolean') return value;
   return String(value || '').toLowerCase() === 'on';
@@ -124,20 +154,20 @@ async function diagnoseBootIssues(vmName) {
   });
 
   if (process.platform === 'win32') {
-    try {
-      const svcResult = execSync('sc.exe query vboxsup', { encoding: 'utf8', timeout: 5000 });
-      diagnostics.push({
-        key: 'vboxsup',
-        status: svcResult.includes('RUNNING') ? 'ok' : 'fail',
-        message: svcResult.includes('RUNNING') ? 'VBoxSup driver is running' : 'VBoxSup driver is not running'
-      });
-    } catch (err) {
-      diagnostics.push({
-        key: 'vboxsup',
-        status: 'warn',
-        message: `Could not verify VBoxSup driver: ${err.message}`
-      });
-    }
+    const driver = _detectVBoxDriverState();
+    diagnostics.push({
+      key: 'vboxsup',
+      status: driver.state === 'running' ? 'ok' : 'warn',
+      serviceName: driver.serviceName || '',
+      message:
+        driver.state === 'running'
+          ? `${String(driver.serviceName || 'vboxsup').toUpperCase()} driver is running`
+          : driver.state === 'stopped'
+            ? `${String(driver.serviceName || 'vboxsup').toUpperCase()} driver is installed and stopped (normal when no VM is active)`
+            : driver.state === 'not-installed'
+              ? 'VirtualBox kernel driver service is not installed. Reinstall VirtualBox as administrator.'
+              : `Could not verify VirtualBox driver service: ${driver.details || 'unknown error'}`
+    });
   }
 
   return {
@@ -158,13 +188,17 @@ async function prebootValidateAndFix(vmName) {
   const pendingInstallState = _getPendingInstallState(vmName);
 
   if (process.platform === 'win32') {
-    const vboxSupDiag = diagnostics.find((d) => d.key === 'vboxsup' && d.status === 'fail');
-    if (vboxSupDiag) {
+    const vboxSupDiag = diagnostics.find((d) => d.key === 'vboxsup');
+    const canAttemptStart = vboxSupDiag
+      && vboxSupDiag.status !== 'ok'
+      && !/not installed/i.test(String(vboxSupDiag.message || ''));
+    if (canAttemptStart) {
+      const serviceName = String(vboxSupDiag.serviceName || 'vboxsup');
       try {
-        execSync('sc.exe start vboxsup', { timeout: 10000 });
-        fixesApplied.push('Started VBoxSup driver');
+        execSync(`sc.exe start ${serviceName}`, { timeout: 10000 });
+        fixesApplied.push(`Started ${serviceName.toUpperCase()} driver`);
       } catch (err) {
-        logger.warn('BootFixer', `Could not auto-start VBoxSup: ${err.message}`);
+        logger.warn('BootFixer', `Could not auto-start ${serviceName.toUpperCase()}: ${err.message}`);
       }
     }
   }

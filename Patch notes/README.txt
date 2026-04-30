@@ -5,7 +5,7 @@ Recommended naming for version mapping:
 
 Examples:
 - patch-v1.0.1.txt
-- patch-v1.0.2.md
+- patch-v1.1.4.txt
 
 For best update matching:
 1. One installer in Installer\ (same X.Y.Z)

@@ -16,6 +16,8 @@ const logger = require('../core/logger');
 const virtualbox = require('../adapters/virtualbox');
 const { configureGuestFeatures } = require('./guestAdditions');
 const { setupSharedFolder } = require('./sharedFolder');
+const LINUX_USERNAME_PATTERN = /^[a-z_][a-z0-9_-]{0,31}$/;
+const MIN_SUPPORTED_ISO_BYTES = 80 * 1024 * 1024;
 
 /**
  * Create and fully configure a VM from user settings.
@@ -59,17 +61,30 @@ async function createAndConfigureVM(config, onProgress = null) {
     dragAndDrop = 'bidirectional',
     autoStartVm = false
   } = config;
+  const normalizedInstallPath = path.resolve(String(installPath || '').trim());
+  const normalizedIsoPath = path.resolve(String(isoPath || '').trim());
+  const normalizedUsername = String(username || '').trim();
+  const normalizedPassword = String(password ?? '');
 
   // ─── Pre-flight validation ────────────────────────────────────────
   logger.info('VMManager', '═══ Starting V Os Creation ═══');
   logger.info('VMManager', `V Os Name: ${name}`);
-  logger.info('VMManager', `Install Path: ${installPath}`);
+  logger.info('VMManager', `Install Path: ${normalizedInstallPath}`);
   logger.info('VMManager', `Requested resources: ${ram}MB RAM, ${cpus} CPUs, ${disk}MB Disk`);
 
   _emitProgress(onProgress, 'validate', 'Validating configuration...', 0);
 
   if (!name || typeof name !== 'string' || !name.trim()) {
     throw new Error('V Os name is required.');
+  }
+  if (!normalizedUsername) {
+    throw new Error('Guest username is required.');
+  }
+  if (!LINUX_USERNAME_PATTERN.test(normalizedUsername)) {
+    throw new Error('Guest username must start with a letter/underscore and contain only letters, numbers, underscores, or hyphens.');
+  }
+  if (!normalizedPassword) {
+    throw new Error('Guest password is required.');
   }
   if (!installPath || typeof installPath !== 'string') {
     throw new Error('Install path is required.');
@@ -104,30 +119,35 @@ async function createAndConfigureVM(config, onProgress = null) {
     );
   }
 
-  // Check if VM already exists — auto-cleanup from failed previous runs
+  // Check if VM already exists — never delete user data implicitly.
   if (await virtualbox.vmExists(name)) {
-    logger.warn('VMManager', `V Os "${name}" already exists — removing old/partial V Os...`);
-    _emitProgress(onProgress, 'validate', 'Cleaning up previous partial V Os...', 2);
-    try {
-      await virtualbox.deleteVM(name);
-      logger.success('VMManager', `Old V Os "${name}" removed — starting fresh`);
-    } catch (err) {
-      logger.error('VMManager', `Could not remove old V Os: ${err.message}`);
-      throw new Error(`A V Os named "${name}" exists and could not be removed. Please delete it manually from VirtualBox Manager.`);
-    }
+    logger.warn('VMManager', `V Os "${name}" already exists — refusing to overwrite existing machine`);
+    throw new Error(`A V Os named "${name}" already exists. Choose a different V Os name, or enable "Use an already downloaded V Os" in Review & Create.`);
   }
 
   // Ensure ISO file exists
-  if (!fs.existsSync(isoPath)) {
-    throw new Error(`ISO file not found: ${isoPath}`);
+  if (!fs.existsSync(normalizedIsoPath)) {
+    throw new Error(`ISO file not found: ${normalizedIsoPath}`);
   }
+  if (path.extname(normalizedIsoPath).toLowerCase() !== '.iso') {
+    throw new Error(`Unsupported OS image file: ${normalizedIsoPath}. Please select a valid .iso file.`);
+  }
+  const isoStats = await fs.promises.stat(normalizedIsoPath);
+  if (!isoStats.isFile()) {
+    throw new Error(`ISO path is not a file: ${normalizedIsoPath}`);
+  }
+  if (isoStats.size < MIN_SUPPORTED_ISO_BYTES) {
+    throw new Error('Selected ISO file appears incomplete or unsupported (file size is too small).');
+  }
+  await fs.promises.access(normalizedIsoPath, fs.constants.R_OK);
 
   // Ensure install directory exists
-  await fs.promises.mkdir(installPath, { recursive: true });
+  await fs.promises.mkdir(normalizedInstallPath, { recursive: true });
+  await _assertDirectoryWritable(normalizedInstallPath, 'V Os install folder');
 
   // ─── Step 1: Create VM ────────────────────────────────────────────
   _emitProgress(onProgress, 'create', 'Creating virtual OS...', 10);
-  await virtualbox.createVM(name, osType, installPath);
+  await virtualbox.createVM(name, osType, normalizedInstallPath);
 
   // ─── Step 2: Configure Hardware ───────────────────────────────────
   _emitProgress(onProgress, 'configure', 'Configuring hardware...', 20);
@@ -149,19 +169,28 @@ async function createAndConfigureVM(config, onProgress = null) {
 
   // ─── Step 3: Create Virtual Disk ──────────────────────────────────
   _emitProgress(onProgress, 'disk', 'Creating virtual hard disk...', 30);
-  const diskPath = path.join(installPath, name, `${name}.vdi`);
-  await virtualbox.createDisk(diskPath, disk);
+  const vmDir = await _resolveVmDirectory(name, normalizedInstallPath);
+  const diskFileStem = _sanitizeDiskFileStem(name);
+  const diskPath = await _createDiskWithRecovery(path.join(vmDir, `${diskFileStem}.vdi`), disk);
 
   // ─── Step 4: Setup Storage Controllers ────────────────────────────
   _emitProgress(onProgress, 'storage', 'Setting up storage controllers...', 40);
 
   // SATA controller for hard disk
   await virtualbox.addStorageController(name, 'SATA Controller', 'sata');
-  await virtualbox.attachStorage(name, 'SATA Controller', 0, 0, 'hdd', diskPath);
+  try {
+    await virtualbox.attachStorage(name, 'SATA Controller', 0, 0, 'hdd', diskPath);
+  } catch (err) {
+    throw new Error(`Virtual disk attach failed for "${diskPath}". ${err.message}`);
+  }
 
   // IDE controller for DVD/ISO
   await virtualbox.addStorageController(name, 'IDE Controller', 'ide');
-  await virtualbox.attachStorage(name, 'IDE Controller', 0, 0, 'dvddrive', isoPath);
+  try {
+    await virtualbox.attachStorage(name, 'IDE Controller', 0, 0, 'dvddrive', normalizedIsoPath);
+  } catch (err) {
+    throw new Error(`ISO attach failed for "${normalizedIsoPath}". ${err.message}`);
+  }
 
   // ─── Step 5: Configure Network ────────────────────────────────────
   _emitProgress(onProgress, 'network', `Configuring network (${network})...`, 50);
@@ -189,21 +218,21 @@ async function createAndConfigureVM(config, onProgress = null) {
   if (unattended) {
     _emitProgress(onProgress, 'unattended', 'Setting up unattended OS installation...', 80);
     await virtualbox.unattendedInstall(name, {
-      isoPath,
-      username,
-      password,
-      fullName: username,
+      isoPath: normalizedIsoPath,
+      username: normalizedUsername,
+      password: normalizedPassword,
+      fullName: normalizedUsername,
       hostname: name.replace(/\s+/g, '-').toLowerCase() + '.local',
       installAdditions: true,
       postInstallCommand: [
         'apt-get install -y virtualbox-guest-utils virtualbox-guest-x11 2>/dev/null',
-        `usermod -aG vboxsf ${username} 2>/dev/null`,
-        `usermod -aG video ${username} 2>/dev/null`,
-        `mkdir -p /home/${username}/.config/autostart`,
-        `echo -e "[Desktop Entry]\\nType=Application\\nName=VBoxClient\\nExec=/usr/bin/VBoxClient-all\\nX-GNOME-Autostart-enabled=true\\nNoDisplay=true" > /home/${username}/.config/autostart/vboxclient.desktop`,
+        `usermod -aG vboxsf ${normalizedUsername} 2>/dev/null`,
+        `usermod -aG video ${normalizedUsername} 2>/dev/null`,
+        `mkdir -p /home/${normalizedUsername}/.config/autostart`,
+        `echo -e "[Desktop Entry]\\nType=Application\\nName=VBoxClient\\nExec=/usr/bin/VBoxClient-all\\nX-GNOME-Autostart-enabled=true\\nNoDisplay=true" > /home/${normalizedUsername}/.config/autostart/vboxclient.desktop`,
         'grep -q vboxsf /etc/fstab || echo "shared /media/sf_shared vboxsf rw,_netdev,umask=0007 0 0" >> /etc/fstab',
         'mkdir -p /media/sf_shared',
-        `su - ${username} -c "gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null" 2>/dev/null`,
+        `su - ${normalizedUsername} -c "gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null" 2>/dev/null`,
       ].join(' ; ')
     });
   } else {
@@ -244,12 +273,12 @@ async function createAndConfigureVM(config, onProgress = null) {
 
   const result = {
     vmName: name,
-    installPath,
+    installPath: normalizedInstallPath,
     diskPath,
     resources: { ram: effectiveRam, cpus: effectiveCpus, disk },
     network,
     sharedFolder: sharedFolderResult,
-    credentials: { username, password },
+    credentials: { username: normalizedUsername, password: normalizedPassword },
     status: autoStartVm ? 'running' : 'poweroff'
   };
 
@@ -259,12 +288,120 @@ async function createAndConfigureVM(config, onProgress = null) {
   } else {
     logger.info('VMManager', `V Os "${name}" was prepared and left powered off (auto-start disabled).`);
   }
-  logger.info('VMManager', `Login credentials: ${username} / ${password}`);
+  logger.info('VMManager', `Login credentials: ${normalizedUsername} / ${normalizedPassword}`);
   if (sharedFolderResult) {
     logger.info('VMManager', `Shared folder: ${sharedFolderResult.guestMountPoint}`);
   }
 
   return result;
+}
+
+async function _resolveVmDirectory(vmName, fallbackInstallPath) {
+  try {
+    const info = await virtualbox.getVMInfo(vmName);
+    const cfgFile = String(info?.CfgFile || '')
+      .replace(/\\\\/g, '\\')
+      .replace(/^"(.*)"$/, '$1')
+      .trim();
+    if (cfgFile) {
+      const vmDir = path.dirname(cfgFile);
+      await fs.promises.mkdir(vmDir, { recursive: true });
+      return vmDir;
+    }
+  } catch (err) {
+    logger.warn('VMManager', `Could not resolve VM directory from VBox metadata: ${err.message}`);
+  }
+
+  const fallback = path.join(fallbackInstallPath, vmName);
+  await fs.promises.mkdir(fallback, { recursive: true });
+  return fallback;
+}
+
+function _sanitizeDiskFileStem(vmName) {
+  const base = String(vmName || 'vm-disk')
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/g, '');
+  const trimmed = base.slice(0, 96).trim();
+  return trimmed || 'vm-disk';
+}
+
+function _isConstructMediaError(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    msg.includes('constructmedia')
+    || msg.includes('code e_fail')
+    || msg.includes('0x80004005')
+    || msg.includes('vboxmanagemisc.cpp')
+  );
+}
+
+async function _cleanupStaleMedium(targetPath) {
+  const normalized = path.resolve(String(targetPath || '').trim());
+  if (!normalized) return;
+  try {
+    if (fs.existsSync(normalized)) {
+      await fs.promises.unlink(normalized);
+    }
+  } catch (err) {
+    logger.warn('VMManager', `Could not remove stale disk file "${normalized}": ${err.message}`);
+  }
+
+  try {
+    await virtualbox._run(['closemedium', 'disk', normalized, '--delete']);
+  } catch (err) {
+    logger.info('VMManager', `No stale VirtualBox medium registration to remove for "${normalized}": ${err.message}`);
+  }
+}
+
+async function _createDiskWithRecovery(initialDiskPath, sizeMb) {
+  const primary = path.resolve(String(initialDiskPath || '').trim());
+  const parsed = path.parse(primary);
+  const fallback = path.join(parsed.dir, `${parsed.name}-${Date.now()}.vdi`);
+  const attempts = [primary, fallback];
+  let lastErr = null;
+
+  for (let index = 0; index < attempts.length; index += 1) {
+    const candidate = attempts[index];
+    try {
+      await fs.promises.mkdir(path.dirname(candidate), { recursive: true });
+      await _cleanupStaleMedium(candidate);
+      await virtualbox.createDisk(candidate, sizeMb);
+      if (index > 0) {
+        logger.warn('VMManager', `Primary disk path failed; using fallback disk path: ${candidate}`);
+      }
+      return candidate;
+    } catch (err) {
+      lastErr = err;
+      const retryAllowed = index < (attempts.length - 1) && _isConstructMediaError(err);
+      if (!retryAllowed) {
+        break;
+      }
+      logger.warn('VMManager', `Disk creation failed at ${candidate}. Retrying with alternate medium path... ${err.message}`);
+    }
+  }
+
+  throw new Error(`Virtual disk creation failed. ${lastErr?.message || 'Unknown error'}`);
+}
+
+async function _assertDirectoryWritable(directoryPath, label) {
+  const target = path.resolve(String(directoryPath || '').trim());
+  if (!target) {
+    throw new Error(`${label} is not set.`);
+  }
+  const probeFile = path.join(target, `.vmxposed-write-test-${process.pid}-${Date.now()}.tmp`);
+  try {
+    await fs.promises.writeFile(probeFile, 'ok', 'utf8');
+  } catch (err) {
+    throw new Error(`${label} is not writable: ${target}. ${err.message}`);
+  } finally {
+    try {
+      if (fs.existsSync(probeFile)) {
+        await fs.promises.unlink(probeFile);
+      }
+    } catch {}
+  }
 }
 
 async function _waitForVMState(vmName, desiredState, timeoutMs, intervalMs) {

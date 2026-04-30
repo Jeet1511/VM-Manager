@@ -34,7 +34,7 @@ Public update source is now repository folders:
 
 ### Windows Setup Installer
 
-[![Download Windows Installer](https://img.shields.io/badge/Download-Windows%20Installer-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/raw/main/Installer/VM-Xposed-Setup-v1.0.1.exe)
+[![Download Windows Installer](https://img.shields.io/badge/Download-Windows%20Installer-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/raw/main/Installer/VM-Xposed-Setup-v1.1.11.exe)
 
 - Click the button above to directly download the latest Windows installer (.exe).
 
@@ -59,6 +59,14 @@ npm run build:win
 ```
 
 Output installer is generated in `dist/`.
+
+### Windows Trust / SmartScreen
+
+- Unsigned `.exe` files are commonly flagged by SmartScreen/AV.
+- For trusted production builds, sign the app with an Authenticode certificate:
+  - `CSC_LINK` = certificate file/path or base64 content
+  - `CSC_KEY_PASSWORD` = certificate password
+- Build command stays the same (`npm run build:win`); electron-builder signs automatically when these env vars are present.
 
 ## Release Notes Convention
 

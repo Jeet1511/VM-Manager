@@ -112,25 +112,58 @@ const Dashboard = {
     try {
       const report = await window.vmInstaller.checkPermissions();
       const checks = Array.isArray(report?.checks) ? report.checks : [];
-      const driverIssue = checks.find(c => c.name === 'VBox Kernel Driver' && c.status === 'required');
+      const hostBlockers = report?.hostBlockers || {};
+      const hostSignals = report?.hostSignals || {};
+      const driverIssue = checks.find(c => c.name === 'VBox Kernel Driver' && ['required', 'unavailable', 'warning'].includes(String(c.status || '').toLowerCase()));
       const adminIssue = !report?.isAdmin;
+      const fallbackHypervisorConflict = String(report?.platform || '') === 'win32'
+        && (
+          String(hostSignals?.hyperV || '').toLowerCase() === 'enabled'
+          || String(hostSignals?.hypervisorPlatform || '').toLowerCase() === 'enabled'
+          || String(hostSignals?.virtualMachinePlatform || '').toLowerCase() === 'enabled'
+        );
+      const fallbackMemoryIntegrityConflict = String(report?.platform || '') === 'win32'
+        && hostSignals?.memoryIntegrityEnabled === true;
+      const hasDriverIssue = typeof hostBlockers?.hasDriverIssue === 'boolean'
+        ? hostBlockers.hasDriverIssue
+        : !!driverIssue;
+      const hasRuntimeIssue = hostBlockers?.hasRuntimeIssue === true;
+      const hasHypervisorConflict = typeof hostBlockers?.hasHypervisorConflict === 'boolean'
+        ? hostBlockers.hasHypervisorConflict
+        : fallbackHypervisorConflict;
+      const hasMemoryIntegrityConflict = typeof hostBlockers?.hasMemoryIntegrityConflict === 'boolean'
+        ? hostBlockers.hasMemoryIntegrityConflict
+        : fallbackMemoryIntegrityConflict;
+      const hasPendingReboot = hostBlockers?.hasPendingReboot === true;
 
-      if (!driverIssue && !adminIssue) return;
+      if (!hasDriverIssue && !hasRuntimeIssue && !hasHypervisorConflict && !hasMemoryIntegrityConflict && !hasPendingReboot && !adminIssue) return;
 
       let desc = [];
       if (adminIssue) desc.push('Not running as administrator');
-      if (driverIssue) desc.push('VBoxSup kernel driver is stopped');
+      if (hasDriverIssue) desc.push(driverIssue?.description || hostBlockers?.primaryMessage || 'VBox kernel driver requires attention');
+      if (hasRuntimeIssue && !hasDriverIssue) desc.push(hostBlockers?.primaryMessage || 'VirtualBox runtime needs attention');
+      if (hasHypervisorConflict) desc.push('Hyper-V stack is enabled');
+      if (hasMemoryIntegrityConflict) desc.push('Memory Integrity is enabled');
+      if (hasPendingReboot) desc.push('Windows restart is pending');
       const safeDesc = Dashboard._escapeHtml(desc.join(' / '));
+      const alertTitle = adminIssue ? 'Administrator Access Recommended' : 'Host Attention Needed';
+      const guidance = adminIssue
+        ? 'Some V Os operations may fail without elevated access. Use the floating <strong>Continue with Admin Privilege</strong> action for full access.'
+        : 'Use the actions below to clear host blockers, then retry Start V Os.';
 
       alertEl.innerHTML = `
         <div class="dash-alert dash-alert-warn">
           <div class="dash-alert-icon">${Icons.warning}</div>
           <div class="dash-alert-content">
-            <div class="dash-alert-title">Administrator Access Recommended</div>
-            <div class="dash-alert-desc">${safeDesc}. Some V Os operations may fail without elevated access. Use the floating <strong>Continue with Admin Privilege</strong> action for full access.</div>
+            <div class="dash-alert-title">${alertTitle}</div>
+            <div class="dash-alert-desc">${safeDesc}. ${guidance}</div>
           </div>
           <div class="dash-alert-actions">
-            ${driverIssue ? `<button class="btn btn-sm btn-primary btn-icon-text" id="btnFixDriver">${Icons.sized(Icons.settings, 14)} Fix Driver</button>` : ''}
+            ${(hasDriverIssue || hasRuntimeIssue) ? `<button class="btn btn-sm btn-primary btn-icon-text" id="btnFixDriver">${Icons.sized(Icons.settings, 14)} Fix Driver</button>` : ''}
+            ${(hasDriverIssue || hasRuntimeIssue) ? `<button class="btn btn-sm btn-secondary btn-icon-text" id="btnPrepareHost">${Icons.sized(Icons.wrench, 14)} Prepare Host</button>` : ''}
+            ${hasHypervisorConflict ? `<button class="btn btn-sm btn-secondary btn-icon-text" id="btnDisableHypervisorStack">${Icons.sized(Icons.shield, 14)} Disable Hyper-V Stack</button>` : ''}
+            ${hasHypervisorConflict ? `<button class="btn btn-sm btn-ghost btn-icon-text" id="btnOpenWindowsFeatures">${Icons.sized(Icons.externalLink, 14)} Windows Features</button>` : ''}
+            ${hasMemoryIntegrityConflict ? `<button class="btn btn-sm btn-ghost btn-icon-text" id="btnOpenCoreIsolation">${Icons.sized(Icons.externalLink, 14)} Core Isolation</button>` : ''}
             <button class="btn btn-sm btn-ghost" id="btnDismissAdminWarn">Dismiss</button>
           </div>
         </div>
@@ -145,11 +178,91 @@ const Dashboard = {
         const btn = document.getElementById('btnFixDriver');
         btn.innerHTML = `${Icons.sized(Icons.spinner, 14)} Fixing...`; btn.disabled = true;
         const r = await window.vmInstaller.fixDriver();
+        if (r?.requiresAdmin) {
+          btn.innerHTML = `${Icons.sized(Icons.shieldCheck, 14)} Admin Needed`;
+          btn.disabled = false;
+          window.vmxAdminAccess?.focus?.('Driver repair needs administrator mode.');
+          Dashboard._notify(r.message || 'Continue with Admin Privilege, then retry Fix Driver.', 'info');
+          return;
+        }
         if (r.success) {
           const safeMessage = Dashboard._escapeHtml(r.message);
           alertEl.innerHTML = `<div class="dash-alert dash-alert-ok"><div class="dash-alert-icon">${Icons.checkCircle}</div><div class="dash-alert-content"><div class="dash-alert-title">Driver Fixed</div><div class="dash-alert-desc">${safeMessage}</div></div></div>`;
           setTimeout(() => { alertEl.style.display = 'none'; }, 3000);
         } else { btn.innerHTML = `${Icons.sized(Icons.xCircle, 14)} Failed`; }
+      });
+      document.getElementById('btnPrepareHost')?.addEventListener('click', async () => {
+        const btn = document.getElementById('btnPrepareHost');
+        btn.innerHTML = `${Icons.sized(Icons.spinner, 14)} Preparing...`;
+        btn.disabled = true;
+        const result = await window.vmInstaller.prepareHostRecovery();
+        const primaryMessage = String(result?.message || 'Host recovery preparation completed.').trim();
+        const planPreview = Array.isArray(result?.steps) ? result.steps.slice(0, 3) : [];
+
+        if (result?.requiresAdmin) {
+          btn.innerHTML = `${Icons.sized(Icons.shieldCheck, 14)} Admin Needed`;
+          btn.disabled = false;
+          window.vmxAdminAccess?.focus?.('Host recovery preparation needs administrator mode.');
+          Dashboard._notify(primaryMessage || 'Continue with Admin Privilege, then retry Prepare Host.', 'info');
+          return;
+        }
+
+        if (result?.success) {
+          const safeMessage = Dashboard._escapeHtml(primaryMessage);
+          const safeSteps = planPreview.map((item) => Dashboard._escapeHtml(item));
+          const planHtml = safeSteps.length > 0 ? `<br>${safeSteps.join('<br>')}` : '';
+          alertEl.innerHTML = `<div class="dash-alert dash-alert-ok"><div class="dash-alert-icon">${Icons.checkCircle}</div><div class="dash-alert-content"><div class="dash-alert-title">Host Prepared</div><div class="dash-alert-desc">${safeMessage}${planHtml}</div></div></div>`;
+          setTimeout(() => { alertEl.style.display = 'none'; }, 3600);
+          return;
+        }
+
+        btn.innerHTML = `${Icons.sized(Icons.wrench, 14)} Prepare Host`;
+        btn.disabled = false;
+        Dashboard._notify(primaryMessage || 'Host recovery preparation found unresolved issues.', 'error');
+        if (planPreview.length > 0) {
+          Dashboard._notify(`Recovery plan: ${planPreview.join(' | ')}`, 'info');
+        }
+      });
+      document.getElementById('btnDisableHypervisorStack')?.addEventListener('click', async () => {
+        const btn = document.getElementById('btnDisableHypervisorStack');
+        if (!btn) return;
+        btn.innerHTML = `${Icons.sized(Icons.spinner, 14)} Disabling...`;
+        btn.disabled = true;
+        const result = await window.vmInstaller.runHostRecoveryAction('disable-hypervisor-stack');
+        if (result?.requiresAdmin) {
+          btn.innerHTML = `${Icons.sized(Icons.shieldCheck, 14)} Admin Needed`;
+          btn.disabled = false;
+          window.vmxAdminAccess?.focus?.('Disabling Hyper-V blockers needs administrator mode.');
+          Dashboard._notify(result.message || 'Continue with Admin Privilege, then retry Disable Hyper-V Stack.', 'info');
+          return;
+        }
+        if (result?.success) {
+          btn.innerHTML = `${Icons.sized(Icons.check, 14)} Disabled`;
+          const detail = result?.rebootRequired
+            ? `${result.message} Reboot is required.`
+            : (result?.message || 'Virtualization blockers updated.');
+          Dashboard._notify(detail, 'success');
+          return;
+        }
+        btn.innerHTML = `${Icons.sized(Icons.xCircle, 14)} Failed`;
+        btn.disabled = false;
+        Dashboard._notify(result?.message || 'Could not disable Hyper-V blockers automatically.', 'error');
+      });
+      document.getElementById('btnOpenWindowsFeatures')?.addEventListener('click', async () => {
+        const result = await window.vmInstaller.runHostRecoveryAction('open-windows-features');
+        if (!result?.success) {
+          Dashboard._notify(result?.message || 'Could not open Windows Features.', 'error');
+          return;
+        }
+        Dashboard._notify(result.message || 'Windows Features opened.', 'info');
+      });
+      document.getElementById('btnOpenCoreIsolation')?.addEventListener('click', async () => {
+        const result = await window.vmInstaller.runHostRecoveryAction('open-core-isolation');
+        if (!result?.success) {
+          Dashboard._notify(result?.message || 'Could not open Device Security settings.', 'error');
+          return;
+        }
+        Dashboard._notify(result.message || 'Device Security settings opened.', 'info');
       });
       document.getElementById('btnDismissAdminWarn')?.addEventListener('click', () => {
         alertEl.style.display = 'none';
@@ -280,15 +393,6 @@ const Dashboard = {
         : await window.vmInstaller.isAdmin();
       if (isAdmin) return true;
 
-      const prefs = Dashboard._readUiPrefs();
-      const policy = String(prefs.adminModePolicy || 'auto').toLowerCase();
-      if (policy === 'auto' && window.vmInstaller?.restartAsAdmin) {
-        window.vmxAdminAccess?.focus?.(`"${taskName}" requires administrator mode.`);
-        Dashboard._notify(`"${taskName}" requires administrator mode. Restarting with admin privilege...`, 'info');
-        const restarted = await window.vmInstaller.restartAsAdmin();
-        if (restarted?.success) return false;
-      }
-
       window.vmxAdminAccess?.focus?.(`"${taskName}" requires administrator mode.`);
       Dashboard._notify(`"${taskName}" requires administrator mode. Use Continue with Admin Privilege.`, 'info');
       return false;
@@ -328,6 +432,7 @@ const Dashboard = {
 
         if (!result?.success) {
           Dashboard._notify(result?.error || `Failed to ${shouldStart ? 'start' : 'stop'} V Os`, 'error');
+          await Dashboard._checkPermissions();
           this.disabled = false;
           this.classList.remove('is-loading');
           if (powerLabel) powerLabel.textContent = shouldStart ? 'Start' : 'Running...';
@@ -525,7 +630,7 @@ const Dashboard = {
         return { state: 'ok', value: onText, icon: Icons.sized(Icons.checkCircle, 14) };
       }
       if (!runtimeCheckAvailable) {
-        return { state: 'ok', value: onText, icon: Icons.sized(Icons.checkCircle, 14) };
+        return { state: 'pending', value: `${onText} (verify after start)`, icon: Icons.sized(Icons.warning, 14) };
       }
       if (!guestAdditionsReady) {
         return { state: 'pending', value: `${onText} (waiting GA)`, icon: Icons.sized(Icons.warning, 14) };
@@ -542,7 +647,7 @@ const Dashboard = {
         return { state: 'ok', value: label, icon: Icons.sized(Icons.checkCircle, 14) };
       }
       if (!runtimeCheckAvailable) {
-        return { state: 'ok', value: label, icon: Icons.sized(Icons.checkCircle, 14) };
+        return { state: 'pending', value: `${label} (verify after start)`, icon: Icons.sized(Icons.warning, 14) };
       }
       if (!guestAdditionsReady) {
         return { state: 'pending', value: `${label} (waiting GA)`, icon: Icons.sized(Icons.warning, 14) };

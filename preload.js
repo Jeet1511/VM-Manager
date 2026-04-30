@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('vmInstaller', {
   isAdmin: () => ipcRenderer.invoke('permissions:isAdmin'),
   restartAsAdmin: () => ipcRenderer.invoke('permissions:restartAsAdmin'),
   fixDriver: () => ipcRenderer.invoke('permissions:fixDriver'),
+  prepareHostRecovery: () => ipcRenderer.invoke('permissions:prepareHostRecovery'),
+  runHostRecoveryAction: (actionId) => ipcRenderer.invoke('permissions:runHostRecoveryAction', actionId),
 
   // ─── VM Management ─────────────────────────────────────────────
   listVMs: () => ipcRenderer.invoke('vm:list'),

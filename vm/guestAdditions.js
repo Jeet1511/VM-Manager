@@ -22,6 +22,40 @@
 const logger = require('../core/logger');
 const virtualbox = require('../adapters/virtualbox');
 
+const LINUX_USERNAME_PATTERN = /^[a-z_][a-z0-9_-]{0,31}$/;
+const SHARE_NAME_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
+
+function shellQuote(value = '') {
+  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function validateLinuxGuestUsername(username = '') {
+  const normalized = String(username || '').trim();
+  if (!normalized) {
+    throw new Error('Guest username is required.');
+  }
+  if (!LINUX_USERNAME_PATTERN.test(normalized)) {
+    throw new Error('Guest username must start with a letter/underscore and contain only letters, numbers, underscores, or hyphens.');
+  }
+  return normalized;
+}
+
+function validateSharedFolderName(name = '') {
+  const normalized = String(name || '').trim() || 'shared';
+  if (!SHARE_NAME_PATTERN.test(normalized)) {
+    throw new Error('Shared folder name can contain only letters, numbers, dot, underscore, and hyphen.');
+  }
+  return normalized;
+}
+
+function buildSudoPrefix(password = '') {
+  const normalized = String(password ?? '');
+  if (!normalized) {
+    throw new Error('Guest password is required for elevated guest setup commands.');
+  }
+  return `printf '%s\\n' ${shellQuote(normalized)} | sudo -S --`;
+}
+
 async function runGuestStep(vmName, username, password, script, options = {}) {
   const {
     timeout = 120000,
@@ -130,8 +164,10 @@ async function configureGuestFeatures(vmName, options = {}) {
  * @param {function} [onProgress] - Progress callback
  */
 async function configureGuestInside(vmName, username, password, onProgress = null, options = {}) {
+  const normalizedUsername = validateLinuxGuestUsername(username);
   const configureSharedFolder = options.configureSharedFolder !== false;
-  const sharedFolderName = options.sharedFolderName || 'shared';
+  const sharedFolderName = validateSharedFolderName(options.sharedFolderName || 'shared');
+  const sudoPrefix = buildSudoPrefix(password);
   logger.info('GuestAdditions', '═══ Starting In-Guest Configuration ═══');
   logger.info('GuestAdditions', 'Running commands inside Ubuntu — no user action needed');
 
@@ -146,17 +182,17 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
 
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
-      'export DEBIAN_FRONTEND=noninteractive; echo "' + password + '" | sudo -S apt-get update -y',
+      `export DEBIAN_FRONTEND=noninteractive; ${sudoPrefix} apt-get update -y`,
       { timeout: 240000, retries: 2, description: 'apt-get update' }
     );
 
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
-      'export DEBIAN_FRONTEND=noninteractive; echo "' + password + '" | sudo -S apt-get install -y ' +
+      `export DEBIAN_FRONTEND=noninteractive; ${sudoPrefix} apt-get install -y ` +
       'virtualbox-guest-utils virtualbox-guest-x11 virtualbox-guest-dkms dkms build-essential linux-headers-$(uname -r)',
       { timeout: 480000, retries: 2, description: 'Guest Additions package install' }
     );
@@ -168,48 +204,48 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
 
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
-      'echo "' + password + '" | sudo -S usermod -aG vboxsf ' + username,
+      `${sudoPrefix} usermod -aG vboxsf ${shellQuote(normalizedUsername)}`,
       { timeout: 30000, retries: 1, description: 'Add user to vboxsf group' }
     );
 
     // Also add to video group for display
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
-      'echo "' + password + '" | sudo -S usermod -aG video ' + username,
+      `${sudoPrefix} usermod -aG video ${shellQuote(normalizedUsername)}`,
       { timeout: 30000, retries: 1, description: 'Add user to video group' }
     );
 
-    logger.success('GuestAdditions', `User "${username}" added to vboxsf and video groups`);
+    logger.success('GuestAdditions', `User "${normalizedUsername}" added to vboxsf and video groups`);
 
     // ─── Step 3: Load kernel modules ──────────────────────────────
     _progress('Loading Guest Additions kernel modules...', 45);
 
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
-      'echo "' + password + '" | sudo -S modprobe vboxguest; ' +
-      'echo "' + password + '" | sudo -S modprobe vboxsf; ' +
-      'echo "' + password + '" | sudo -S modprobe vboxvideo; echo done',
+      `${sudoPrefix} modprobe vboxguest; ` +
+      `${sudoPrefix} modprobe vboxsf; ` +
+      `${sudoPrefix} modprobe vboxvideo; echo done`,
       { timeout: 45000, retries: 2, description: 'Load VBox kernel modules' }
     );
 
     // Ensure modules load on every boot
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
-      'echo "' + password + '" | sudo -S bash -c \'printf "vboxguest\\nvboxsf\\nvboxvideo\\n" > /etc/modules-load.d/virtualbox.conf\'',
+      `${sudoPrefix} sh -c ${shellQuote('printf "vboxguest\\nvboxsf\\nvboxvideo\\n" > /etc/modules-load.d/virtualbox.conf')}`,
       {
         timeout: 30000,
         retries: 1,
         description: 'Persist VBox modules config',
         verify: async () => {
-          const verifyOut = await virtualbox.guestShell(vmName, username, password, 'cat /etc/modules-load.d/virtualbox.conf || true', { timeout: 15000, ignoreErrors: false });
+          const verifyOut = await virtualbox.guestShell(vmName, normalizedUsername, password, 'cat /etc/modules-load.d/virtualbox.conf || true', { timeout: 15000, ignoreErrors: false });
           return verifyOut.includes('vboxguest') && verifyOut.includes('vboxsf');
         }
       }
@@ -221,12 +257,12 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     _progress('Starting VBoxClient services (clipboard, drag-drop, display)...', 55);
 
     // Kill any existing VBoxClient processes first
-    await virtualbox.guestShell(vmName, username, password, 'killall VBoxClient 2>/dev/null || true; sleep 1; echo ok', { timeout: 15000, ignoreErrors: true });
+    await virtualbox.guestShell(vmName, normalizedUsername, password, 'killall VBoxClient 2>/dev/null || true; sleep 1; echo ok', { timeout: 15000, ignoreErrors: true });
 
     // Start all VBoxClient services
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
       'nohup VBoxClient-all >/tmp/vboxclient-all.log 2>&1 & sleep 2; pgrep -f VBoxClient >/dev/null && echo running',
       {
@@ -255,11 +291,11 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
 
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
-      `mkdir -p /home/${username}/.config/autostart && ` +
-      `echo -e "${autostartScript}" > /home/${username}/.config/autostart/vboxclient.desktop && ` +
-      `test -f /home/${username}/.config/autostart/vboxclient.desktop && echo ok`,
+      `mkdir -p /home/${normalizedUsername}/.config/autostart && ` +
+      `echo -e "${autostartScript}" > /home/${normalizedUsername}/.config/autostart/vboxclient.desktop && ` +
+      `test -f /home/${normalizedUsername}/.config/autostart/vboxclient.desktop && echo ok`,
       {
         timeout: 30000,
         retries: 1,
@@ -269,9 +305,9 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     );
 
     // Also ensure the system-wide vboxadd service is enabled
-    await virtualbox.guestShell(vmName, username, password,
-      'echo "' + password + '" | sudo -S systemctl enable vboxadd.service 2>/dev/null || true; ' +
-      'echo "' + password + '" | sudo -S systemctl enable vboxadd-service.service 2>/dev/null || true; echo done',
+    await virtualbox.guestShell(vmName, normalizedUsername, password,
+      `${sudoPrefix} systemctl enable vboxadd.service 2>/dev/null || true; ` +
+      `${sudoPrefix} systemctl enable vboxadd-service.service 2>/dev/null || true; echo done`,
       { timeout: 30000, ignoreErrors: true }
     );
 
@@ -283,15 +319,16 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       _progress('Configuring shared folder mount and permissions...', 80);
 
       const guestMountPoint = `/media/sf_${sharedFolderName}`;
+      const mountEntry = `${sharedFolderName} ${guestMountPoint} vboxsf rw,_netdev,umask=0007 0 0`;
 
       // Create mount point if it doesn't exist
       await runGuestStep(
         vmName,
-        username,
+        normalizedUsername,
         password,
-        'echo "' + password + '" | sudo -S mkdir -p ' + guestMountPoint + ' && ' +
-        'echo "' + password + '" | sudo -S chown root:vboxsf ' + guestMountPoint + ' && ' +
-        'echo "' + password + '" | sudo -S chmod 770 ' + guestMountPoint + ' && echo ok',
+        `${sudoPrefix} mkdir -p ${shellQuote(guestMountPoint)} && ` +
+        `${sudoPrefix} chown root:vboxsf ${shellQuote(guestMountPoint)} && ` +
+        `${sudoPrefix} chmod 770 ${shellQuote(guestMountPoint)} && echo ok`,
         {
           timeout: 30000,
           retries: 2,
@@ -301,13 +338,14 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       );
 
       // Add fstab entry for persistent mount
-    await runGuestStep(
+      await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
-      'echo "' + password + '" | sudo -S bash -c \'' +
-      'sed -i "\\|^' + sharedFolderName + ' ' + guestMountPoint + ' vboxsf |d" /etc/fstab; ' +
-      'echo "' + sharedFolderName + ' ' + guestMountPoint + ' vboxsf rw,_netdev,umask=0007 0 0" >> /etc/fstab\' && echo ok',
+      `${sudoPrefix} bash -lc ${shellQuote(
+        `sed -i "\\|^${sharedFolderName} ${guestMountPoint} vboxsf |d" /etc/fstab; ` +
+        `printf '%s\\n' ${shellQuote(mountEntry)} >> /etc/fstab`
+      )} && echo ok`,
       {
         timeout: 30000,
         retries: 2,
@@ -319,11 +357,11 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       // Try to mount it now
       await runGuestStep(
         vmName,
-        username,
+        normalizedUsername,
         password,
-        'echo "' + password + '" | sudo -S mount -t vboxsf ' + sharedFolderName + ' ' + guestMountPoint + ' 2>/dev/null || ' +
-        'echo "' + password + '" | sudo -S mount -a 2>/dev/null; ' +
-        'mount | grep -q "' + guestMountPoint + '" && echo mounted',
+        `${sudoPrefix} mount -t vboxsf ${shellQuote(sharedFolderName)} ${shellQuote(guestMountPoint)} 2>/dev/null || ` +
+        `${sudoPrefix} mount -a 2>/dev/null; ` +
+        `mount | grep -q ${shellQuote(guestMountPoint)} && echo mounted`,
         {
           timeout: 30000,
           retries: 2,
@@ -343,18 +381,18 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     // Prefer Xorg when gdm3 is present so VBoxClient draganddrop can attach reliably.
     await virtualbox.guestShell(
       vmName,
-      username,
+      normalizedUsername,
       password,
       'if [ -f /etc/gdm3/custom.conf ]; then ' +
-      'echo "' + password + '" | sudo -S sed -i \'s/^#\\?WaylandEnable=.*/WaylandEnable=false/\' /etc/gdm3/custom.conf 2>/dev/null || true; ' +
-      'grep -q "^WaylandEnable=false" /etc/gdm3/custom.conf || echo "' + password + '" | sudo -S bash -c \'printf "\\n[daemon]\\nWaylandEnable=false\\n" >> /etc/gdm3/custom.conf\'; ' +
+      `${sudoPrefix} sed -i "s/^#\\?WaylandEnable=.*/WaylandEnable=false/" /etc/gdm3/custom.conf 2>/dev/null || true; ` +
+      `grep -q "^WaylandEnable=false" /etc/gdm3/custom.conf || ${sudoPrefix} bash -lc ${shellQuote('printf "\\n[daemon]\\nWaylandEnable=false\\n" >> /etc/gdm3/custom.conf')}; ` +
       'fi; echo done',
       { timeout: 15000, ignoreErrors: true }
     );
 
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
       'pkill -f "VBoxClient --display" 2>/dev/null || true; ' +
       'pkill -f "VBoxClient --clipboard" 2>/dev/null || true; ' +
@@ -374,7 +412,7 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
 
     await runGuestStep(
       vmName,
-      username,
+      normalizedUsername,
       password,
       'xrandr --output Virtual-1 --auto 2>/dev/null || xrandr --auto 2>/dev/null || true; echo done',
       {
@@ -386,7 +424,7 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     );
 
     // Remove screen lock / screensaver for better VM experience
-    await virtualbox.guestShell(vmName, username, password,
+    await virtualbox.guestShell(vmName, normalizedUsername, password,
       'gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null; ' +
       'gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null; ' +
       'gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type "nothing" 2>/dev/null; echo done',
@@ -396,21 +434,21 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     logger.success('GuestAdditions', 'Fullscreen and dynamic resolution configured');
 
     // ─── Verification ─────────────────────────────────────────────
-    const verifyGroups = await virtualbox.guestShell(vmName, username, password, `id -nG ${username} || true`, { timeout: 15000, ignoreErrors: false });
-    const verifyAutostart = await virtualbox.guestShell(vmName, username, password, `test -f /home/${username}/.config/autostart/vboxclient.desktop && echo ok || echo missing`, { timeout: 15000, ignoreErrors: false });
-    const verifyDisplayClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --display" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
-    const verifyClipboardClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --clipboard" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
-    const verifyDnDClient = await virtualbox.guestShell(vmName, username, password, 'pgrep -f "VBoxClient --draganddrop" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
+    const verifyGroups = await virtualbox.guestShell(vmName, normalizedUsername, password, `id -nG ${shellQuote(normalizedUsername)} || true`, { timeout: 15000, ignoreErrors: false });
+    const verifyAutostart = await virtualbox.guestShell(vmName, normalizedUsername, password, `test -f /home/${normalizedUsername}/.config/autostart/vboxclient.desktop && echo ok || echo missing`, { timeout: 15000, ignoreErrors: false });
+    const verifyDisplayClient = await virtualbox.guestShell(vmName, normalizedUsername, password, 'pgrep -f "VBoxClient --display" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
+    const verifyClipboardClient = await virtualbox.guestShell(vmName, normalizedUsername, password, 'pgrep -f "VBoxClient --clipboard" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
+    const verifyDnDClient = await virtualbox.guestShell(vmName, normalizedUsername, password, 'pgrep -f "VBoxClient --draganddrop" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
     const verifySessionType = await virtualbox.guestShell(
       vmName,
-      username,
+      normalizedUsername,
       password,
       'sid=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$(whoami)" \'$3==u {print $1; exit}\'); ' +
       'if [ -n "$sid" ]; then loginctl show-session "$sid" -p Type --value 2>/dev/null; else echo unknown; fi',
       { timeout: 15000, ignoreErrors: true }
     );
     const verifyMount = configureSharedFolder
-      ? await virtualbox.guestShell(vmName, username, password, `mount | grep -q "/media/sf_${sharedFolderName}" && echo mounted || echo not-mounted`, { timeout: 15000, ignoreErrors: false })
+      ? await virtualbox.guestShell(vmName, normalizedUsername, password, `mount | grep -q ${shellQuote(`/media/sf_${sharedFolderName}`)} && echo mounted || echo not-mounted`, { timeout: 15000, ignoreErrors: false })
       : 'skipped';
     const sessionType = String(verifySessionType || '').trim().toLowerCase() || 'unknown';
     const sessionX11 = sessionType.includes('x11') || sessionType.includes('xorg') || sessionType === 'unknown';

@@ -1,6 +1,6 @@
 {
   "name": "vm-xposed",
-  "version": "1.0.1",
+  "version": "1.1.18",
   "description": "One-click cross-platform VM setup automation using VirtualBox",
   "main": "main.js",
   "scripts": {
@@ -11,7 +11,7 @@
     "build:portable": "npm run prepare:icons && electron-builder --win portable --x64",
     "build:all": "npm run prepare:icons && electron-builder --win nsis portable --x64"
   },
-  "author": "Dev: Jeet",
+  "author": "Jeet",
   "license": "MIT",
   "devDependencies": {
     "electron": "^33.0.0",
@@ -22,13 +22,18 @@
     "sharp": "^0.34.5"
   },
   "build": {
-    "appId": "com.jeet.vmxposed",
+    "appId": "com.vmxposed",
     "productName": "VM Xposed",
     "afterPack": "scripts/after-pack-win.js",
     "directories": {
       "output": "dist"
     },
     "asar": true,
+    "asarUnpack": [
+      "preload.js",
+      "renderer/**/*",
+      "logos/**/*"
+    ],
     "files": [
       "main.js",
       "preload.js",
@@ -45,8 +50,23 @@
       "!**/.DS_Store",
       "!**/Thumbs.db"
     ],
+    "extraResources": [
+      {
+        "from": "preload.js",
+        "to": "preload.js"
+      },
+      {
+        "from": "logos",
+        "to": "logos"
+      },
+      {
+        "from": "renderer",
+        "to": "renderer"
+      }
+    ],
     "win": {
       "signAndEditExecutable": false,
+      "requestedExecutionLevel": "asInvoker",
       "icon": "logos/icon-app.ico",
       "target": [
         {

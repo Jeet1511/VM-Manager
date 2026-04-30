@@ -418,21 +418,22 @@ class VirtualBoxAdapter {
 
       child.on('close', (code) => {
         clearTimeout(timeout);
+        const stderrClean = stderr.trim();
+        const stdoutClean = stdout.trim();
+        const details = [stderrClean, stdoutClean].filter(Boolean).join('\n').trim();
+        const driverRuntimeSignature = /vboxdrvstub|supr3hardenedwinrespawn|verr_open_failed|status_object_name_not_found|\\device\\vboxdrvstub/i;
         if (code === 0) {
+          if (driverRuntimeSignature.test(details)) {
+            logger.error('VirtualBox', `startvm reported driver/runtime error: ${details}`);
+            reject(new Error(`Failed to start VM: ${details}`));
+            return;
+          }
           logger.success('VirtualBox', `VM "${vmName}" started`);
           resolve(stdout);
         } else {
-          // Check if stderr has real errors vs just progress output
-          const stderrClean = stderr.trim();
-          if (stderrClean && stderrClean.includes('error:')) {
-            logger.error('VirtualBox', `startvm failed: ${stderrClean}`);
-            reject(new Error(`Failed to start VM: ${stderrClean}`));
-          } else {
-            // Non-zero exit but no real error — might just be progress output
-            logger.warn('VirtualBox', `startvm exited with code ${code}, but no critical error detected`);
-            logger.success('VirtualBox', `VM "${vmName}" started`);
-            resolve(stdout);
-          }
+          const errorDetail = details || `VBoxManage startvm exited with code ${code}.`;
+          logger.error('VirtualBox', `startvm failed (exit ${code}): ${errorDetail}`);
+          reject(new Error(`Failed to start VM: ${errorDetail}`));
         }
       });
 

@@ -1,0 +1,10 @@
+Patch v1.1.18 — VirtualBox Kernel Driver Deep Probe
+
+- Fixed false "no host blockers" / healthy status when VirtualBox kernel driver (VBoxDrvStub/VBoxSup) is actually broken or cannot load.
+- Added probeVBoxKernelDeviceReady(): a deep check that verifies the kernel driver binary exists on disk, tries to start the stopped service, and detects whether the driver can actually load — not just whether VBoxManage CLI responds.
+- VBoxManage commands like "list hostinfo" succeed without the kernel driver, but VM starts require it. The health check now catches this gap.
+- Enhanced probeVBoxRuntimeHealth() on Windows to include the kernel device probe after VBoxManage CLI succeeds, preventing false-positive "runtime is responsive" results.
+- Fixed getPermissionsReport() to report 'unavailable' (not 'ok') when the driver is stopped but cannot start due to missing admin privileges or driver failure.
+- Updated summarizeWindowsVBoxHostBlockers() to recognize 'driver-needs-admin' as a real blocker, ensuring the Guided Host Fix button shows "Needed" in these cases.
+- Enhanced vm:start preflight to catch 'driver-needs-admin' with a clear user-facing message before failing with a cryptic VirtualBox error dialog.
+- Applied same enhanced kernel driver detection to systemChecker.js used during Full Scan.

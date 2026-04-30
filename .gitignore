@@ -39,3 +39,16 @@ latest.yml
 # Electron temporary caches
 .electron-cache/
 .cache/
+
+# PowerShell/local shell artifacts
+*.ps1xml
+*.clixml
+*.pssc
+*.psrc
+.powershell/
+
+# Local temporary files
+*.tmp
+*.temp
+*.bak
+*.orig

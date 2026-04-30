@@ -11,7 +11,7 @@ process.on('uncaughtException', (err) => {
 const { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeImage, screen, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execSync, exec, execFile } = require('child_process');
+const { execSync, exec, execFile, execFileSync, spawn, spawnSync } = require('child_process');
 const os = require('os');
 const https = require('https');
 const { URL } = require('url');
@@ -26,6 +26,10 @@ const accountManager = require('./vm/accountManager');
 const { configureGuestFeatures, configureGuestInside } = require('./vm/guestAdditions');
 const { setupSharedFolder } = require('./vm/sharedFolder');
 
+// Production-safe utilities for path resolution and security
+const prodUtils = require('./core/production-utils');
+const adminElevate = require('./core/admin-elevate');
+
 let mainWindow = null;
 let runtimeOSCatalog = { ...OS_CATALOG };
 let isCatalogRefreshRunning = false;
@@ -35,6 +39,17 @@ const runtimeIntegrationQueue = new Map();
 const runtimeIntegrationLastScheduledAt = new Map();
 const runtimeIntegrationRetryCounts = new Map();
 const vmLastKnownState = new Map();
+const VBOX_RUNTIME_BLOCKER_TTL_MS = 10 * 60 * 1000;
+const VM_START_FAILURE_TTL_MS = 10 * 60 * 1000;
+let lastVBoxRuntimeBlocker = null;
+let lastVmStartFailure = null;
+const LINUX_GUEST_USERNAME_PATTERN = /^[a-z_][a-z0-9_-]{0,31}$/;
+const WINDOWS_RESERVED_NAMES = new Set([
+  'con', 'prn', 'aux', 'nul',
+  'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+  'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'
+]);
+const MIN_SUPPORTED_ISO_BYTES = 80 * 1024 * 1024;
 
 function getCatalogCacheFilePath() {
   return path.join(app.getPath('userData'), 'os-catalog-cache.json');
@@ -128,9 +143,7 @@ function readUiPrefsFromDisk() {
     prefs.notificationLevel = ['all', 'important', 'minimal'].includes(String(prefs.notificationLevel || '').toLowerCase())
       ? String(prefs.notificationLevel).toLowerCase()
       : 'important';
-    prefs.adminModePolicy = ['auto', 'manual'].includes(String(prefs.adminModePolicy || '').toLowerCase())
-      ? String(prefs.adminModePolicy).toLowerCase()
-      : 'auto';
+    prefs.adminModePolicy = 'manual';
     prefs.autoRepairLevel = ['none', 'safe', 'full'].includes(String(prefs.autoRepairLevel || '').toLowerCase())
       ? String(prefs.autoRepairLevel).toLowerCase()
       : 'safe';
@@ -191,7 +204,10 @@ function parsePathList(rawValue = '') {
 }
 
 function normalizePathForTrust(pathValue = '') {
-  const normalized = String(pathValue || '').trim().replace(/\//g, '\\');
+  const raw = String(pathValue || '').trim().replace(/\//g, '\\');
+  const isUnc = raw.startsWith('\\\\');
+  const collapsed = raw.replace(/[\\]+/g, '\\');
+  const normalized = isUnc ? `\\\\${collapsed.replace(/^\\+/, '')}` : collapsed;
   if (!normalized) return '';
   const dequoted = normalized.replace(/^"+|"+$/g, '');
   const withoutTrailing = /^[a-z]:\\$/i.test(dequoted) ? dequoted : dequoted.replace(/[\\]+$/, '');
@@ -223,6 +239,197 @@ function mergePathListString(existingValue = '', candidates = []) {
   parsePathList(existingValue).forEach(pushUnique);
   (Array.isArray(candidates) ? candidates : []).forEach(pushUnique);
   return merged.join('; ');
+}
+
+function validateLinuxGuestUsername(value = '', label = 'Guest username') {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    throw new Error(`${label} is required.`);
+  }
+  if (!LINUX_GUEST_USERNAME_PATTERN.test(normalized)) {
+    throw new Error(`${label} must start with a letter/underscore and contain only letters, numbers, underscores, or hyphens.`);
+  }
+  return normalized;
+}
+
+async function ensurePathTrustedByPrefs(candidatePath = '', prefs = null) {
+  const selectedPath = String(candidatePath || '').trim();
+  const basePrefs = (prefs && typeof prefs === 'object') ? prefs : readUiPrefsFromDisk();
+  if (!selectedPath) return basePrefs;
+  if (isPathTrustedByPrefs(selectedPath, basePrefs)) return basePrefs;
+
+  const updatedPrefs = {
+    ...basePrefs,
+    trustedPaths: mergePathListString(basePrefs.trustedPaths, [selectedPath])
+  };
+  await writeUiPrefsToDisk(updatedPrefs);
+  logger.info('Security', `Trusted path added automatically for selected shared folder: ${selectedPath}`);
+  return updatedPrefs;
+}
+
+function normalizeSetupPath(rawPath = '') {
+  const value = String(rawPath || '').trim().replace(/^"(.*)"$/, '$1').trim();
+  if (!value) return '';
+  return path.normalize(value);
+}
+
+function hasInvalidWindowsPath(pathValue = '') {
+  if (process.platform !== 'win32') return false;
+  const normalized = normalizeSetupPath(pathValue);
+  if (!normalized) return false;
+
+  let remainder = normalized
+    .replace(/^[a-z]:[\\/]?/i, '')
+    .replace(/^\\\\[^\\]+\\[^\\]+[\\/]?/, '');
+
+  const segments = remainder.split(/[\\/]+/).filter(Boolean);
+  return segments.some((segment) => {
+    if (/[<>:"|?*\u0000-\u001F]/.test(segment)) return true;
+    if (/[. ]$/.test(segment)) return true;
+    const stem = segment.split('.')[0].toLowerCase();
+    return WINDOWS_RESERVED_NAMES.has(stem);
+  });
+}
+
+function validateVmNameForSetup(rawName = '') {
+  const vmName = String(rawName || '').trim();
+  if (!vmName) {
+    throw new Error('V Os name is required.');
+  }
+  if (/[<>:"/\\|?*\u0000-\u001F]/.test(vmName) || /[. ]$/.test(vmName)) {
+    throw new Error('V Os name contains unsupported characters. Avoid: < > : " / \\ | ? * and trailing dots/spaces.');
+  }
+  return vmName;
+}
+
+async function resolveWritableDirectory(candidates = [], label = 'folder') {
+  const seen = new Set();
+  const attemptedErrors = [];
+
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const normalized = normalizeSetupPath(candidate);
+    if (!normalized) continue;
+
+    const compareKey = normalizePathForTrust(normalized) || normalized.toLowerCase();
+    if (seen.has(compareKey)) continue;
+    seen.add(compareKey);
+
+    if (hasInvalidWindowsPath(normalized)) {
+      attemptedErrors.push(`${normalized} (unsupported path characters)`);
+      continue;
+    }
+
+    try {
+      await fs.promises.mkdir(normalized, { recursive: true });
+      const testFile = path.join(normalized, `.vmxposed-write-test-${process.pid}-${Date.now()}.tmp`);
+      await fs.promises.writeFile(testFile, 'ok', 'utf8');
+      await fs.promises.unlink(testFile).catch(() => {});
+      return normalized;
+    } catch (err) {
+      attemptedErrors.push(`${normalized} (${err.message})`);
+    }
+  }
+
+  throw new Error(`Could not use ${label}. Checked: ${attemptedErrors.join(' | ') || 'no valid path candidates'}`);
+}
+
+async function normalizeSetupConfig(rawConfig = {}, uiPrefs = {}) {
+  const config = (rawConfig && typeof rawConfig === 'object') ? rawConfig : {};
+  const warnings = [];
+
+  config.useExistingVm = !!config.useExistingVm;
+
+  if (!config.useExistingVm) {
+    config.vmName = validateVmNameForSetup(config.vmName);
+  } else if (String(config.vmName || '').trim()) {
+    config.vmName = validateVmNameForSetup(config.vmName);
+  }
+
+  const requestedInstallPath = normalizeSetupPath(config.installPath);
+  const resolvedInstallPath = await resolveWritableDirectory(
+    [requestedInstallPath, uiPrefs.installPath, getDefaultInstallPath()],
+    'V Os install folder'
+  );
+  config.installPath = resolvedInstallPath;
+  if (requestedInstallPath && normalizePathForTrust(requestedInstallPath) !== normalizePathForTrust(resolvedInstallPath)) {
+    warnings.push(`Selected V Os install folder is not writable. Using: ${resolvedInstallPath}`);
+  }
+
+  const requestedDownloadPath = normalizeSetupPath(config.downloadPath);
+  const resolvedDownloadPath = await resolveWritableDirectory(
+    [requestedDownloadPath, uiPrefs.downloadPath, getDownloadDir()],
+    'ISO download folder'
+  );
+  config.downloadPath = resolvedDownloadPath;
+  if (requestedDownloadPath && normalizePathForTrust(requestedDownloadPath) !== normalizePathForTrust(resolvedDownloadPath)) {
+    warnings.push(`Selected ISO download folder is not writable. Using: ${resolvedDownloadPath}`);
+  }
+
+  config.isoSource = String(config.isoSource || 'official').toLowerCase() === 'custom' ? 'custom' : 'official';
+  if (!config.useExistingVm && config.isoSource === 'custom') {
+    const customIsoPath = normalizeSetupPath(config.customIsoPath);
+    if (!customIsoPath) {
+      throw new Error('Custom ISO file path is required.');
+    }
+    if (hasInvalidWindowsPath(customIsoPath)) {
+      throw new Error('Custom ISO path contains unsupported characters.');
+    }
+    if (path.extname(customIsoPath).toLowerCase() !== '.iso') {
+      throw new Error('Unsupported file selected. Please choose a valid .iso file.');
+    }
+
+    let stats = null;
+    try {
+      stats = await fs.promises.stat(customIsoPath);
+    } catch {
+      throw new Error(`Custom ISO file was not found: ${customIsoPath}`);
+    }
+    if (!stats.isFile()) {
+      throw new Error('Custom ISO path must point to a file.');
+    }
+    if (stats.size < MIN_SUPPORTED_ISO_BYTES) {
+      throw new Error('Selected ISO file appears incomplete or unsupported (file size is too small).');
+    }
+    await fs.promises.access(customIsoPath, fs.constants.R_OK);
+    config.customIsoPath = customIsoPath;
+  } else {
+    config.customIsoPath = '';
+  }
+
+  config.enableSharedFolder = !!config.enableSharedFolder;
+  if (config.enableSharedFolder) {
+    const requestedSharedPath = normalizeSetupPath(config.sharedFolderPath);
+    const resolvedSharedPath = await resolveWritableDirectory(
+      [requestedSharedPath, uiPrefs.sharedFolderPath, getDefaultSharedFolderPath()],
+      'shared folder path'
+    );
+    config.sharedFolderPath = resolvedSharedPath;
+    if (requestedSharedPath && normalizePathForTrust(requestedSharedPath) !== normalizePathForTrust(resolvedSharedPath)) {
+      warnings.push(`Selected shared folder is not writable. Using: ${resolvedSharedPath}`);
+    }
+  } else {
+    config.sharedFolderPath = normalizeSetupPath(config.sharedFolderPath);
+  }
+
+  if (config.useExistingVm && config.existingVmFolder) {
+    const existingVmFolder = normalizeSetupPath(config.existingVmFolder);
+    if (hasInvalidWindowsPath(existingVmFolder)) {
+      throw new Error('Selected existing V Os folder contains unsupported path characters.');
+    }
+    try {
+      const stats = await fs.promises.stat(existingVmFolder);
+      if (!stats.isDirectory()) {
+        throw new Error('not-a-directory');
+      }
+    } catch {
+      throw new Error(`Selected existing V Os folder was not found or is not accessible: ${existingVmFolder}`);
+    }
+    config.existingVmFolder = existingVmFolder;
+  } else {
+    config.existingVmFolder = '';
+  }
+
+  return { config, warnings };
 }
 
 function applyLoggerPreferences(prefs = {}) {
@@ -266,7 +473,7 @@ async function collectWindowsLogicalDisks() {
   const output = await new Promise((resolve, reject) => {
     execFile(
       'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      ['-NoProfile', '-Command', script],
       { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 * 4 },
       (err, stdout, stderr) => {
         if (err) {
@@ -551,59 +758,12 @@ async function runFullSystemScan() {
 }
 
 function resolveAppIconPath() {
-  const assetsDir = path.join(__dirname, 'renderer', 'assets');
-  const logosDir = path.join(__dirname, 'logos');
-  const candidates = [
-    path.join(logosDir, 'outside app logo.ico'),
-    path.join(logosDir, 'outside app logo.png'),
-    path.join(logosDir, 'outside app logo.webp'),
-    path.join(logosDir, 'outside app logo.jpg'),
-    path.join(logosDir, 'outside app logo.jpeg'),
-    path.join(logosDir, 'outside-app-logo.ico'),
-    path.join(logosDir, 'outside-app-logo.png'),
-    path.join(logosDir, 'outside-app-logo.webp'),
-    path.join(logosDir, 'outside-app-logo.jpg'),
-    path.join(logosDir, 'outside-app-logo.jpeg'),
-    path.join(assetsDir, 'vm-xposed-mark.ico'),
-    path.join(__dirname, 'renderer', 'assets', 'vm-xposed-mark.png'),
-    path.join(assetsDir, 'vm-xposed-mark.webp'),
-    path.join(assetsDir, 'vm-xposed-mark.jpg'),
-    path.join(assetsDir, 'vm-xposed-mark.jpeg'),
-    path.join(assetsDir, 'vm-xposed-logo.ico'),
-    path.join(__dirname, 'renderer', 'assets', 'vm-xposed-logo.png'),
-    path.join(assetsDir, 'vm-xposed-logo.webp'),
-    path.join(assetsDir, 'vm-xposed-logo.jpg'),
-    path.join(assetsDir, 'vm-xposed-logo.jpeg'),
-    path.join(assetsDir, 'icon.ico'),
-    path.join(assetsDir, 'icon.png'),
-    path.join(assetsDir, 'icon.webp'),
-    path.join(assetsDir, 'icon.jpg'),
-    path.join(assetsDir, 'icon.jpeg'),
-    path.join(assetsDir, 'logo.ico'),
-    path.join(assetsDir, 'logo.png'),
-    path.join(assetsDir, 'logo.webp'),
-    path.join(assetsDir, 'logo.jpg'),
-    path.join(assetsDir, 'logo.jpeg'),
-    path.join(__dirname, 'renderer', 'icon.png')
-  ];
-
-  for (const iconPath of candidates) {
-    if (fs.existsSync(iconPath)) {
-      return iconPath;
-    }
+  try {
+    return prodUtils.getAppIconPath();
+  } catch (err) {
+    logger.warn('App', `Could not resolve app icon: ${err.message}`);
+    return undefined;
   }
-
-  if (fs.existsSync(assetsDir)) {
-    const discovered = fs.readdirSync(assetsDir)
-      .filter((name) => /\.(ico|png|webp|jpg|jpeg)$/i.test(name))
-      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-
-    if (discovered.length > 0) {
-      return path.join(assetsDir, discovered[0]);
-    }
-  }
-
-  return undefined;
 }
 
 function createFallbackAppIcon() {
@@ -1469,78 +1629,957 @@ async function shutdownRunningVMsOnExit() {
 
 /**
  * Check if the app is running with administrator privileges.
+ * (Now uses secure implementation from admin-elevate module)
  */
 function isRunningAsAdmin() {
-  if (process.platform !== 'win32') return true; // Linux/Mac don't need this
-  try {
-    execSync('net session', { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
+  return adminElevate.isRunningAsAdmin();
 }
 
 /**
  * Restart the app with admin privileges (Windows UAC elevation).
+ * (Now uses secure implementation from admin-elevate module)
  */
 async function restartAsAdmin() {
-  if (process.platform !== 'win32') {
-    return { success: false, error: 'Administrator elevation is only supported on Windows.' };
-  }
+  return adminElevate.requestAdminElevation();
+}
 
-  const exePath = app.getPath('exe');
-  const args = process.argv.slice(1);
-
-  const escapedExePath = String(exePath).replace(/'/g, "''");
-  const psArgList = args
-    .map((arg) => `'${String(arg).replace(/'/g, "''")}'`)
-    .join(', ');
-  const psCommand = [
-    `$proc = Start-Process -FilePath '${escapedExePath}' -ArgumentList @(${psArgList}) -Verb RunAs -PassThru`,
-    'if ($null -eq $proc) { exit 1 }',
-    'exit 0'
-  ].join('; ');
+function resolvePreferredVBoxManagePath(rawPath = '') {
+  const candidate = String(rawPath || '').trim().replace(/^"(.*)"$/, '$1').trim();
+  if (!candidate) return '';
 
   try {
-    app.releaseSingleInstanceLock();
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
   } catch {}
 
-  const launchResult = await new Promise((resolve) => {
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCommand],
-      { windowsHide: true, timeout: 120000 },
-      (err) => resolve({ error: err || null })
-    );
-  });
+  try {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      const exeName = process.platform === 'win32' ? 'VBoxManage.exe' : 'VBoxManage';
+      const sibling = path.join(candidate, exeName);
+      if (fs.existsSync(sibling) && fs.statSync(sibling).isFile()) {
+        return sibling;
+      }
+    }
+  } catch {}
 
-  if (launchResult.error) {
-    const raw = String(launchResult.error.message || '');
-    const cancelled = /1223|canceled|cancelled|operation was canceled/i.test(raw);
-    const errorMessage = cancelled
-      ? 'Administrator elevation was cancelled.'
-      : `Failed to request administrator restart: ${raw}`;
-    logger.warn('App', `Admin relaunch request failed: ${raw}`);
-    app.requestSingleInstanceLock();
-    return { success: false, error: errorMessage };
+  if (process.platform === 'win32' && candidate.toLowerCase().endsWith('virtualbox.exe')) {
+    try {
+      const sibling = path.join(path.dirname(candidate), 'VBoxManage.exe');
+      if (fs.existsSync(sibling) && fs.statSync(sibling).isFile()) {
+        return sibling;
+      }
+    } catch {}
   }
 
-  logger.info('App', 'Restarting in Administrator mode...');
-  setTimeout(() => {
-    try { app.quit(); } catch {}
-  }, 120);
-  return { success: true, restarting: true };
+  return '';
+}
+
+function resolveVBoxManagePathForChecks() {
+  const uiPrefs = readUiPrefsFromDisk();
+  const preferredFromPrefs = resolvePreferredVBoxManagePath(uiPrefs?.virtualBoxPath || '');
+  if (preferredFromPrefs) return preferredFromPrefs;
+
+  const adapterPath = resolvePreferredVBoxManagePath(virtualbox?.vboxManagePath || virtualbox?.preferredManagePath || '');
+  if (adapterPath) return adapterPath;
+
+  if (process.platform === 'win32') {
+    return String(prodUtils.findVirtualBoxOnWindows() || '').trim();
+  }
+
+  return '';
+}
+
+function getVBoxSupDriverState() {
+  if (process.platform !== 'win32') {
+    return { state: 'unsupported', message: 'VirtualBox kernel drivers apply to Windows hosts only.' };
+  }
+
+  const candidates = ['vboxsup', 'vboxdrv'];
+  const stoppedService = [];
+  const unknownErrors = [];
+
+  for (const serviceName of candidates) {
+    try {
+      const output = String(execSync(`sc.exe query ${serviceName}`, { encoding: 'utf8', timeout: 5000 }) || '');
+      if (/RUNNING/i.test(output)) {
+        return {
+          state: 'running',
+          serviceName,
+          message: `${serviceName.toUpperCase()} kernel driver is running.`
+        };
+      }
+      if (/STOPPED/i.test(output)) {
+        stoppedService.push(serviceName);
+      }
+    } catch (err) {
+      const details = [
+        String(err?.stdout || ''),
+        String(err?.stderr || ''),
+        String(err?.message || '')
+      ].join('\n');
+      if (/1060|does not exist/i.test(details)) {
+        continue;
+      }
+      unknownErrors.push(`${serviceName}: ${details || err.message}`);
+    }
+  }
+
+  if (stoppedService.length > 0) {
+    const serviceName = stoppedService[0];
+    return {
+      state: 'stopped',
+      serviceName,
+      message: `${serviceName.toUpperCase()} kernel driver is installed and stopped (normal when no VM is active).`
+    };
+  }
+
+  if (unknownErrors.length > 0) {
+    return {
+      state: 'unknown',
+      message: `Could not query VirtualBox kernel driver services. ${unknownErrors[0]}`
+    };
+  }
+
+  return {
+    state: 'not-installed',
+    message: 'VirtualBox kernel driver service was not found (VBoxSup/VBoxDrv).'
+  };
+}
+
+function getVBoxProbeErrorDetails(err) {
+  return [
+    String(err?.stdout || ''),
+    String(err?.stderr || ''),
+    String(err?.message || '')
+  ].join('\n').trim();
+}
+
+function isVBoxDriverRuntimeSignature(details = '') {
+  return /vboxdrvstub|supr3hardenedwinrespawn|verr_open_failed|status_object_name_not_found|\\device\\vboxdrvstub/i.test(String(details || ''));
+}
+
+function readFileTail(filePath, maxBytes = 256 * 1024) {
+  const target = String(filePath || '').trim();
+  if (!target) return '';
+  const bytes = Math.max(4096, Number(maxBytes || 0) || 0);
+  let fd = null;
+  try {
+    const stats = fs.statSync(target);
+    if (!stats.isFile()) return '';
+    const readLength = Math.min(bytes, Number(stats.size || 0));
+    if (readLength <= 0) return '';
+    const buffer = Buffer.alloc(readLength);
+    const start = Math.max(0, Number(stats.size || 0) - readLength);
+    fd = fs.openSync(target, 'r');
+    fs.readSync(fd, buffer, 0, readLength, start);
+    return buffer.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+}
+
+async function detectVBoxRuntimeBlockerFromVmLogs(vmName = '') {
+  if (process.platform !== 'win32') return null;
+  const targetVmName = String(vmName || '').trim();
+  if (!targetVmName) return null;
+
+  try {
+    const info = await virtualbox.getVMInfo(targetVmName);
+    const cfgFile = String(info?.CfgFile || '')
+      .replace(/\\\\/g, '\\')
+      .replace(/^"(.*)"$/, '$1')
+      .trim();
+    if (!cfgFile) return null;
+
+    const logsDir = path.join(path.dirname(cfgFile), 'Logs');
+    if (!fs.existsSync(logsDir)) return null;
+
+    const candidates = fs.readdirSync(logsDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => ({
+        name: entry.name,
+        fullPath: path.join(logsDir, entry.name)
+      }))
+      .filter((entry) => /^VBox(?:Hardening)?\.log(?:\.\d+)?$/i.test(entry.name))
+      .map((entry) => {
+        let mtimeMs = 0;
+        try { mtimeMs = Number(fs.statSync(entry.fullPath).mtimeMs || 0); } catch {}
+        return { ...entry, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, 4);
+
+    for (const candidate of candidates) {
+      const tail = readFileTail(candidate.fullPath, 320 * 1024);
+      if (!tail || !isVBoxDriverRuntimeSignature(tail)) continue;
+
+      const lines = tail.split(/\r?\n/).map((line) => String(line || '').trim()).filter(Boolean);
+      const matchedLine = [...lines].reverse().find((line) => isVBoxDriverRuntimeSignature(line)) || '';
+      const detail = matchedLine || `Driver/runtime failure signature found in ${candidate.name}.`;
+      return {
+        file: candidate.fullPath,
+        details: detail,
+        message: `VirtualBox logs report host driver/runtime failure (${candidate.name}): ${detail}`
+      };
+    }
+  } catch (err) {
+    logger.warn('App', `Could not inspect VirtualBox logs for "${targetVmName}": ${err.message}`);
+  }
+
+  return null;
+}
+
+function rememberVBoxRuntimeBlocker(details = '', source = 'runtime') {
+  if (process.platform !== 'win32') return;
+  const text = String(details || '').trim();
+  if (!text || !isVBoxDriverRuntimeSignature(text)) return;
+  lastVBoxRuntimeBlocker = {
+    detectedAt: Date.now(),
+    source: String(source || 'runtime').trim() || 'runtime',
+    details: text,
+    message: 'VirtualBox kernel runtime is unavailable (VBoxDrvStub/VBoxSup). Reboot, then repair/reinstall VirtualBox as administrator.'
+  };
+}
+
+function rememberRecentVmStartFailure(message = '', options = {}) {
+  if (process.platform !== 'win32') return;
+  const text = String(message || '').trim();
+  if (!text) return;
+  lastVmStartFailure = {
+    detectedAt: Date.now(),
+    message: text,
+    hostLikely: options?.hostLikely === true,
+    vmName: String(options?.vmName || '').trim()
+  };
+}
+
+function getActiveRecentVmStartFailure() {
+  if (!lastVmStartFailure) return null;
+  const ageMs = Date.now() - Number(lastVmStartFailure.detectedAt || 0);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > VM_START_FAILURE_TTL_MS) {
+    lastVmStartFailure = null;
+    return null;
+  }
+  return { ...lastVmStartFailure, ageMs };
+}
+
+function clearRecentVmStartFailure() {
+  lastVmStartFailure = null;
+}
+
+function getActiveVBoxRuntimeBlocker() {
+  if (!lastVBoxRuntimeBlocker) return null;
+  const ageMs = Date.now() - Number(lastVBoxRuntimeBlocker.detectedAt || 0);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > VBOX_RUNTIME_BLOCKER_TTL_MS) {
+    lastVBoxRuntimeBlocker = null;
+    return null;
+  }
+  return { ...lastVBoxRuntimeBlocker, ageMs };
+}
+
+function clearVBoxRuntimeBlocker() {
+  lastVBoxRuntimeBlocker = null;
+}
+
+/**
+ * Deep-check whether the VirtualBox kernel driver can actually load.
+ * VBoxManage CLI commands like 'list hostinfo' do NOT require the kernel driver,
+ * but starting a VM does. This function verifies the driver is truly usable by
+ * checking the driver binary exists and attempting to start the service.
+ */
+function probeVBoxKernelDeviceReady() {
+  if (process.platform !== 'win32') return { ok: true, message: '' };
+
+  const candidates = ['vboxsup', 'vboxdrv'];
+  let foundService = null;
+
+  for (const serviceName of candidates) {
+    try {
+      const qcOutput = String(execSync(`sc.exe qc ${serviceName}`, {
+        encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: 'pipe'
+      }) || '');
+
+      // Verify the driver binary exists on disk
+      const binaryMatch = qcOutput.match(/BINARY_PATH_NAME\s*:\s*(.+)/i);
+      if (binaryMatch) {
+        let driverPath = binaryMatch[1].trim().replace(/"/g, '');
+        // Resolve \SystemRoot\ and \??\ prefixes
+        driverPath = driverPath.replace(/^\\SystemRoot\\/i, `${process.env.SystemRoot || 'C:\\Windows'}\\`);
+        driverPath = driverPath.replace(/^\\\?\?\\/, '');
+        if (driverPath && !driverPath.startsWith('\\') && !fs.existsSync(driverPath)) {
+          return {
+            ok: false,
+            code: 'driver-binary-missing',
+            serviceName,
+            message: `VirtualBox kernel driver binary not found at: ${driverPath}. Reinstall VirtualBox as administrator.`
+          };
+        }
+      }
+
+      // Check current state
+      const queryOutput = String(execSync(`sc.exe query ${serviceName}`, {
+        encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: 'pipe'
+      }) || '');
+
+      if (/RUNNING/i.test(queryOutput)) {
+        return { ok: true, serviceName, state: 'running', message: `${serviceName.toUpperCase()} driver is running.` };
+      }
+
+      if (/STOPPED/i.test(queryOutput)) {
+        foundService = serviceName;
+        // Try to start the service to verify it can actually load
+        try {
+          execSync(`sc.exe start ${serviceName}`, { timeout: 10000, stdio: 'pipe', windowsHide: true });
+          // Wait briefly for driver init
+          try { execSync('ping -n 2 127.0.0.1 >nul', { timeout: 5000, windowsHide: true, shell: true }); } catch {}
+          // Verify it actually reached running
+          const recheck = String(execSync(`sc.exe query ${serviceName}`, {
+            encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: 'pipe'
+          }) || '');
+          if (/RUNNING/i.test(recheck)) {
+            return { ok: true, serviceName, state: 'started', message: `${serviceName.toUpperCase()} driver started successfully.` };
+          }
+          return {
+            ok: false, code: 'driver-start-failed', serviceName,
+            message: `${serviceName.toUpperCase()} driver was started but did not reach running state. Reboot or reinstall VirtualBox.`
+          };
+        } catch (startErr) {
+          const details = [String(startErr?.stdout || ''), String(startErr?.stderr || ''), String(startErr?.message || '')].join('\n');
+          if (/1056|already running|service has already been started/i.test(details)) {
+            return { ok: true, serviceName, state: 'running', message: `${serviceName.toUpperCase()} is already running.` };
+          }
+          if (/access is denied|error 5[^0-9]/i.test(details) || /\b5\s*$/.test(details.trim())) {
+            // Non-admin: can't start the service. The driver MIGHT be fine (demand-start),
+            // but we can't verify. Flag as needing admin.
+            return {
+              ok: false, code: 'driver-needs-admin', serviceName,
+              message: `${serviceName.toUpperCase()} driver is stopped and needs administrator privileges to start. Use "Continue with Admin Privilege" or reboot.`
+            };
+          }
+          // Real failure — driver is broken
+          const shortDetail = details.trim().split('\n').filter(Boolean)[0] || 'unknown error';
+          return {
+            ok: false, code: 'driver-start-failed', serviceName,
+            message: `${serviceName.toUpperCase()} driver failed to start: ${shortDetail}. Reboot, then reinstall VirtualBox as administrator.`
+          };
+        }
+      }
+    } catch (err) {
+      const details = [String(err?.stdout || ''), String(err?.stderr || ''), String(err?.message || '')].join('\n');
+      if (/1060|does not exist/i.test(details)) continue;
+    }
+  }
+
+  if (foundService) {
+    return { ok: false, code: 'driver-unknown', serviceName: foundService, message: 'VirtualBox kernel driver state could not be determined.' };
+  }
+  return { ok: false, code: 'driver-not-installed', message: 'VirtualBox kernel driver service was not found (VBoxSup/VBoxDrv).' };
+}
+
+function probeVBoxRuntimeHealth(vboxPath = '') {
+  const executable = String(vboxPath || '').trim();
+  if (!executable) {
+    return { ok: false, code: 'missing-vboxmanage', message: 'VBoxManage path was not found.' };
+  }
+
+  const probes = [
+    ['list', 'hostinfo'],
+    ['list', 'systemproperties']
+  ];
+
+  let lastDetails = '';
+  for (const args of probes) {
+    try {
+      execFileSync(executable, args, {
+        stdio: 'pipe',
+        timeout: 10000,
+        windowsHide: true
+      });
+
+      // VBoxManage CLI commands succeed without the kernel driver.
+      // On Windows, also verify the kernel device is actually loadable,
+      // because VM starts require it even though CLI queries don't.
+      if (process.platform === 'win32') {
+        const deviceCheck = probeVBoxKernelDeviceReady();
+        if (!deviceCheck.ok) {
+          const code = deviceCheck.code === 'driver-needs-admin' ? 'driver-needs-admin' : 'driver-runtime';
+          if (code === 'driver-runtime') {
+            rememberVBoxRuntimeBlocker(deviceCheck.message, 'kernel-device-probe');
+          }
+          return { ok: false, code, message: deviceCheck.message };
+        }
+      }
+
+      return { ok: true, code: 'ok', message: 'VirtualBox runtime is responsive.' };
+    } catch (err) {
+      const details = getVBoxProbeErrorDetails(err);
+      lastDetails = details || lastDetails;
+      if (isVBoxDriverRuntimeSignature(details)) {
+        rememberVBoxRuntimeBlocker(details, 'runtime-probe');
+        return {
+          ok: false,
+          code: 'driver-runtime',
+          message: 'VirtualBox kernel runtime is unavailable (VBoxDrvStub/VBoxSup). Reboot, then repair/reinstall VirtualBox as administrator.'
+        };
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    code: 'runtime-probe-warning',
+    message: lastDetails
+      ? `VirtualBox runtime probe failed: ${lastDetails}`
+      : 'VirtualBox runtime probe failed.'
+  };
+}
+
+function startVBoxDriverService(preferredService = '') {
+  if (process.platform !== 'win32') {
+    return { success: false, serviceName: '', message: 'VirtualBox driver service control is only available on Windows.' };
+  }
+
+  const candidates = Array.from(new Set(
+    [preferredService, 'vboxsup', 'vboxdrv']
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter(Boolean)
+  ));
+
+  const errors = [];
+  for (const serviceName of candidates) {
+    try {
+      execSync(`sc.exe start ${serviceName}`, { timeout: 10000, stdio: 'pipe' });
+      return { success: true, serviceName, message: `${serviceName.toUpperCase()} driver start requested.` };
+    } catch (err) {
+      const details = getVBoxProbeErrorDetails(err);
+      if (/1056|already running|service has already been started/i.test(details)) {
+        return { success: true, serviceName, message: `${serviceName.toUpperCase()} is already running.` };
+      }
+      if (/1060|does not exist/i.test(details)) {
+        continue;
+      }
+      errors.push(`${serviceName}: ${details || err.message}`);
+    }
+  }
+
+  return {
+    success: false,
+    serviceName: candidates[0] || '',
+    message: errors[0] || 'Could not start VirtualBox kernel driver service.'
+  };
+}
+
+function normalizeWindowsFeatureState(value = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return 'unknown';
+  if (raw === 'enabled' || raw === 'enablepending') return 'enabled';
+  if (raw === 'disabled' || raw === 'disablepending') return 'disabled';
+  return 'unknown';
+}
+
+function isFeatureEnabled(state = '') {
+  return normalizeWindowsFeatureState(state) === 'enabled';
+}
+
+async function collectWindowsVBoxRecoverySignals() {
+  if (process.platform !== 'win32') {
+    return {
+      supported: false,
+      hyperV: 'unknown',
+      hypervisorPlatform: 'unknown',
+      virtualMachinePlatform: 'unknown',
+      memoryIntegrityEnabled: false,
+      pendingReboot: false,
+      warnings: []
+    };
+  }
+
+  const script = `
+    $hyperV = (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -ErrorAction SilentlyContinue).State
+    $hypervisorPlatform = (Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue).State
+    $vmPlatform = (Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue).State
+
+    $hvci = (Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity' -Name Enabled -ErrorAction SilentlyContinue).Enabled
+    $pendingWU = Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\RebootRequired'
+    $pendingCBS = Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending'
+    $pendingFileOps = (Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+
+    [PSCustomObject]@{
+      hyperV = "$hyperV"
+      hypervisorPlatform = "$hypervisorPlatform"
+      virtualMachinePlatform = "$vmPlatform"
+      memoryIntegrityEnabled = ([int]$hvci -eq 1)
+      pendingReboot = [bool]($pendingWU -or $pendingCBS -or $null -ne $pendingFileOps)
+    } | ConvertTo-Json -Compress
+  `;
+
+  try {
+    const raw = await runPowerShellJson(script);
+    return {
+      supported: true,
+      hyperV: normalizeWindowsFeatureState(raw?.hyperV),
+      hypervisorPlatform: normalizeWindowsFeatureState(raw?.hypervisorPlatform),
+      virtualMachinePlatform: normalizeWindowsFeatureState(raw?.virtualMachinePlatform),
+      memoryIntegrityEnabled: raw?.memoryIntegrityEnabled === true,
+      pendingReboot: raw?.pendingReboot === true,
+      warnings: []
+    };
+  } catch (err) {
+    return {
+      supported: true,
+      hyperV: 'unknown',
+      hypervisorPlatform: 'unknown',
+      virtualMachinePlatform: 'unknown',
+      memoryIntegrityEnabled: false,
+      pendingReboot: false,
+      warnings: [err.message]
+    };
+  }
+}
+
+function buildVBoxHostRecoverySteps({
+  isAdmin = false,
+  runtimeCode = '',
+  driverState = '',
+  hostSignals = null
+} = {}) {
+  const steps = [];
+  const addStep = (value) => {
+    const text = String(value || '').trim();
+    if (!text || steps.includes(text)) return;
+    steps.push(text);
+  };
+
+  if (!isAdmin) {
+    addStep('Use Continue with Admin Privilege in VM Xposed before running host recovery actions.');
+  }
+
+  if (hostSignals?.pendingReboot) {
+    addStep('Windows has a pending reboot. Restart the host first, then retry VM Xposed.');
+  }
+
+  if (hostSignals?.memoryIntegrityEnabled) {
+    addStep('Core Isolation / Memory Integrity is enabled. Disable it temporarily, reboot, then repair VirtualBox.');
+  }
+
+  if (
+    isFeatureEnabled(hostSignals?.hyperV)
+    || isFeatureEnabled(hostSignals?.hypervisorPlatform)
+    || isFeatureEnabled(hostSignals?.virtualMachinePlatform)
+  ) {
+    addStep('Disable Hyper-V, Hypervisor Platform, and Virtual Machine Platform for maximum VirtualBox compatibility, then reboot.');
+  }
+
+  if (driverState === 'not-installed') {
+    addStep('Repair or reinstall VirtualBox as administrator so VBoxSup/VBoxDrv driver services are re-registered.');
+  }
+
+  if (runtimeCode === 'driver-runtime') {
+    addStep('Run VirtualBox installer in Repair mode as administrator, then reboot Windows.');
+  } else if (runtimeCode === 'runtime-probe-warning') {
+    addStep('Run "VBoxManage.exe list hostinfo" from an elevated terminal and review host runtime errors.');
+  }
+
+  return steps;
+}
+
+function getWindowsHostRecoveryActions(hostSignals = null) {
+  if (process.platform !== 'win32') return [];
+
+  const actions = [];
+  const hasFeatureConflict = !!(
+    isFeatureEnabled(hostSignals?.hyperV)
+    || isFeatureEnabled(hostSignals?.hypervisorPlatform)
+    || isFeatureEnabled(hostSignals?.virtualMachinePlatform)
+  );
+
+  if (hasFeatureConflict) {
+    actions.push({
+      id: 'disable-hypervisor-stack',
+      label: 'Disable Hyper-V Stack',
+      requiresAdmin: true,
+      description: 'Automatically disable Hyper-V, Hypervisor Platform, and Virtual Machine Platform (reboot required).'
+    });
+    actions.push({
+      id: 'open-windows-features',
+      label: 'Open Windows Features',
+      requiresAdmin: false,
+      description: 'Open optional Windows features to turn Hyper-V related features off manually.'
+    });
+  }
+
+  if (hostSignals?.memoryIntegrityEnabled) {
+    actions.push({
+      id: 'open-core-isolation',
+      label: 'Open Core Isolation',
+      requiresAdmin: false,
+      description: 'Open Device Security so you can disable Memory Integrity and reboot.'
+    });
+  }
+
+  return actions;
+}
+
+function summarizeWindowsVBoxHostBlockers({
+  hostSignals = null,
+  runtime = null,
+  driver = null,
+  hasVBoxAccess = true,
+  recentVmStartFailure = null
+} = {}) {
+  const isWindows = process.platform === 'win32';
+  const runtimeCode = String(runtime?.code || '').trim().toLowerCase();
+  const runtimeMessage = String(runtime?.message || '').trim();
+  const driverState = String(driver?.state || '').trim().toLowerCase();
+  const driverMessage = String(driver?.message || '').trim();
+
+  const hasHypervisorConflict = isWindows && (
+    isFeatureEnabled(hostSignals?.hyperV)
+    || isFeatureEnabled(hostSignals?.hypervisorPlatform)
+    || isFeatureEnabled(hostSignals?.virtualMachinePlatform)
+  );
+  const hasMemoryIntegrityConflict = isWindows && hostSignals?.memoryIntegrityEnabled === true;
+  const hasPendingReboot = isWindows && hostSignals?.pendingReboot === true;
+
+  const hasDriverRuntimeIssue = isWindows && (runtimeCode === 'driver-runtime' || runtimeCode === 'driver-needs-admin');
+  const hasRuntimeWarning = isWindows
+    && runtime
+    && runtime.ok === false
+    && runtimeCode !== 'driver-runtime'
+    && runtimeCode !== 'driver-needs-admin'
+    && runtimeCode !== 'missing-vboxmanage';
+  const hasMissingVBoxManage = isWindows && runtimeCode === 'missing-vboxmanage';
+  const hasMissingDriverService = isWindows && driverState === 'not-installed';
+  const recentStartFailureMessage = String(recentVmStartFailure?.message || '').trim();
+  const recentStartFailureHostLikely = recentVmStartFailure?.hostLikely === true;
+  const hasRecentStartFailure = isWindows && recentStartFailureMessage.length > 0;
+  const hasDriverIssue = hasDriverRuntimeIssue || hasMissingDriverService || (hasMissingVBoxManage && !hasVBoxAccess);
+  const hasRuntimeIssue = hasDriverRuntimeIssue || hasRuntimeWarning || hasRecentStartFailure;
+
+  const blockerReasons = [];
+  const advisoryReasons = [];
+  const addUnique = (target, reason) => {
+    const text = String(reason || '').trim();
+    if (!text || target.includes(text)) return;
+    target.push(text);
+  };
+
+  if (hasDriverRuntimeIssue) {
+    addUnique(blockerReasons, runtimeMessage || 'VirtualBox kernel runtime is unavailable.');
+  } else if (hasMissingDriverService) {
+    addUnique(blockerReasons, driverMessage || 'VirtualBox kernel driver service is not installed.');
+  } else if (hasMissingVBoxManage && !hasVBoxAccess) {
+    addUnique(blockerReasons, 'VirtualBox tools are missing or inaccessible.');
+  }
+
+  if (hasHypervisorConflict) {
+    addUnique(blockerReasons, 'Hyper-V stack is enabled');
+  }
+  if (hasMemoryIntegrityConflict) {
+    addUnique(blockerReasons, 'Memory Integrity is enabled');
+  }
+
+  if (hasPendingReboot) {
+    addUnique(advisoryReasons, 'Windows restart is pending');
+  }
+  if (hasRuntimeWarning) {
+    addUnique(advisoryReasons, runtimeMessage || 'VirtualBox runtime warning detected.');
+  }
+  if (hasRecentStartFailure) {
+    const failureSummary = `Recent VM start failed: ${recentStartFailureMessage}`;
+    if (recentStartFailureHostLikely) {
+      addUnique(blockerReasons, failureSummary);
+    } else {
+      addUnique(advisoryReasons, failureSummary);
+    }
+  }
+
+  const hasAnyBlocker = blockerReasons.length > 0;
+  const hasAnyIssue = hasAnyBlocker || advisoryReasons.length > 0;
+  const primaryMessage = hasAnyBlocker
+    ? `Host fix needed: ${blockerReasons.join(' · ')}.`
+    : (
+      advisoryReasons.length > 0
+        ? `Host attention needed: ${advisoryReasons.join(' · ')}.`
+        : 'Host virtualization checks look healthy.'
+    );
+
+  return {
+    platform: process.platform,
+    hasAnyIssue,
+    hasAnyBlocker,
+    hasDriverIssue,
+    hasRuntimeIssue,
+    hasHypervisorConflict,
+    hasMemoryIntegrityConflict,
+    hasPendingReboot,
+    hasRecentStartFailure,
+    runtimeCode,
+    driverState,
+    blockerReasons,
+    advisoryReasons,
+    primaryMessage
+  };
+}
+
+function runWindowsCommand(command, args, timeout = 120000) {
+  const result = spawnSync(command, args, {
+    windowsHide: true,
+    encoding: 'utf8',
+    timeout
+  });
+
+  const stdout = String(result?.stdout || '').trim();
+  const stderr = String(result?.stderr || '').trim();
+  const details = [stdout, stderr].filter(Boolean).join('\n').trim();
+
+  if (result?.error) {
+    return {
+      success: false,
+      code: -1,
+      details: result.error.message
+    };
+  }
+
+  return {
+    success: Number(result?.status) === 0,
+    code: Number.isInteger(result?.status) ? Number(result.status) : -1,
+    details
+  };
+}
+
+function isBenignDismFeatureResult(details = '') {
+  const msg = String(details || '').toLowerCase();
+  return (
+    msg.includes('0x800f080c')
+    || msg.includes('feature name')
+    || msg.includes('unknown')
+    || msg.includes('not recognized as a valid feature')
+    || msg.includes('already disabled')
+  );
+}
+
+async function disableWindowsHypervisorStack() {
+  if (process.platform !== 'win32') {
+    return {
+      success: false,
+      unsupported: true,
+      message: 'This action is available on Windows only.'
+    };
+  }
+
+  if (!isRunningAsAdmin()) {
+    return {
+      success: false,
+      requiresAdmin: true,
+      message: 'Administrator mode is required to disable Windows virtualization blockers.'
+    };
+  }
+
+  const attemptedActions = [];
+  const warnings = [];
+  const failures = [];
+  const featureNames = [
+    'Microsoft-Hyper-V-All',
+    'HypervisorPlatform',
+    'VirtualMachinePlatform'
+  ];
+
+  for (const featureName of featureNames) {
+    const result = runWindowsCommand(
+      'dism.exe',
+      ['/online', '/Disable-Feature', `/FeatureName:${featureName}`, '/NoRestart'],
+      180000
+    );
+
+    attemptedActions.push(`DISM disable ${featureName}: ${result.success ? 'OK' : `exit ${result.code}`}`);
+
+    if (result.success) continue;
+    if (isBenignDismFeatureResult(result.details)) {
+      warnings.push(`${featureName}: ${result.details || 'Feature is not present on this Windows edition.'}`);
+      continue;
+    }
+
+    failures.push(`${featureName}: ${result.details || `exit code ${result.code}`}`);
+  }
+
+  const hypervisorLaunch = runWindowsCommand(
+    'bcdedit.exe',
+    ['/set', 'hypervisorlaunchtype', 'off'],
+    20000
+  );
+  attemptedActions.push(`BCDEdit hypervisorlaunchtype off: ${hypervisorLaunch.success ? 'OK' : `exit ${hypervisorLaunch.code}`}`);
+
+  if (!hypervisorLaunch.success) {
+    failures.push(`bcdedit: ${hypervisorLaunch.details || `exit code ${hypervisorLaunch.code}`}`);
+  }
+
+  if (failures.length > 0) {
+    return {
+      success: false,
+      message: 'Some Windows virtualization blockers could not be disabled automatically.',
+      attemptedActions,
+      warnings,
+      failures,
+      rebootRequired: false
+    };
+  }
+
+  return {
+    success: true,
+    message: 'Windows virtualization blockers were disabled. Restart Windows, then run VM Xposed again.',
+    attemptedActions,
+    warnings,
+    rebootRequired: true
+  };
+}
+
+async function executeWindowsHostRecoveryAction(actionId = '') {
+  if (process.platform !== 'win32') {
+    return { success: false, unsupported: true, message: 'This action is available on Windows only.' };
+  }
+
+  const action = String(actionId || '').trim().toLowerCase();
+  if (!action) {
+    return { success: false, message: 'Recovery action is required.' };
+  }
+
+  if (action === 'disable-hypervisor-stack') {
+    return disableWindowsHypervisorStack();
+  }
+
+  if (action === 'open-windows-features') {
+    try {
+      const child = spawn('optionalfeatures.exe', [], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false
+      });
+      child.unref();
+      return { success: true, message: 'Windows Features opened. Disable Hyper-V related features, then reboot.' };
+    } catch (err) {
+      return { success: false, message: `Could not open Windows Features: ${err.message}` };
+    }
+  }
+
+  if (action === 'open-core-isolation') {
+    try {
+      await shell.openExternal('ms-settings:windowsdefender-device-security');
+      return { success: true, message: 'Device Security settings opened. Open Core isolation details and disable Memory Integrity, then reboot.' };
+    } catch (err) {
+      return { success: false, message: `Could not open Device Security settings: ${err.message}` };
+    }
+  }
+
+  return { success: false, message: `Unknown recovery action: ${action}` };
+}
+
+async function prepareVBoxHostRecovery() {
+  if (process.platform !== 'win32') {
+    return {
+      success: false,
+      unsupported: true,
+      message: 'Host VBox driver recovery preparation is available on Windows only.',
+      steps: [],
+      hostActions: []
+    };
+  }
+
+  const vboxPath = resolveVBoxManagePathForChecks();
+  if (!vboxPath) {
+    return {
+      success: false,
+      message: 'VBoxManage was not found. Configure VirtualBox Path in Settings or reinstall VirtualBox.',
+      steps: [
+        'Install or repair VirtualBox.',
+        'Set Settings > Advanced > VirtualBox Path to VBoxManage.exe if it is in a custom location.'
+      ],
+      hostActions: []
+    };
+  }
+
+  const admin = isRunningAsAdmin();
+  const hostSignals = await collectWindowsVBoxRecoverySignals();
+  let runtime = probeVBoxRuntimeHealth(vboxPath);
+  let driver = getVBoxSupDriverState();
+  const attemptedActions = [];
+
+  if (runtime.code === 'driver-runtime' && admin && driver.state !== 'not-installed') {
+    const startResult = startVBoxDriverService(String(driver.serviceName || 'vboxsup'));
+    attemptedActions.push(startResult.message);
+    if (startResult.success) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      runtime = probeVBoxRuntimeHealth(vboxPath);
+      driver = getVBoxSupDriverState();
+    }
+  }
+
+  const steps = buildVBoxHostRecoverySteps({
+    isAdmin: admin,
+    runtimeCode: runtime.code,
+    driverState: driver.state,
+    hostSignals
+  });
+
+  if (runtime.ok) {
+    const message = attemptedActions.length > 0
+      ? 'Host recovery preparation completed and VirtualBox runtime is now responsive.'
+      : 'Host checks complete. VirtualBox runtime is already responsive.';
+    return {
+      success: true,
+      prepared: attemptedActions.length > 0,
+      message,
+      runtime,
+      driver,
+      hostSignals,
+      steps,
+      hostActions: getWindowsHostRecoveryActions(hostSignals),
+      attemptedActions
+    };
+  }
+
+  const message = runtime.code === 'driver-runtime'
+    ? 'Host recovery preparation completed, but VirtualBox kernel runtime is still unavailable.'
+    : `Host recovery preparation completed with runtime warning: ${runtime.message}`;
+
+  return {
+    success: false,
+    prepared: attemptedActions.length > 0,
+    message,
+    runtime,
+    driver,
+    hostSignals,
+    steps,
+    hostActions: getWindowsHostRecoveryActions(hostSignals),
+    attemptedActions,
+    requiresAdmin: !admin && runtime.code === 'driver-runtime'
+  };
 }
 
 /**
  * Get comprehensive system permissions report.
  */
-function getPermissionsReport() {
+async function getPermissionsReport() {
+  const hostSignals = process.platform === 'win32'
+    ? await collectWindowsVBoxRecoverySignals()
+    : null;
   const report = {
     isAdmin: isRunningAsAdmin(),
     platform: process.platform,
-    checks: []
+    checks: [],
+    hostSignals,
+    hostActions: getWindowsHostRecoveryActions(hostSignals)
   };
+  const vboxPath = resolveVBoxManagePathForChecks();
+  let hasVBoxAccess = false;
+  let runtime = null;
+  let driver = null;
+  const recentVmStartFailure = getActiveRecentVmStartFailure();
 
   // Check admin status
   report.checks.push({
@@ -1553,28 +2592,66 @@ function getPermissionsReport() {
 
   // Check VirtualBox access
   try {
-    if (process.platform === 'win32') {
-      execSync('"C:\\Program Files\\Oracle\\VirtualBox\\VBoxManage.exe" --version', { stdio: 'ignore' });
-      report.checks.push({ name: 'VirtualBox Access', status: 'granted', description: 'VBoxManage is accessible and responsive' });
+    if (!vboxPath) {
+      throw new Error('VBoxManage path not found');
     }
+    execFileSync(vboxPath, ['--version'], { stdio: 'ignore', timeout: 5000, windowsHide: true });
+    hasVBoxAccess = true;
+    report.checks.push({ name: 'VirtualBox Access', status: 'granted', description: `VBoxManage is accessible (${vboxPath})` });
   } catch {
     report.checks.push({ name: 'VirtualBox Access', status: 'unavailable', description: 'VBoxManage not found or not working' });
   }
 
   // Check VBoxSup driver (the kernel driver VirtualBox needs)
   if (process.platform === 'win32') {
-    try {
-      const svcResult = execSync('sc.exe query vboxsup', { encoding: 'utf8', timeout: 5000 });
-      const isRunning = svcResult.includes('RUNNING');
-      report.checks.push({
-        name: 'VBox Kernel Driver',
-        status: isRunning ? 'granted' : 'required',
-        description: isRunning ? 'VBoxSup driver is loaded and running' : 'VBoxSup driver is stopped — V Os cannot start'
-      });
-    } catch {
-      report.checks.push({ name: 'VBox Kernel Driver', status: 'unknown', description: 'Could not check VBoxSup driver status' });
+    driver = getVBoxSupDriverState();
+    runtime = probeVBoxRuntimeHealth(vboxPath);
+    const activeRuntimeBlocker = getActiveVBoxRuntimeBlocker();
+    if (activeRuntimeBlocker && runtime.code !== 'driver-runtime') {
+      runtime = {
+        ok: false,
+        code: 'driver-runtime',
+        message: `${activeRuntimeBlocker.message} (Detected during recent VM start checks.)`
+      };
+    }
+    const hasRuntimeWarning = !runtime.ok && runtime.code === 'runtime-probe-warning';
+    if (!vboxPath) {
+      report.checks.push({ name: 'VBox Kernel Driver', status: 'unavailable', description: 'VirtualBox is not installed or VBoxManage could not be found.' });
+    } else if (!runtime.ok && runtime.code === 'driver-runtime') {
+      report.checks.push({ name: 'VBox Kernel Driver', status: 'unavailable', description: runtime.message });
+    } else if (driver.state === 'running') {
+      const description = runtime.ok || runtime.code !== 'runtime-probe-warning'
+        ? driver.message
+        : `${driver.message} Runtime probe warning: ${runtime.message}`;
+      report.checks.push({ name: 'VBox Kernel Driver', status: hasRuntimeWarning ? 'warning' : 'granted', description });
+    } else if (driver.state === 'stopped') {
+      const baseDescription = `${String(driver.serviceName || 'vboxsup').toUpperCase()} is installed (on-demand).`;
+      // When the driver is stopped and runtime probe returned a driver-needs-admin or driver-runtime issue,
+      // don't report 'ok' — the driver can't actually load for VM starts.
+      if (!runtime.ok && (runtime.code === 'driver-runtime' || runtime.code === 'driver-needs-admin')) {
+        report.checks.push({ name: 'VBox Kernel Driver', status: 'unavailable', description: runtime.message });
+      } else {
+        const description = runtime.ok || runtime.code !== 'runtime-probe-warning'
+          ? baseDescription
+          : `${baseDescription} Runtime probe warning: ${runtime.message}`;
+        report.checks.push({ name: 'VBox Kernel Driver', status: hasRuntimeWarning ? 'warning' : 'ok', description });
+      }
+    } else if (driver.state === 'not-installed') {
+      report.checks.push({ name: 'VBox Kernel Driver', status: 'unavailable', description: driver.message });
+    } else if (!runtime.ok && runtime.code === 'runtime-probe-warning') {
+      report.checks.push({ name: 'VBox Kernel Driver', status: 'warning', description: runtime.message });
+    } else {
+      report.checks.push({ name: 'VBox Kernel Driver', status: 'unknown', description: driver.message });
     }
   }
+
+  report.hostBlockers = summarizeWindowsVBoxHostBlockers({
+    hostSignals,
+    runtime,
+    driver,
+    hasVBoxAccess,
+    recentVmStartFailure
+  });
 
   // Check disk write access
   const installPath = getDefaultInstallPath();
@@ -1615,7 +2692,7 @@ async function runPowerShellJson(command) {
   return new Promise((resolve, reject) => {
     execFile(
       'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+      ['-NoProfile', '-Command', command],
       { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 * 2 },
       (err, stdout, stderr) => {
         if (err) {
@@ -1654,6 +2731,10 @@ async function getRealtimeHostMetrics() {
     return {
       success: true,
       timestamp: new Date().toISOString(),
+      cpuLoadPercent: 0,
+      memoryUsagePercent: 0,
+      totalMemoryGb: 0,
+      usedMemoryGb: 0,
       diskReadBytesPerSec: 0,
       diskWriteBytesPerSec: 0,
       netRxBytesPerSec: 0,
@@ -1663,12 +2744,29 @@ async function getRealtimeHostMetrics() {
   }
 
   const normalizeMetrics = (metrics = {}) => {
+    const normalizePercent = (value) => {
+      const parsed = Number(value || 0);
+      if (!Number.isFinite(parsed)) return 0;
+      return Math.max(0, Math.min(100, parsed));
+    };
     const rawAdapters = Array.isArray(metrics.adapters)
       ? metrics.adapters
       : (metrics.adapters && typeof metrics.adapters === 'object' ? [metrics.adapters] : []);
     return {
       success: metrics.success !== false,
       timestamp: metrics.timestamp || new Date().toISOString(),
+      cpuLoadPercent: normalizePercent(
+        metrics.cpuLoadPercent
+        ?? metrics.cpuPercent
+        ?? metrics.CPULoadPercent
+      ),
+      memoryUsagePercent: normalizePercent(
+        metrics.memoryUsagePercent
+        ?? metrics.memUsedPercent
+        ?? metrics.MemoryUsagePercent
+      ),
+      totalMemoryGb: Number(metrics.totalMemoryGb || metrics.memTotalGb || 0),
+      usedMemoryGb: Number(metrics.usedMemoryGb || metrics.memUsedGb || 0),
       diskReadBytesPerSec: Number(metrics.diskReadBytesPerSec || 0),
       diskWriteBytesPerSec: Number(metrics.diskWriteBytesPerSec || 0),
       netRxBytesPerSec: Number(metrics.netRxBytesPerSec || 0),
@@ -1685,13 +2783,34 @@ async function getRealtimeHostMetrics() {
     const adapterCount = Array.isArray(metrics.adapters) ? metrics.adapters.length : 0;
     const networkThroughput = Number(metrics.netRxBytesPerSec || 0) + Number(metrics.netTxBytesPerSec || 0);
     const diskThroughput = Number(metrics.diskReadBytesPerSec || 0) + Number(metrics.diskWriteBytesPerSec || 0);
-    return (adapterCount * 10) + (networkThroughput > 0 ? 4 : 0) + (diskThroughput > 0 ? 2 : 0);
+    const cpuSignal = Number(metrics.cpuLoadPercent || 0) > 0 ? 3 : 0;
+    const memSignal = Number(metrics.memoryUsagePercent || 0) > 0 ? 3 : 0;
+    return (adapterCount * 10) + (networkThroughput > 0 ? 4 : 0) + (diskThroughput > 0 ? 2 : 0) + cpuSignal + memSignal;
   };
 
   const psScript = [
     "$ErrorActionPreference = 'SilentlyContinue'",
-    "$diskRead = 0; $diskWrite = 0; $rx = 0; $tx = 0; $adapters = @()",
+    "$diskRead = 0; $diskWrite = 0; $rx = 0; $tx = 0; $cpuLoad = 0; $memUsedPct = 0; $memTotalGb = 0; $memUsedGb = 0; $adapters = @()",
     "$excludePattern = 'Loopback|isatap|Teredo|Pseudo|VMware|VirtualBox Host-Only|Npcap|Bluetooth|vEthernet|Hyper-V|TAP-Windows|Host-Only|docker|vethernet'",
+    "try {",
+    "  $cpuRow = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor | Where-Object { $_.Name -eq '_Total' } | Select-Object -First 1 PercentProcessorTime",
+    "  if ($cpuRow -and $cpuRow.PSObject.Properties['PercentProcessorTime']) {",
+    "    $cpuLoad = [double]$cpuRow.PercentProcessorTime",
+    "  }",
+    "} catch {}",
+    "try {",
+    "  $osInfo = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1 TotalVisibleMemorySize,FreePhysicalMemory",
+    "  if ($osInfo) {",
+    "    $totalKb = [double]$osInfo.TotalVisibleMemorySize",
+    "    $freeKb = [double]$osInfo.FreePhysicalMemory",
+    "    if ($totalKb -gt 0) {",
+    "      $usedKb = [math]::Max(0, $totalKb - $freeKb)",
+    "      $memUsedPct = ($usedKb / $totalKb) * 100",
+    "      $memTotalGb = [math]::Round($totalKb / 1MB, 2)",
+    "      $memUsedGb = [math]::Round($usedKb / 1MB, 2)",
+    "    }",
+    "  }",
+    "} catch {}",
     "try {",
     "  $disk = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk | Where-Object { $_.Name -eq '_Total' } | Select-Object -First 1 DiskReadBytesPersec,DiskWriteBytesPersec",
     "  if ($disk) {",
@@ -1718,6 +2837,10 @@ async function getRealtimeHostMetrics() {
     "[PSCustomObject]@{",
     "  success = $true",
     "  timestamp = (Get-Date).ToString('o')",
+    "  cpuLoadPercent = [double]$cpuLoad",
+    "  memoryUsagePercent = [double]$memUsedPct",
+    "  totalMemoryGb = [double]$memTotalGb",
+    "  usedMemoryGb = [double]$memUsedGb",
     "  diskReadBytesPerSec = [double]$diskRead",
     "  diskWriteBytesPerSec = [double]$diskWrite",
     "  netRxBytesPerSec = [double]$rx",
@@ -1728,8 +2851,37 @@ async function getRealtimeHostMetrics() {
 
   const fallbackScript = [
     "$ErrorActionPreference = 'SilentlyContinue'",
-    "$diskRead = 0; $diskWrite = 0; $rx = 0; $tx = 0; $adapters = @()",
+    "$diskRead = 0; $diskWrite = 0; $rx = 0; $tx = 0; $cpuLoad = 0; $memUsedPct = 0; $memTotalGb = 0; $memUsedGb = 0; $adapters = @()",
     "$excludePattern = 'Loopback|isatap|Teredo|Pseudo|VMware|VirtualBox Host-Only|Npcap|Bluetooth|vEthernet|Hyper-V|TAP-Windows|Host-Only|docker|vethernet'",
+    "try {",
+    "  $cpuCounter = Get-Counter -Counter '\\Processor(_Total)\\% Processor Time' -SampleInterval 1 -MaxSamples 1",
+    "  foreach ($sample in $cpuCounter.CounterSamples) {",
+    "    if ($sample.Path -like '*% Processor Time') {",
+    "      $cpuLoad = [double]$sample.CookedValue",
+    "    }",
+    "  }",
+    "} catch {}",
+    "try {",
+    "  $memoryCounter = Get-Counter -Counter '\\Memory\\% Committed Bytes In Use' -SampleInterval 1 -MaxSamples 1",
+    "  foreach ($sample in $memoryCounter.CounterSamples) {",
+    "    if ($sample.Path -like '*% Committed Bytes In Use') {",
+    "      $memUsedPct = [double]$sample.CookedValue",
+    "    }",
+    "  }",
+    "} catch {}",
+    "try {",
+    "  $osInfo = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1 TotalVisibleMemorySize,FreePhysicalMemory",
+    "  if ($osInfo) {",
+    "    $totalKb = [double]$osInfo.TotalVisibleMemorySize",
+    "    $freeKb = [double]$osInfo.FreePhysicalMemory",
+    "    if ($totalKb -gt 0) {",
+    "      $usedKb = [math]::Max(0, $totalKb - $freeKb)",
+    "      if ($memUsedPct -le 0) { $memUsedPct = ($usedKb / $totalKb) * 100 }",
+    "      $memTotalGb = [math]::Round($totalKb / 1MB, 2)",
+    "      $memUsedGb = [math]::Round($usedKb / 1MB, 2)",
+    "    }",
+    "  }",
+    "} catch {}",
     "try {",
     "  $diskCounter = Get-Counter -Counter @('\\PhysicalDisk(_Total)\\Disk Read Bytes/sec','\\PhysicalDisk(_Total)\\Disk Write Bytes/sec') -SampleInterval 1 -MaxSamples 1",
     "  foreach ($sample in $diskCounter.CounterSamples) {",
@@ -1763,6 +2915,10 @@ async function getRealtimeHostMetrics() {
     "[PSCustomObject]@{",
     "  success = $true",
     "  timestamp = (Get-Date).ToString('o')",
+    "  cpuLoadPercent = [double]$cpuLoad",
+    "  memoryUsagePercent = [double]$memUsedPct",
+    "  totalMemoryGb = [double]$memTotalGb",
+    "  usedMemoryGb = [double]$memUsedGb",
     "  diskReadBytesPerSec = [double]$diskRead",
     "  diskWriteBytesPerSec = [double]$diskWrite",
     "  netRxBytesPerSec = [double]$rx",
@@ -1791,6 +2947,10 @@ async function getRealtimeHostMetrics() {
   return {
     success: false,
     timestamp: new Date().toISOString(),
+    cpuLoadPercent: 0,
+    memoryUsagePercent: 0,
+    totalMemoryGb: 0,
+    usedMemoryGb: 0,
     diskReadBytesPerSec: 0,
     diskWriteBytesPerSec: 0,
     netRxBytesPerSec: 0,
@@ -1882,18 +3042,22 @@ function createWindow() {
     visualEffectState: 'active',  // Force acrylic state
     show: false,  // Show after ready-to-show to prevent white flash
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: prodUtils.getPreloadScriptPath(),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true,  // ✅ SANDBOX ENABLED FOR SECURITY
+      enableRemoteModule: false,
+      allowRunningInsecureContent: false,
+      webSecurity: true,
+      spellcheck: true
     }
   });
 
   // Build application menu
   buildAppMenu();
 
-  // Load the UI
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // Load the UI using production-safe path
+  mainWindow.loadFile(prodUtils.getRendererHtmlPath());
 
   // Show window when ready (prevents white flash)
   mainWindow.once('ready-to-show', () => {
@@ -2021,12 +3185,25 @@ function buildAppMenu() {
         {
           label: 'Open VirtualBox Manager',
           click: () => {
-            const vboxPath = process.platform === 'win32'
-              ? 'C:\\Program Files\\Oracle\\VirtualBox\\VirtualBox.exe'
-              : 'virtualbox';
-            exec(`"${vboxPath}"`, (err) => {
-              if (err) logger.warn('App', 'Could not open VirtualBox Manager');
-            });
+            try {
+              if (process.platform === 'win32') {
+                // Use production-safe VirtualBox detection
+                const vboxPath = prodUtils.findVirtualBoxOnWindows();
+                if (!vboxPath) {
+                  dialog.showErrorBox('VirtualBox Not Found', 'VirtualBox installation could not be located.');
+                  return;
+                }
+                // Use execFile with array args to avoid shell injection
+                const { execFile: execFileSync } = require('child_process');
+                execFileSync(vboxPath, [], { detached: true, stdio: 'ignore' });
+              } else {
+                // Linux/macOS
+                exec('virtualbox &', { detached: true });
+              }
+            } catch (err) {
+              logger.warn('App', `Could not open VirtualBox Manager: ${err.message}`);
+              dialog.showErrorBox('Error', `Could not launch VirtualBox: ${err.message}`);
+            }
           }
         },
         { type: 'separator' },
@@ -2136,7 +3313,7 @@ function registerIPC() {
         startupView: sanitizeEnum(prefs.startupView, ['dashboard', 'machines', 'wizard', 'library', 'snapshots', 'storage', 'network', 'settings', 'download', 'credits'], sanitizeEnum(storedPrefs.startupView, ['dashboard', 'machines', 'wizard', 'library', 'snapshots', 'storage', 'network', 'settings', 'download', 'credits'], 'dashboard')),
         notificationLevel: sanitizeEnum(prefs.notificationLevel, ['all', 'important', 'minimal'], sanitizeEnum(storedPrefs.notificationLevel, ['all', 'important', 'minimal'], 'important')),
         virtualBoxPath: sanitize(prefs.virtualBoxPath, sanitize(storedPrefs.virtualBoxPath)),
-        adminModePolicy: sanitizeEnum(prefs.adminModePolicy, ['auto', 'manual'], sanitizeEnum(storedPrefs.adminModePolicy, ['auto', 'manual'], 'auto')),
+        adminModePolicy: 'manual',
         autoRepairLevel: sanitizeEnum(prefs.autoRepairLevel, ['none', 'safe', 'full'], sanitizeEnum(storedPrefs.autoRepairLevel, ['none', 'safe', 'full'], 'safe')),
         maxHostRamPercent: sanitizeInt(prefs.maxHostRamPercent, 40, 95, sanitizeInt(storedPrefs.maxHostRamPercent, 40, 95, 75)),
         maxHostCpuPercent: sanitizeInt(prefs.maxHostCpuPercent, 40, 95, sanitizeInt(storedPrefs.maxHostCpuPercent, 40, 95, 75)),
@@ -2234,6 +3411,10 @@ function registerIPC() {
       return {
         success: false,
         timestamp: new Date().toISOString(),
+        cpuLoadPercent: 0,
+        memoryUsagePercent: 0,
+        totalMemoryGb: 0,
+        usedMemoryGb: 0,
         diskReadBytesPerSec: 0,
         diskWriteBytesPerSec: 0,
         netRxBytesPerSec: 0,
@@ -2341,7 +3522,7 @@ function registerIPC() {
 
   // ─── Permissions & Admin ────────────────────────────────────────
   ipcMain.handle('permissions:check', async () => {
-    return getPermissionsReport();
+    return await getPermissionsReport();
   });
 
   ipcMain.handle('permissions:restartAsAdmin', async () => {
@@ -2352,16 +3533,80 @@ function registerIPC() {
     return isRunningAsAdmin();
   });
 
+  ipcMain.handle('permissions:prepareHostRecovery', async () => {
+    try {
+      return await prepareVBoxHostRecovery();
+    } catch (err) {
+      return {
+        success: false,
+        message: `Host recovery preparation failed: ${err.message}`,
+        steps: []
+      };
+    }
+  });
+
+  ipcMain.handle('permissions:runHostRecoveryAction', async (event, actionId) => {
+    try {
+      return await executeWindowsHostRecoveryAction(actionId);
+    } catch (err) {
+      return {
+        success: false,
+        message: `Host recovery action failed: ${err.message}`
+      };
+    }
+  });
+
   // ─── Fix VBoxSup Driver ─────────────────────────────────────────
   ipcMain.handle('permissions:fixDriver', async () => {
     try {
-      // Try starting via UAC elevation
-      execSync('powershell -Command "Start-Process sc.exe -ArgumentList \'start\',\'vboxsup\' -Verb RunAs -Wait"',
-        { timeout: 15000 });
-      // Verify
-      const check = execSync('sc.exe query vboxsup', { encoding: 'utf8', timeout: 5000 });
-      const running = check.includes('RUNNING');
-      return { success: running, message: running ? 'VBoxSup driver started successfully' : 'Driver start may require a reboot' };
+      const vboxPath = resolveVBoxManagePathForChecks();
+      if (!vboxPath) {
+        return {
+          success: false,
+          message: 'VBoxManage was not found. Configure VirtualBox Path in Settings or reinstall VirtualBox.'
+        };
+      }
+
+      let runtime = probeVBoxRuntimeHealth(vboxPath);
+      if (runtime.ok) {
+        return { success: true, message: 'VirtualBox runtime is responsive. Driver is ready.' };
+      }
+
+      const current = getVBoxSupDriverState();
+      if (current.state === 'not-installed') {
+        return { success: false, message: 'VirtualBox kernel driver is not installed. Reinstall or repair VirtualBox as administrator.' };
+      }
+      if (runtime.code !== 'driver-runtime') {
+        return {
+          success: true,
+          message: `VirtualBox driver service is present. Runtime warning: ${runtime.message}`
+        };
+      }
+      if (!isRunningAsAdmin()) {
+        return {
+          success: false,
+          requiresAdmin: true,
+          message: 'Continue with Admin Privilege first, then try Fix Driver again.'
+        };
+      }
+
+      const startResult = startVBoxDriverService(String(current.serviceName || 'vboxsup'));
+      if (!startResult.success) {
+        return { success: false, message: startResult.message };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      runtime = probeVBoxRuntimeHealth(vboxPath);
+      if (runtime.ok) {
+        return { success: true, message: `${startResult.message} VirtualBox runtime is now healthy.` };
+      }
+      if (runtime.code === 'driver-runtime') {
+        return {
+          success: false,
+          message: `${runtime.message} Run Prepare Host in Dashboard, then reboot and repair/reinstall VirtualBox as administrator.`
+        };
+      }
+      return { success: true, message: `Driver service is available. Runtime warning: ${runtime.message}` };
     } catch (err) {
       return { success: false, message: `Failed to start driver: ${err.message}` };
     }
@@ -2572,7 +3817,8 @@ function registerIPC() {
 
   ipcMain.handle('vm:start', async (event, vmName) => {
     try {
-      const uiPrefs = readUiPrefsFromDisk();
+      let uiPrefs = readUiPrefsFromDisk();
+      let runtimeProbePath = '';
       const repairLevel = ['none', 'safe', 'full'].includes(String(uiPrefs.autoRepairLevel || '').toLowerCase())
         ? String(uiPrefs.autoRepairLevel).toLowerCase()
         : 'safe';
@@ -2580,21 +3826,71 @@ function registerIPC() {
         await bootFixer.prebootValidateAndFix(vmName);
       }
 
-      // Auto-fix VBoxSup driver if stopped
-      try {
-        const svcCheck = execSync('sc.exe query vboxsup', { encoding: 'utf8', timeout: 5000 });
-        if (!svcCheck.includes('RUNNING')) {
-          logger.warn('App', 'VBoxSup driver stopped — attempting to start...');
-          execSync('powershell -Command "Start-Process sc.exe -ArgumentList \'start\',\'vboxsup\' -Verb RunAs -Wait"', { timeout: 15000 });
-          await new Promise(r => setTimeout(r, 2000));
+      if (process.platform === 'win32') {
+        try {
+          const vboxPath = resolveVBoxManagePathForChecks();
+          runtimeProbePath = vboxPath;
+          if (vboxPath) {
+            let runtime = probeVBoxRuntimeHealth(vboxPath);
+            if (!runtime.ok && (runtime.code === 'driver-runtime' || runtime.code === 'driver-needs-admin')) {
+              rememberVBoxRuntimeBlocker(runtime.message, 'vm-start-preflight');
+              if (runtime.code === 'driver-needs-admin' && !isRunningAsAdmin()) {
+                throw new Error('VirtualBox kernel driver is stopped and needs administrator privileges to start. Use "Continue with Admin Privilege" first, then try starting the V Os again.');
+              }
+              const driver = getVBoxSupDriverState();
+              if (driver.state === 'not-installed') {
+                throw new Error('VirtualBox kernel driver service is missing. Repair/reinstall VirtualBox and reboot.');
+              }
+              if (!isRunningAsAdmin()) {
+                throw new Error('VirtualBox kernel driver runtime is unavailable. Use Continue with Admin Privilege and try again.');
+              }
+              const startResult = startVBoxDriverService(String(driver.serviceName || 'vboxsup'));
+              if (!startResult.success) {
+                throw new Error(startResult.message);
+              }
+              await new Promise((resolve) => setTimeout(resolve, 1500));
+              runtime = probeVBoxRuntimeHealth(vboxPath);
+              if (!runtime.ok && (runtime.code === 'driver-runtime' || runtime.code === 'driver-needs-admin')) {
+                rememberVBoxRuntimeBlocker(runtime.message, 'vm-start-preflight');
+                throw new Error(runtime.message);
+              }
+            } else if (!runtime.ok) {
+              logger.warn('App', `VirtualBox runtime preflight warning: ${runtime.message}`);
+            }
+          }
+        } catch (e) {
+          logger.warn('App', `VBox runtime preflight failed: ${e.message}`);
+          throw e;
         }
-      } catch (e) {
-        logger.warn('App', `VBoxSup check failed: ${e.message}`);
       }
 
       const startVmNow = async () => {
         await virtualbox.startVM(vmName);
-        await waitForVmState(vmName, 'running', 45000, 2000);
+        const reachedRunning = await waitForVmState(vmName, 'running', 45000, 2000);
+        if (reachedRunning) return;
+
+        let currentState = '';
+        try {
+          currentState = String(await virtualbox.getVMState(vmName) || '').toLowerCase();
+        } catch {}
+
+        if (process.platform === 'win32') {
+          const logRuntimeBlocker = await detectVBoxRuntimeBlockerFromVmLogs(vmName);
+          if (logRuntimeBlocker) {
+            rememberVBoxRuntimeBlocker(logRuntimeBlocker.details, 'vm-start-log-timeout');
+            throw new Error(logRuntimeBlocker.message);
+          }
+        }
+
+        if (process.platform === 'win32' && runtimeProbePath) {
+          const runtimeAfterStart = probeVBoxRuntimeHealth(runtimeProbePath);
+          if (!runtimeAfterStart.ok && runtimeAfterStart.code === 'driver-runtime') {
+            rememberVBoxRuntimeBlocker(runtimeAfterStart.message, 'vm-start-timeout');
+            throw new Error(runtimeAfterStart.message);
+          }
+        }
+
+        throw new Error(`Virtual machine did not reach running state (current state: ${currentState || 'unknown'}).`);
       };
       try {
         await startVmNow();
@@ -2607,6 +3903,8 @@ function registerIPC() {
         }
       }
       rememberVmState(vmName, 'running');
+      clearVBoxRuntimeBlocker();
+      clearRecentVmStartFailure();
 
       try {
         const vmInfo = await virtualbox.getVMInfo(vmName);
@@ -2634,7 +3932,26 @@ function registerIPC() {
 
       return { success: true };
     } catch (err) {
-      return { success: false, error: err.message };
+      const message = String(err?.message || '');
+      let mergedMessage = message;
+      const logRuntimeBlocker = await detectVBoxRuntimeBlockerFromVmLogs(vmName);
+      if (logRuntimeBlocker) {
+        rememberVBoxRuntimeBlocker(logRuntimeBlocker.details, 'vm-start-log-catch');
+        if (!isVBoxDriverRuntimeSignature(mergedMessage)) {
+          mergedMessage = mergedMessage
+            ? `${mergedMessage}\n${logRuntimeBlocker.message}`
+            : logRuntimeBlocker.message;
+        }
+      }
+      const hasRuntimeSignature = isVBoxDriverRuntimeSignature(message);
+      const hostLikely = hasRuntimeSignature
+        || !!logRuntimeBlocker
+        || /vbox kernel|kernel runtime|driver-runtime|vboxdrv|vboxsup|supr3hardened|verr_open_failed|status_object_name_not_found/i.test(message);
+      if (hasRuntimeSignature) {
+        rememberVBoxRuntimeBlocker(message, 'vm-start');
+      }
+      rememberRecentVmStartFailure(mergedMessage || 'Virtual machine start failed.', { hostLikely, vmName });
+      return { success: false, error: mergedMessage || err.message };
     }
   });
 
@@ -2817,6 +4134,11 @@ function registerIPC() {
       }
 
       if (Array.isArray(settings.sharedFolders)) {
+        for (const share of settings.sharedFolders) {
+          const hostPath = String(share?.hostPath || '').trim();
+          if (!hostPath) continue;
+          uiPrefs = await ensurePathTrustedByPrefs(hostPath, uiPrefs);
+        }
         const untrustedShare = settings.sharedFolders.find((share) => {
           const hostPath = String(share?.hostPath || '').trim();
           if (!hostPath) return false;
@@ -3254,7 +4576,7 @@ function registerIPC() {
 
   ipcMain.handle('vm:guest:configure', async (event, vmName, payload = {}) => {
     try {
-      const uiPrefs = readUiPrefsFromDisk();
+      let uiPrefs = readUiPrefsFromDisk();
       const {
         guestUser = 'guest',
         guestPass = 'guest',
@@ -3268,6 +4590,11 @@ function registerIPC() {
         clipboardMode = 'bidirectional',
         dragAndDrop = 'bidirectional'
       } = payload;
+      const normalizedGuestUser = validateLinuxGuestUsername(guestUser, 'Guest account username');
+      const normalizedGuestPass = String(guestPass ?? '');
+      if (!normalizedGuestPass) {
+        return { success: false, error: 'Guest account password is required.' };
+      }
 
       const vmState = (await virtualbox.getVMState(vmName) || '').toLowerCase();
       const notes = [];
@@ -3317,6 +4644,7 @@ function registerIPC() {
 
       let sharedFolderResult = null;
       if (enableSharedFolder && sharedFolderPath && sharedFolderPath.trim()) {
+        uiPrefs = await ensurePathTrustedByPrefs(sharedFolderPath.trim(), uiPrefs);
         if (!isPathTrustedByPrefs(sharedFolderPath.trim(), uiPrefs)) {
           return {
             success: false,
@@ -3373,7 +4701,7 @@ function registerIPC() {
         };
       }
 
-      const guestReady = await virtualbox.waitForGuestReady(vmName, guestUser, guestPass, guestWaitTimeout);
+      const guestReady = await virtualbox.waitForGuestReady(vmName, normalizedGuestUser, normalizedGuestPass, guestWaitTimeout);
       if (!guestReady) {
         if (quickRepair) {
           notes.push('Guest login/session not ready for in-guest commands.');
@@ -3391,7 +4719,7 @@ function registerIPC() {
         };
       }
 
-      const result = await configureGuestInside(vmName, guestUser, guestPass, null, {
+      const result = await configureGuestInside(vmName, normalizedGuestUser, normalizedGuestPass, null, {
         configureSharedFolder: !!(enableSharedFolder && sharedFolderResult),
         sharedFolderName: sharedFolderName || 'shared'
       });
@@ -3504,8 +4832,26 @@ function registerIPC() {
     try {
       logger.on('log', logHandler);
 
-      const uiPrefs = readUiPrefsFromDisk();
+      config = (config && typeof config === 'object') ? config : {};
+      let uiPrefs = readUiPrefsFromDisk();
+
+      if (config && typeof config === 'object') {
+        const normalized = await normalizeSetupConfig(config, uiPrefs);
+        config = normalized.config;
+        for (const warning of normalized.warnings) {
+          sendToRenderer('setup:progress', {
+            phase: 'system_check',
+            message: warning,
+            percent: 1
+          });
+        }
+        config.username = validateLinuxGuestUsername(config.username || 'guest', 'Setup guest username');
+        const setupPassword = String(config.password ?? '');
+        config.password = setupPassword || 'guest';
+      }
+
       if (config?.enableSharedFolder && String(config?.sharedFolderPath || '').trim()) {
+        uiPrefs = await ensurePathTrustedByPrefs(String(config.sharedFolderPath).trim(), uiPrefs);
         if (!isPathTrustedByPrefs(String(config.sharedFolderPath).trim(), uiPrefs)) {
           throw new Error('Selected shared folder path is outside Trusted Paths. Update VM Xposed Settings > Security & Privacy first.');
         }
@@ -3551,6 +4897,27 @@ function registerIPC() {
               graphicsController: 'vmsvga',
               notes: `Ubuntu ${version} fallback profile (old-releases.ubuntu.com)`
             };
+          }
+        }
+      }
+
+      if (!config?.useExistingVm) {
+        const requestedVmName = String(config?.vmName || '').trim();
+        if (requestedVmName) {
+          try {
+            await virtualbox.init();
+            const alreadyExists = await virtualbox.vmExists(requestedVmName);
+            if (alreadyExists) {
+              config.useExistingVm = true;
+              config.existingVmName = requestedVmName;
+              sendToRenderer('setup:progress', {
+                phase: 'create_vm',
+                message: `V Os "${requestedVmName}" is already installed. Reusing it instead of downloading/installing again.`,
+                percent: 100
+              });
+            }
+          } catch (vmDetectErr) {
+            logger.warn('App', `Could not pre-check existing V Os conflict: ${vmDetectErr.message}`);
           }
         }
       }
@@ -3692,6 +5059,9 @@ function registerIPC() {
           success: true,
           reusedExisting: true,
           importedFromFolder,
+          message: state === 'running' || shouldAutoStartVm
+            ? `Existing V Os "${vmName}" is ready.`
+            : `Existing V Os "${vmName}" is configured and ready to start manually.`,
           vmName,
           sharedFolder,
           credentials: {
@@ -3793,6 +5163,23 @@ app.whenReady().then(async () => {
   logger.info('App', `Electron: ${process.versions.electron}`);
   logger.info('App', `Node: ${process.versions.node}`);
   logger.info('App', `Administrator: ${isRunningAsAdmin() ? 'YES' : 'NO'}`);
+
+  if (
+    process.platform === 'win32' &&
+    isRunningAsAdmin() &&
+    !adminElevate.isElevatedProcessFlag() &&
+    !adminElevate.isStandardProcessFlag() &&
+    process.env.VMXPOSED_ALLOW_ADMIN_START !== '1'
+  ) {
+    logger.info('App', 'Detected inherited admin launch. Relaunching as standard user...');
+    const relaunchResult = await adminElevate.relaunchAsStandardUser();
+    if (relaunchResult?.success) {
+      app.exit(0);
+      return;
+    }
+    logger.warn('App', `Standard-user relaunch failed: ${relaunchResult?.error || 'unknown error'}`);
+    logger.warn('App', 'Continuing in current session. Set VMXPOSED_ALLOW_ADMIN_START=1 to keep admin startup.');
+  }
 
   const cacheLoaded = loadRuntimeCatalogFromCache();
   if (!cacheLoaded) {

@@ -489,8 +489,12 @@ const WizardSteps = {
       syncMode();
     },
     validate(state) {
-      if (state.isoSource === 'custom' && (!state.customIsoPath || state.customIsoPath.trim() === '')) {
+      const customIsoPath = String(state.customIsoPath || '').trim();
+      if (state.isoSource === 'custom' && !customIsoPath) {
         return { valid: false, message: 'Please provide or download an ISO image.' };
+      }
+      if (state.isoSource === 'custom' && !/\.iso$/i.test(customIsoPath)) {
+        return { valid: false, message: 'Unsupported file type. Please select an .iso file.' };
       }
 
       if (state.isoSource !== 'custom' && !state.defaults?.osCatalog?.[state.osName]?.downloadUrl) {
@@ -607,7 +611,12 @@ const WizardSteps = {
       disk?.addEventListener('input', e => { state.disk = parseInt(e.target.value, 10); document.getElementById('diskLabel').innerText = Math.floor(state.disk / 1024); });
     },
     validate(state) {
-      if (!state.vmName) return { valid: false, message: 'Please provide a V Os name.' };
+      const vmName = String(state.vmName || '').trim();
+      if (!vmName) return { valid: false, message: 'Please provide a V Os name.' };
+      if (/[<>:"/\\|?*\u0000-\u001F]/.test(vmName)) {
+        return { valid: false, message: 'V Os name contains invalid characters. Avoid: < > : " / \\ | ? *' };
+      }
+      state.vmName = vmName;
       if (!state.installPath || !String(state.installPath).trim()) return { valid: false, message: 'Please select V Os install folder.' };
       return { valid: true };
     }
@@ -785,8 +794,12 @@ const WizardSteps = {
       syncSharedFolderUi();
     },
     validate(state) {
-      if (!state.username || !String(state.username).trim()) {
+      const username = String(state.username || '').trim();
+      if (!username) {
         return { valid: false, message: 'Please enter username.' };
+      }
+      if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(username)) {
+        return { valid: false, message: 'Username must start with a letter/underscore and use only letters, numbers, underscores, or hyphens.' };
       }
       if (!state.password || !String(state.password).trim()) {
         return { valid: false, message: 'Please enter password.' };

@@ -106,26 +106,44 @@ class Orchestrator extends EventEmitter {
       let vboxInstallerPath = String(installerPath || '').trim();
       const usingLocalInstaller = !!vboxInstallerPath;
       if (!usingLocalInstaller) {
-        emitVBoxProgress({ phase: 'download_vbox', message: 'Downloading VirtualBox...', percent: 0 });
-
         const resolvedDownloadDir = String(downloadDir || '').trim() || getDownloadDir();
         const vboxUrl = await this._resolveVBoxDownloadUrl();
-        vboxInstallerPath = await downloadFile(
-          vboxUrl,
-          resolvedDownloadDir,
-          null,
-          {
-            signal: effectiveSignal,
-            onProgress: (p) => {
-              emitVBoxProgress({
-                phase: 'download_vbox',
-                message: `Downloading VirtualBox... ${p.percent || 0}% (${p.speedFormatted})`,
-                percent: p.percent || 0,
-                downloadProgress: p
-              });
+        let suggestedFilename = '';
+        try {
+          const parsedUrl = new URL(vboxUrl);
+          suggestedFilename = path.basename(parsedUrl.pathname || '') || '';
+        } catch {}
+
+        const cachedInstallerPath = suggestedFilename
+          ? path.join(resolvedDownloadDir, suggestedFilename)
+          : '';
+
+        if (cachedInstallerPath && isDownloadComplete(cachedInstallerPath)) {
+          vboxInstallerPath = cachedInstallerPath;
+          emitVBoxProgress({
+            phase: 'download_vbox',
+            message: `Using previously downloaded installer: ${path.basename(vboxInstallerPath)}`,
+            percent: 100
+          });
+        } else {
+          emitVBoxProgress({ phase: 'download_vbox', message: 'Downloading VirtualBox...', percent: 0 });
+          vboxInstallerPath = await downloadFile(
+            vboxUrl,
+            resolvedDownloadDir,
+            suggestedFilename || null,
+            {
+              signal: effectiveSignal,
+              onProgress: (p) => {
+                emitVBoxProgress({
+                  phase: 'download_vbox',
+                  message: `Downloading VirtualBox... ${p.percent || 0}% (${p.speedFormatted})`,
+                  percent: p.percent || 0,
+                  downloadProgress: p
+                });
+              }
             }
-          }
-        );
+          );
+        }
       } else {
         const resolvedPath = path.resolve(vboxInstallerPath);
         if (!fs.existsSync(resolvedPath)) {
@@ -375,7 +393,7 @@ class Orchestrator extends EventEmitter {
           if (isDownloadComplete(expectedPath)) {
             isoPath = expectedPath;
             logger.info('Orchestrator', `ISO already downloaded: ${isoPath}`);
-            this._emitProgress('download_iso', 'Ubuntu ISO already downloaded', 100);
+            this._emitProgress('download_iso', 'ISO already downloaded — reusing local file', 100);
           } else {
             this._emitProgress('download_iso', `Downloading ${config.osName || 'OS'} ISO...`, 0);
 
@@ -422,12 +440,50 @@ class Orchestrator extends EventEmitter {
           const expectedHash = parseHashFromSHA256SUMS(sha256sumsContent, selectedIsoConfig.filename);
 
           if (expectedHash) {
-            const actualHash = await computeSHA256(isoPath, (p) => {
-              this._emitProgress('verify_iso', `Verifying checksum... ${p}%`, p);
-            });
+            const verifyCurrentIso = async () => {
+              return computeSHA256(isoPath, (p) => {
+                this._emitProgress('verify_iso', `Verifying checksum... ${p}%`, p);
+              });
+            };
+
+            let actualHash = await verifyCurrentIso();
+            if (actualHash.toLowerCase() !== expectedHash.toLowerCase()) {
+              if (!selectedIsoConfig.downloadUrl || !selectedIsoConfig.filename) {
+                throw new Error('ISO checksum verification FAILED. Automatic re-download is unavailable for this OS profile. Please select a custom ISO.');
+              }
+              logger.warn('Orchestrator', `Checksum mismatch for ${isoPath}. Re-downloading clean copy...`);
+              this._emitProgress('verify_iso', 'Checksum mismatch detected. Re-downloading a clean ISO copy...', 10);
+
+              try {
+                await fs.promises.unlink(isoPath);
+              } catch (unlinkErr) {
+                logger.warn('Orchestrator', `Could not remove corrupted ISO before retry: ${unlinkErr.message}`);
+              }
+
+              isoPath = await downloadFile(
+                selectedIsoConfig.downloadUrl,
+                resolvedDownloadDir,
+                selectedIsoConfig.filename,
+                {
+                  signal: this.abortController.signal,
+                  resume: false,
+                  onProgress: (p) => {
+                    this._emitProgress(
+                      'verify_iso',
+                      `Re-downloading ISO... ${p.percent || 0}% (${p.speedFormatted})`,
+                      p.percent || 0
+                    );
+                  }
+                }
+              );
+              await stateManager.completePhase('download_iso', { isoPath });
+              this._emitProgress('verify_iso', 'Re-download complete. Verifying checksum again...', 70);
+
+              actualHash = await verifyCurrentIso();
+            }
 
             if (actualHash.toLowerCase() !== expectedHash.toLowerCase()) {
-              throw new Error('ISO checksum verification FAILED. The file may be corrupted. Please try again.');
+              throw new Error('ISO checksum verification FAILED after re-download. The source file may be unavailable or corrupted. Please try again later or choose a custom ISO.');
             }
 
             logger.success('Orchestrator', 'ISO checksum verification PASSED');
@@ -831,7 +887,7 @@ class Orchestrator extends EventEmitter {
           'exit $p.ExitCode'
         ].join('; ');
 
-        execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCommand], { timeout: 900000, windowsHide: true }, (error, stdout, stderr) => {
+        execFile('powershell.exe', ['-NoProfile', '-Command', psCommand], { timeout: 900000, windowsHide: true }, (error, stdout, stderr) => {
           if (error) {
             reject(new Error(stderr || error.message || 'Elevated installer execution failed'));
             return;
