@@ -1,0 +1,8 @@
+VM Xposed v1.1.19 — Patch Notes
+================================
+
+Bug Fix:
+- Fixed "Setup Failed" crash when using old/unsupported ISOs (e.g. Ubuntu 10.04)
+- The ConstructMedia error from VirtualBox's unattended installer no longer aborts entire VM creation
+- VMs are now created successfully even when unattended install is unsupported — user is informed to install OS manually on first boot
+- Added clear messaging: "Unattended install not supported for this ISO — manual OS installation will be required on first boot"

@@ -215,26 +215,40 @@ async function createAndConfigureVM(config, onProgress = null) {
   }
 
   // ─── Step 8: Unattended Install ───────────────────────────────────
+  let unattendedApplied = false;
   if (unattended) {
     _emitProgress(onProgress, 'unattended', 'Setting up unattended OS installation...', 80);
-    await virtualbox.unattendedInstall(name, {
-      isoPath: normalizedIsoPath,
-      username: normalizedUsername,
-      password: normalizedPassword,
-      fullName: normalizedUsername,
-      hostname: name.replace(/\s+/g, '-').toLowerCase() + '.local',
-      installAdditions: true,
-      postInstallCommand: [
-        'apt-get install -y virtualbox-guest-utils virtualbox-guest-x11 2>/dev/null',
-        `usermod -aG vboxsf ${normalizedUsername} 2>/dev/null`,
-        `usermod -aG video ${normalizedUsername} 2>/dev/null`,
-        `mkdir -p /home/${normalizedUsername}/.config/autostart`,
-        `echo -e "[Desktop Entry]\\nType=Application\\nName=VBoxClient\\nExec=/usr/bin/VBoxClient-all\\nX-GNOME-Autostart-enabled=true\\nNoDisplay=true" > /home/${normalizedUsername}/.config/autostart/vboxclient.desktop`,
-        'grep -q vboxsf /etc/fstab || echo "shared /media/sf_shared vboxsf rw,_netdev,umask=0007 0 0" >> /etc/fstab',
-        'mkdir -p /media/sf_shared',
-        `su - ${normalizedUsername} -c "gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null" 2>/dev/null`,
-      ].join(' ; ')
-    });
+    try {
+      await virtualbox.unattendedInstall(name, {
+        isoPath: normalizedIsoPath,
+        username: normalizedUsername,
+        password: normalizedPassword,
+        fullName: normalizedUsername,
+        hostname: name.replace(/\s+/g, '-').toLowerCase() + '.local',
+        installAdditions: true,
+        postInstallCommand: [
+          'apt-get install -y virtualbox-guest-utils virtualbox-guest-x11 2>/dev/null',
+          `usermod -aG vboxsf ${normalizedUsername} 2>/dev/null`,
+          `usermod -aG video ${normalizedUsername} 2>/dev/null`,
+          `mkdir -p /home/${normalizedUsername}/.config/autostart`,
+          `echo -e "[Desktop Entry]\\nType=Application\\nName=VBoxClient\\nExec=/usr/bin/VBoxClient-all\\nX-GNOME-Autostart-enabled=true\\nNoDisplay=true" > /home/${normalizedUsername}/.config/autostart/vboxclient.desktop`,
+          'grep -q vboxsf /etc/fstab || echo "shared /media/sf_shared vboxsf rw,_netdev,umask=0007 0 0" >> /etc/fstab',
+          'mkdir -p /media/sf_shared',
+          `su - ${normalizedUsername} -c "gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null" 2>/dev/null`,
+        ].join(' ; ')
+      });
+      unattendedApplied = true;
+    } catch (unattendedErr) {
+      // ConstructMedia failures mean VirtualBox can't automate this ISO
+      // (e.g. old/unsupported OS versions). The VM is fully created and
+      // usable — the user just needs to install the OS manually.
+      if (_isConstructMediaError(unattendedErr)) {
+        logger.warn('VMManager', `Unattended install is not supported for this ISO. The V Os will boot from the ISO for manual installation. (${unattendedErr.message})`);
+        _emitProgress(onProgress, 'unattended', 'Unattended install not supported for this ISO — manual OS installation will be required on first boot.', 85);
+      } else {
+        throw unattendedErr;
+      }
+    }
   } else {
     _emitProgress(onProgress, 'unattended', 'Skipping unattended install (manual OS install required)', 80);
   }
@@ -264,10 +278,15 @@ async function createAndConfigureVM(config, onProgress = null) {
   }
 
   // ─── Complete ────────────────────────────────────────────────────
+  const manualInstallNote = (unattended && !unattendedApplied)
+    ? ' Note: manual OS installation required on first boot.'
+    : '';
   _emitProgress(
     onProgress,
     'complete',
-    autoStartVm ? 'V Os is up and running!' : 'V Os is prepared. Start it manually when ready.',
+    autoStartVm
+      ? `V Os is up and running!${manualInstallNote}`
+      : `V Os is prepared. Start it manually when ready.${manualInstallNote}`,
     100
   );
 
@@ -279,6 +298,7 @@ async function createAndConfigureVM(config, onProgress = null) {
     network,
     sharedFolder: sharedFolderResult,
     credentials: { username: normalizedUsername, password: normalizedPassword },
+    unattendedApplied,
     status: autoStartVm ? 'running' : 'poweroff'
   };
 
@@ -287,6 +307,9 @@ async function createAndConfigureVM(config, onProgress = null) {
     logger.info('VMManager', `V Os "${name}" is now installing Ubuntu automatically.`);
   } else {
     logger.info('VMManager', `V Os "${name}" was prepared and left powered off (auto-start disabled).`);
+  }
+  if (!unattendedApplied && unattended) {
+    logger.warn('VMManager', `Manual OS installation required — unattended install was not supported for the selected ISO.`);
   }
   logger.info('VMManager', `Login credentials: ${normalizedUsername} / ${normalizedPassword}`);
   if (sharedFolderResult) {
