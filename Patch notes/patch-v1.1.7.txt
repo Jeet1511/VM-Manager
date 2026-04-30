@@ -1,0 +1,6 @@
+VM Xposed v1.1.7
+
+- Fixed VirtualBox media creation failures by resolving disk path from actual VM metadata instead of guessed folders.
+- Added live host CPU and RAM telemetry to dashboard (value-only updates, no full panel refresh).
+- Reduced shared-folder trust false blocks by auto-trusting user-selected shared paths during setup/integration.
+- Improved VM name validation to prevent invalid filename characters from breaking setup.
