@@ -1,0 +1,5 @@
+VM Xposed v1.1.6
+
+- Fixed Trusted Paths validation mismatch for shared folders.
+- Normalized mixed/repeated path separators in both renderer and main process checks.
+- Resolved false "Shared folder path is outside Trusted Paths" error for valid configured paths.
