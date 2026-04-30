@@ -1,0 +1,6 @@
+VM Xposed v1.1.8
+
+- Hardened VirtualBox disk creation with ConstructMedia-aware recovery: stale medium cleanup + automatic fallback disk filename retry.
+- Improved setup failure guidance for VBox kernel/driver runtime errors and ConstructMedia path/media failures.
+- Made integration status badges more conservative when runtime verification is unavailable (no false “fully active” state).
+- Expanded VirtualBox driver health handling across preflight and runtime repair checks.
