@@ -1,0 +1,6 @@
+VM Xposed v1.1.13
+
+- Added a new Guided Host Fix action on the main Dashboard for non-technical recovery flow.
+- Dashboard now detects Hyper-V stack, Memory Integrity, and VBox driver blockers and highlights when fix is needed.
+- Guided flow now opens the exact Windows pages/actions (Windows Features, Core Isolation) and shows step-by-step in-app instructions.
+- Improved post-action guidance with a clear restart-and-retry path for faster VM startup recovery.
