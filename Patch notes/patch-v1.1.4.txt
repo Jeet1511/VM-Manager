@@ -1,0 +1,6 @@
+VM Xposed v1.1.4
+
+- Fixed admin relaunch flow and first-run privilege behavior.
+- Improved stability for elevation and single-instance transitions.
+- Improved packaged build reliability and resource handling.
+- Fixed false VBox driver warnings in normal workflows.
