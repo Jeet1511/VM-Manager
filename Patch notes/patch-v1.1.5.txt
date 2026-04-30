@@ -1,0 +1,4 @@
+VM Xposed v1.1.5
+
+- Fixed installed-app admin elevation failure caused by invalid working directory.
+- Elevation relaunch now always uses the installed exe folder in packaged mode.
