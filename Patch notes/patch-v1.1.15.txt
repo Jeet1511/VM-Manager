@@ -1,0 +1,6 @@
+VM Xposed v1.1.15
+
+- Fixed VM start error handling so non-zero VBoxManage start results are never treated as success.
+- Added persistent host-blocker memory for recent VBoxDrvStub / VERR_OPEN_FAILED start failures, so Dashboard no longer reports a false healthy state after that failure.
+- Guided Host Fix now refreshes host state before deciding, reducing stale "no blockers" messages.
+- V Os power action now re-checks host permissions after a failed start to surface blocker actions immediately.
