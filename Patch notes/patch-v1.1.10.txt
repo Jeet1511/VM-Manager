@@ -1,0 +1,6 @@
+VM Xposed v1.1.10
+
+- Added Prepare Host recovery flow for VBoxDrvStub and host driver/runtime failures.
+- Dashboard now includes a Prepare Host action beside Fix Driver with actionable recovery steps.
+- Recovery flow checks Hyper-V stack, Memory Integrity, pending reboot, and driver runtime health.
+- Improved setup failure guidance to point users to Prepare Host before retrying installation.
