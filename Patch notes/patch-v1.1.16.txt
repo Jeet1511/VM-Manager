@@ -1,0 +1,6 @@
+VM Xposed v1.1.16
+
+- Fixed a VM start-state bug where failed starts could still be treated as successful if the VM never reached `running`.
+- Added recent VM start failure memory to host diagnostics, so Dashboard and Guided Host Fix no longer show "no blockers" immediately after a failed start.
+- Improved VBox start error parsing to catch driver/runtime signatures even when VBoxManage exits with code 0.
+- Host health now surfaces recent start-failure attention for non-technical recovery flow.
