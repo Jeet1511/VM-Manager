@@ -1,0 +1,5 @@
+VM Xposed v1.1.11
+
+- Hardened in-guest setup shell commands to safely handle credentials and prevent command-breaking input edge cases.
+- Added strict Linux username validation across wizard, settings, setup, and guest-repair flows for reliable unattended and Fix All behavior.
+- Improved shared-folder and guest-service setup command safety to reduce post-install clipboard/drag-drop/shared-folder failures.
