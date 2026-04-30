@@ -1,0 +1,6 @@
+VM Xposed v1.1.14
+
+- Fixed false "no host blockers" status when VirtualBox runtime/driver is actually failing (VBoxDrvStub / driver-runtime).
+- Unified host blocker reporting in backend permissions checks so Dashboard and Guided Host Fix use one consistent source.
+- Dashboard now treats runtime probe warnings as actionable host attention and surfaces recovery actions more reliably.
+- Guided Host Fix status now includes pending reboot/runtime attention states to avoid misleading healthy messages.
