@@ -1,0 +1,5 @@
+VM Xposed v1.1.17
+
+- Added VM log-based host blocker detection: after a failed start, VM Xposed now scans recent VirtualBox logs (VBox.log / VBoxHardening.log) for `VBoxDrvStub`, `supR3HardenedWinReSpawn`, and related signatures.
+- If that signature is found, Dashboard and Guided Host Fix are forced into blocker-needed mode (no false healthy state).
+- VM start errors now include detected hardening/runtime signatures from logs for clearer non-technical guidance.
