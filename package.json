@@ -1,6 +1,6 @@
 {
   "name": "vm-xposed",
-  "version": "1.1.21",
+  "version": "1.1.22",
   "description": "One-click cross-platform VM setup automation using VirtualBox",
   "main": "main.js",
   "scripts": {

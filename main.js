@@ -3863,6 +3863,30 @@ function registerIPC() {
         }
       }
 
+      // Fix boot order and eject ISO before starting (prevents "Install Ubuntu" screen)
+      try {
+        const preInfo = await virtualbox.getVMInfo(vmName);
+        const boot1 = String(preInfo.boot1 || '').toLowerCase();
+        // If boot1 is dvd, the VM will try to boot from ISO first — fix it
+        if (boot1 === 'dvd') {
+          await virtualbox._run(['modifyvm', vmName, '--boot1', 'disk', '--boot2', 'dvd', '--boot3', 'none', '--boot4', 'none']);
+          logger.info('App', `Boot order corrected to disk-first for "${vmName}"`);
+        }
+        // Eject any attached ISO from the IDE controller so the DVD drive is empty
+        const idePort1Medium = String(preInfo['IDE Controller-1-0'] || preInfo['IDE-1-0'] || '').trim();
+        const idePort0Medium = String(preInfo['IDE Controller-0-1'] || preInfo['IDE-0-1'] || '').trim();
+        if (idePort1Medium && idePort1Medium !== 'none' && /\.iso$/i.test(idePort1Medium)) {
+          await virtualbox._run(['storageattach', vmName, '--storagectl', 'IDE Controller', '--port', '1', '--device', '0', '--medium', 'none']).catch(() => {});
+          logger.info('App', `Ejected ISO from IDE port 1 for "${vmName}"`);
+        }
+        if (idePort0Medium && idePort0Medium !== 'none' && /\.iso$/i.test(idePort0Medium)) {
+          await virtualbox._run(['storageattach', vmName, '--storagectl', 'IDE Controller', '--port', '0', '--device', '1', '--medium', 'none']).catch(() => {});
+          logger.info('App', `Ejected ISO from IDE port 0 for "${vmName}"`);
+        }
+      } catch (bootFixErr) {
+        logger.warn('App', `Pre-start boot order/ISO eject check: ${bootFixErr.message}`);
+      }
+
       const startVmNow = async () => {
         await virtualbox.startVM(vmName);
         const reachedRunning = await waitForVmState(vmName, 'running', 45000, 2000);

@@ -1,0 +1,19 @@
+VM Xposed v1.1.22 — Patch Notes
+================================
+
+Bug Fixes & Improvements:
+
+Guest OS Fullscreen Resolution:
+- Fixed Ubuntu not filling the VirtualBox window even when "Display Fit" was enabled
+- Switched from VBoxClient --display (legacy) to VBoxClient --vmsvga which is required for VMSVGA auto-resize
+- Added VBoxClient --seamless service for better window integration
+- Added xrandr auto-resize autostart script that runs on every Ubuntu login
+- xrandr now retries with multiple output names (Virtual-1, Virtual1) and explicit DISPLAY=:0
+- Increased VBoxClient initialization delay to ensure services are ready before resolution is applied
+
+Boot Order Fix (No More "Install Ubuntu" Screen):
+- After OS installation completes, the ISO is now ejected from the virtual DVD drive
+- Boot order is automatically changed from DVD-first to disk-first after installation
+- On every VM start, the app now checks if the ISO is still attached and ejects it
+- On every VM start, the app fixes boot order to disk-first if it's still set to DVD
+- This prevents the "Welcome to Ubuntu / Try Ubuntu / Install Ubuntu" screen from appearing after the OS is already installed

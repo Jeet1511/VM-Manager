@@ -384,24 +384,31 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       normalizedUsername,
       password,
       'if [ -f /etc/gdm3/custom.conf ]; then ' +
-      `${sudoPrefix} sed -i "s/^#\\?WaylandEnable=.*/WaylandEnable=false/" /etc/gdm3/custom.conf 2>/dev/null || true; ` +
-      `grep -q "^WaylandEnable=false" /etc/gdm3/custom.conf || ${sudoPrefix} bash -lc ${shellQuote('printf "\\n[daemon]\\nWaylandEnable=false\\n" >> /etc/gdm3/custom.conf')}; ` +
+      `${sudoPrefix} sed -i "s/^#\\\\?WaylandEnable=.*/WaylandEnable=false/" /etc/gdm3/custom.conf 2>/dev/null || true; ` +
+      `grep -q "^WaylandEnable=false" /etc/gdm3/custom.conf || ${sudoPrefix} bash -lc ${shellQuote('printf "\\\\n[daemon]\\\\nWaylandEnable=false\\\\n" >> /etc/gdm3/custom.conf')}; ` +
       'fi; echo done',
       { timeout: 15000, ignoreErrors: true }
     );
 
+    // Start VBoxClient services — use --vmsvga for dynamic resolution (critical!)
+    // VBoxClient --display is an older service; --vmsvga is required for VMSVGA auto-resize
     await runGuestStep(
       vmName,
       normalizedUsername,
       password,
+      'pkill -f "VBoxClient --vmsvga" 2>/dev/null || true; ' +
       'pkill -f "VBoxClient --display" 2>/dev/null || true; ' +
       'pkill -f "VBoxClient --clipboard" 2>/dev/null || true; ' +
       'pkill -f "VBoxClient --draganddrop" 2>/dev/null || true; ' +
-      'nohup VBoxClient --display >/tmp/vbox-display.log 2>&1 & ' +
+      'pkill -f "VBoxClient --seamless" 2>/dev/null || true; ' +
+      'sleep 1; ' +
+      'nohup VBoxClient --vmsvga >/tmp/vbox-vmsvga.log 2>&1 & ' +
       'nohup VBoxClient --clipboard >/tmp/vbox-clipboard.log 2>&1 & ' +
       'nohup VBoxClient --draganddrop >/tmp/vbox-dnd.log 2>&1 & ' +
-      'sleep 2; ' +
-      'pgrep -f "VBoxClient --display" >/dev/null && echo display-ok',
+      'nohup VBoxClient --seamless >/tmp/vbox-seamless.log 2>&1 & ' +
+      'sleep 3; ' +
+      'pgrep -f "VBoxClient --vmsvga" >/dev/null && echo display-ok || ' +
+      '(nohup VBoxClient --display >/tmp/vbox-display.log 2>&1 & sleep 2; pgrep -f VBoxClient >/dev/null && echo display-ok)',
       {
         timeout: 30000,
         retries: 2,
@@ -410,13 +417,20 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       }
     );
 
+    // Apply dynamic resolution using xrandr — retry with delays to let VBoxClient settle
     await runGuestStep(
       vmName,
       normalizedUsername,
       password,
-      'xrandr --output Virtual-1 --auto 2>/dev/null || xrandr --auto 2>/dev/null || true; echo done',
+      'export DISPLAY=:0; ' +
+      'for i in 1 2 3; do ' +
+      '  xrandr --output Virtual-1 --auto 2>/dev/null && break; ' +
+      '  xrandr --output Virtual1 --auto 2>/dev/null && break; ' +
+      '  xrandr --auto 2>/dev/null && break; ' +
+      '  sleep 2; ' +
+      'done; echo done',
       {
-        timeout: 20000,
+        timeout: 30000,
         retries: 1,
         description: 'Apply dynamic display auto-resize',
         verify: async (out) => out.includes('done')
@@ -428,6 +442,22 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       'gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null; ' +
       'gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null; ' +
       'gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type "nothing" 2>/dev/null; echo done',
+      { timeout: 15000, ignoreErrors: true }
+    );
+
+    // Create a login autostart script for xrandr auto-resize on every login
+    const xrandrAutostart = [
+      '[Desktop Entry]',
+      'Type=Application',
+      'Name=VBox Display Auto-Resize',
+      'Comment=Auto-resize display to VM window size',
+      'Exec=bash -c "sleep 3; xrandr --output Virtual-1 --auto 2>/dev/null || xrandr --output Virtual1 --auto 2>/dev/null || xrandr --auto 2>/dev/null"',
+      'X-GNOME-Autostart-enabled=true',
+      'NoDisplay=true'
+    ].join('\\\\n');
+
+    await virtualbox.guestShell(vmName, normalizedUsername, password,
+      `echo -e "${xrandrAutostart}" > /home/${normalizedUsername}/.config/autostart/vbox-display-resize.desktop 2>/dev/null; echo ok`,
       { timeout: 15000, ignoreErrors: true }
     );
 

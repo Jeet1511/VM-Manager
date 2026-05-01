@@ -629,7 +629,24 @@ class Orchestrator extends EventEmitter {
         );
 
         if (gaReady) {
-          this._emitProgress('wait_boot', 'Guest Additions detected! Waiting for Ubuntu desktop...', 70);
+          this._emitProgress('wait_boot', 'Guest Additions detected! Ejecting install media...', 60);
+
+          // Eject the ISO and set boot order to disk-first now that OS is installed
+          try {
+            // Remove the ISO from the virtual DVD drive so it doesn't boot from it again
+            await virtualbox._run(['storageattach', config.vmName, '--storagectl', 'IDE Controller', '--port', '1', '--device', '0', '--medium', 'none']).catch(() => {});
+            await virtualbox._run(['storageattach', config.vmName, '--storagectl', 'IDE Controller', '--port', '0', '--device', '1', '--medium', 'none']).catch(() => {});
+            // Change boot order to disk first
+            await virtualbox._run(['modifyvm', config.vmName, '--boot1', 'disk', '--boot2', 'dvd', '--boot3', 'none', '--boot4', 'none']).catch(async () => {
+              // If modifyvm fails because VM is running, try via setextradata
+              await virtualbox._run(['setextradata', config.vmName, 'GUI/DefaultCloseAction', 'PowerOff']).catch(() => {});
+            });
+            logger.success('Orchestrator', 'Install media ejected and boot order set to disk-first');
+          } catch (ejectErr) {
+            logger.warn('Orchestrator', `Could not eject install media: ${ejectErr.message}`);
+          }
+
+          this._emitProgress('wait_boot', 'Waiting for Ubuntu desktop...', 70);
 
           // Wait for the guest OS to actually be responsive
           const guestReady = await virtualbox.waitForGuestReady(
