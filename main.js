@@ -4017,7 +4017,50 @@ function registerIPC() {
 
   ipcMain.handle('vm:delete', async (event, vmName) => {
     try {
+      // Capture the VM directory before deletion so we can verify cleanup
+      let vmDir = '';
+      try {
+        const info = await virtualbox.getVMInfo(vmName);
+        const cfgFile = String(info?.CfgFile || '')
+          .replace(/\\\\/g, '\\')
+          .replace(/^"(.*)"$/, '$1')
+          .trim();
+        if (cfgFile) {
+          vmDir = path.dirname(cfgFile);
+        }
+      } catch (infoErr) {
+        logger.debug('App', `Could not get V Os directory before delete: ${infoErr.message}`);
+      }
+
       await virtualbox.deleteVM(vmName);
+
+      // Clean up internal state tracking
+      vmLastKnownState.delete(vmName);
+      runtimeIntegrationLastScheduledAt.delete(vmName);
+      runtimeIntegrationQueue.delete(vmName);
+
+      // Verify and clean up orphaned VM directory if VirtualBox left it behind
+      if (vmDir) {
+        try {
+          const dirExists = fs.existsSync(vmDir);
+          if (dirExists) {
+            const entries = await fs.promises.readdir(vmDir);
+            if (entries.length === 0) {
+              // Empty directory left behind — safe to remove
+              await fs.promises.rmdir(vmDir);
+              logger.info('App', `Removed empty orphaned V Os directory: ${vmDir}`);
+            } else {
+              // Directory still has files — remove the entire directory tree
+              await fs.promises.rm(vmDir, { recursive: true, force: true });
+              logger.info('App', `Removed orphaned V Os directory with remaining files: ${vmDir}`);
+            }
+          }
+        } catch (cleanupErr) {
+          logger.debug('App', `V Os directory cleanup note: ${cleanupErr.message}`);
+        }
+      }
+
+      logger.success('App', `V Os "${vmName}" deleted and cleaned up successfully`);
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
@@ -4175,7 +4218,7 @@ function registerIPC() {
         }
         if (typeof settings.fullscreenEnabled === 'boolean') {
           await runSoft('Guest display fullscreen preference apply failed', () => virtualbox._run(['setextradata', vmName, 'VMXposed/GuestDisplayFullscreen', settings.fullscreenEnabled ? 'on' : 'off']));
-          await runSoft('VirtualBox window fullscreen disable apply failed', () => virtualbox._run(['setextradata', vmName, 'GUI/Fullscreen', 'off']));
+          await runSoft('VirtualBox window fullscreen apply failed', () => virtualbox._run(['setextradata', vmName, 'GUI/Fullscreen', settings.fullscreenEnabled ? 'on' : 'off']));
         }
         const { width, height } = getPrimaryDisplayResolution();
         const runtimeResult = await virtualbox.applyRuntimeIntegration(vmName, {
@@ -4311,7 +4354,7 @@ function registerIPC() {
 
       if (typeof settings.fullscreenEnabled === 'boolean') {
         await runSoft('Guest display fullscreen preference apply failed', () => virtualbox._run(['setextradata', vmName, 'VMXposed/GuestDisplayFullscreen', settings.fullscreenEnabled ? 'on' : 'off']));
-        await runSoft('VirtualBox window fullscreen disable apply failed', () => virtualbox._run(['setextradata', vmName, 'GUI/Fullscreen', 'off']));
+        await runSoft('VirtualBox window fullscreen apply failed', () => virtualbox._run(['setextradata', vmName, 'GUI/Fullscreen', settings.fullscreenEnabled ? 'on' : 'off']));
       }
 
       return { success: true, warnings };

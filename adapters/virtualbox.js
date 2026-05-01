@@ -528,13 +528,34 @@ class VirtualBoxAdapter {
       const state = await this.getVMState(vmName);
       if (state === 'running' || state === 'paused') {
         await this._run(['controlvm', vmName, 'poweroff']);
-        await new Promise(r => setTimeout(r, 2000)); // Wait for shutdown
+        await new Promise(r => setTimeout(r, 3000)); // Wait for shutdown and lock release
       }
     } catch (err) {
       logger.debug('VirtualBox', `Poweroff attempt: ${err.message}`);
     }
 
-    await this._run(['unregistervm', vmName, '--delete']);
+    try {
+      await this._run(['unregistervm', vmName, '--delete']);
+    } catch (deleteErr) {
+      const msg = String(deleteErr?.message || '');
+      // If deletion failed due to medium lock issues, try closing media first
+      if (/medium|locked|VBOX_E_OBJECT_IN_USE|in use/i.test(msg)) {
+        logger.warn('VirtualBox', `Initial delete failed (${msg}). Retrying after closing media...`);
+        try {
+          // Try to close any attached storage media
+          await this._run(['storageattach', vmName, '--storagectl', 'IDE Controller', '--port', '0', '--device', '0', '--medium', 'none']).catch(() => {});
+          await this._run(['storageattach', vmName, '--storagectl', 'SATA Controller', '--port', '0', '--device', '0', '--medium', 'none']).catch(() => {});
+          await new Promise(r => setTimeout(r, 1000));
+          await this._run(['unregistervm', vmName, '--delete']);
+        } catch (retryErr) {
+          // Last resort: unregister without deleting files (caller will clean up)
+          logger.warn('VirtualBox', `Delete retry failed. Unregistering without file deletion: ${retryErr.message}`);
+          await this._run(['unregistervm', vmName]);
+        }
+      } else {
+        throw deleteErr;
+      }
+    }
     logger.success('VirtualBox', `VM "${vmName}" deleted`);
   }
 
@@ -854,7 +875,7 @@ class VirtualBoxAdapter {
     await this._run(args);
 
     const vmExtra = [
-      ['GUI/Fullscreen', 'off'],
+      ['GUI/Fullscreen', fullscreen ? 'on' : 'off'],
       ['GUI/AutoresizeGuest', 'on'],
       ['GUI/ScaleFactor', '1.0'],
       ['GUI/Seamless', 'off'],

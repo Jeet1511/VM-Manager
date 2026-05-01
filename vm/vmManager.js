@@ -207,6 +207,17 @@ async function createAndConfigureVM(config, onProgress = null) {
     dragAndDrop
   });
 
+  // Persist user integration preferences as VMXposed extradata so they
+  // survive VM restarts and are readable by vm:list / vm:start handlers
+  try {
+    await virtualbox._run(['setextradata', name, 'VMXposed/ClipboardMode', clipboardMode || 'bidirectional']);
+    await virtualbox._run(['setextradata', name, 'VMXposed/DragAndDropMode', dragAndDrop || 'bidirectional']);
+    await virtualbox._run(['setextradata', name, 'VMXposed/GuestDisplayFullscreen', (startFullscreen !== false) ? 'on' : 'off']);
+    logger.success('VMManager', 'Integration preferences persisted as extradata');
+  } catch (extraErr) {
+    logger.warn('VMManager', `Could not persist integration preferences: ${extraErr.message}`);
+  }
+
   // ─── Step 7: Shared Folder ────────────────────────────────────────
   let sharedFolderResult = null;
   if (sharedFolderPath) {

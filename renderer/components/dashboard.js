@@ -622,7 +622,8 @@ const Dashboard = {
     };
     const runtimeCheckAvailable = isRunning;
     const guestAdditionsReady = !!checks.guestAdditions;
-    const buildStatus = ({ configured, runtimeReady, onText, offText = 'Off', issueText = 'Needs setup' }) => {
+    // buildStatus for guest-dependent features that truly need runtime verification
+    const buildGuestDependentStatus = ({ configured, runtimeReady, onText, offText = 'Off', issueText = 'Needs setup' }) => {
       if (!configured) {
         return { state: 'off', value: offText, icon: Icons.sized(Icons.info, 14) };
       }
@@ -637,30 +638,25 @@ const Dashboard = {
       }
       return { state: 'missing', value: issueText, icon: Icons.sized(Icons.xCircle, 14) };
     };
-    const buildModeStatus = (mode, runtimeReady, issueText = 'Needs setup') => {
+    // buildStatus for host-side settings that are applied via VBoxManage and confirmed even when VM is off
+    const buildHostSideStatus = ({ configured, onText, offText = 'Off' }) => {
+      if (!configured) {
+        return { state: 'off', value: offText, icon: Icons.sized(Icons.info, 14) };
+      }
+      return { state: 'ok', value: onText, icon: Icons.sized(Icons.checkCircle, 14) };
+    };
+    // buildModeStatus for host-side mode settings (clipboard, drag-and-drop)
+    const buildHostModeStatus = (mode) => {
       const configured = mode !== 'disabled';
       const label = modeLabel(mode);
       if (!configured) {
         return { state: 'off', value: label, icon: Icons.sized(Icons.info, 14) };
       }
-      if (runtimeReady) {
-        return { state: 'ok', value: label, icon: Icons.sized(Icons.checkCircle, 14) };
-      }
-      if (!runtimeCheckAvailable) {
-        return { state: 'pending', value: `${label} (verify after start)`, icon: Icons.sized(Icons.warning, 14) };
-      }
-      if (!guestAdditionsReady) {
-        return { state: 'pending', value: `${label} (waiting GA)`, icon: Icons.sized(Icons.warning, 14) };
-      }
-      return { state: 'missing', value: issueText, icon: Icons.sized(Icons.xCircle, 14) };
+      return { state: 'ok', value: label, icon: Icons.sized(Icons.checkCircle, 14) };
     };
 
     const clipboardMode = normalizeMode(vm.clipboardMode || vm.clipboard);
     const dragDropMode = normalizeMode(vm.dragAndDrop || vm.draganddrop);
-    const clipboardRuntimeReady = clipboardMode !== 'disabled'
-      && (clipboardMode === 'bidirectional' ? !!checks.clipboard : guestAdditionsReady);
-    const dragDropRuntimeReady = dragDropMode !== 'disabled'
-      && (dragDropMode === 'bidirectional' ? !!checks.dragDrop : guestAdditionsReady);
     const sharedConfigured = sharedFolders.length > 0 || primarySharedFolderPath.length > 0;
 
     const guestAdditionsStatus = guestAdditionsReady
@@ -670,11 +666,11 @@ const Dashboard = {
       : { state: 'ok', value: 'Check after start', icon: Icons.sized(Icons.checkCircle, 14) };
     const integrationRows = [
       { label: 'Guest Additions', ...guestAdditionsStatus },
-      { label: 'Guest Display Fit', ...buildStatus({ configured: vm.fullscreenEnabled !== false, runtimeReady: vm.fullscreenEnabled !== false, onText: 'On' }) },
-      { label: 'Display Integration', ...buildStatus({ configured: vm.fullscreenEnabled !== false, runtimeReady: !!checks.fullscreenReady, onText: 'Ready', issueText: 'Needs guest setup' }) },
-      { label: 'Clipboard Sync', ...buildModeStatus(clipboardMode, clipboardRuntimeReady, 'Needs guest session') },
-      { label: 'Drag & Drop', ...buildModeStatus(dragDropMode, dragDropRuntimeReady, 'Needs guest session') },
-      { label: 'Shared Folder', ...buildStatus({ configured: sharedConfigured, runtimeReady: !!checks.sharedFolder, onText: 'Mapped', offText: 'Not mapped', issueText: 'Mount required' }) }
+      { label: 'Guest Display Fit', ...buildHostSideStatus({ configured: vm.fullscreenEnabled !== false, onText: 'On' }) },
+      { label: 'Display Integration', ...buildGuestDependentStatus({ configured: vm.fullscreenEnabled !== false, runtimeReady: !!checks.fullscreenReady, onText: 'Ready', issueText: 'Needs guest setup' }) },
+      { label: 'Clipboard Sync', ...buildHostModeStatus(clipboardMode) },
+      { label: 'Drag & Drop', ...buildHostModeStatus(dragDropMode) },
+      { label: 'Shared Folder', ...buildGuestDependentStatus({ configured: sharedConfigured, runtimeReady: !!checks.sharedFolder, onText: 'Mapped', offText: 'Not mapped', issueText: 'Mount required' }) }
     ];
 
     return `
