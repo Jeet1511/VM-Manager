@@ -1,0 +1,25 @@
+VM Xposed v1.1.20 — Patch Notes
+================================
+
+Bug Fixes & Improvements:
+
+Integration Status Display:
+- Fixed dashboard showing "verify after start" for settings that are already configured on the host (clipboard, drag & drop, Guest Display Fit)
+- Host-side settings now show confirmed (✓) status even when the VM is powered off
+- Only guest-dependent features (Display Integration, Shared Folder) show "verify after start" when the VM is off
+
+Fullscreen & Settings Application:
+- Fixed VirtualBox GUI/Fullscreen always being set to "off" — now respects the user's fullscreen toggle
+- Ubuntu will now properly launch in fullscreen mode when the setting is enabled
+- Fixed settings (clipboard, drag & drop, fullscreen) not persisting after VM creation
+- Integration preferences are now saved as VMXposed extradata during VM creation so they survive restarts
+
+VM Deletion:
+- VM deletion now fully cleans up all associated files and orphaned directories from the host
+- Internal state tracking is properly cleaned up when a VM is deleted
+- Added retry logic for VirtualBox medium lock failures during deletion
+- Orphaned VM directories are automatically removed after unregister
+
+Settings Toggle:
+- Confirmed clipboard and drag & drop toggles in V Os Settings modal properly send values to the backend
+- All settings changes from the UI are now correctly applied and persisted
