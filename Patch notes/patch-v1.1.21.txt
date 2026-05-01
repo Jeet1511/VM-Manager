@@ -1,0 +1,21 @@
+VM Xposed v1.1.21 — Patch Notes
+================================
+
+Bug Fixes & Improvements:
+
+Update System:
+- Fixed "Update check failed (403)" error caused by GitHub API rate limiting
+- Replaced GitHub API-based version checking with raw content fetching (no rate limits)
+- Update checks now use raw.githubusercontent.com instead of api.github.com
+- Reduced network calls from 40+ API requests per check to just 2-3 raw fetches
+- Patch notes are now fetched directly from the repository without API overhead
+
+Auto-Update Detection:
+- App now automatically checks for updates on startup when internet is connected
+- A red pulsing dot indicator appears on the "Updates" button when a new version is available
+- The indicator disappears when the user clicks "Ignore This Version"
+- Update notification toast is shown on startup when a newer version is detected
+
+Patch Notes:
+- Patch notes are fetched and displayed for the latest available version
+- Patch history shows the last 10 versions for quick reference

@@ -932,11 +932,15 @@ function isTrustedRepoAssetUrl(value) {
 function fetchJsonWithRedirects(url, redirectCount = 0) {
   const MAX_REDIRECTS = 5;
   return new Promise((resolve, reject) => {
+    const isGitHubApi = String(url).includes('api.github.com');
+    const headers = {
+      'User-Agent': `VM-Xposed-Updater/${app.getVersion() || '0.0.0'}`
+    };
+    if (isGitHubApi) {
+      headers.Accept = 'application/vnd.github+json';
+    }
     const request = https.get(url, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': `VM-Xposed-Updater/${app.getVersion() || '0.0.0'}`
-      },
+      headers,
       timeout: 15000
     }, (response) => {
       const statusCode = Number(response.statusCode || 0);
@@ -1024,79 +1028,74 @@ function pickLatestInstallerFile(entries = [], predicate = () => true) {
 }
 
 async function checkForLatestReleaseUpdate() {
-  const currentVersion = app.getVersion();
-  const installerEntriesRaw = await fetchJsonWithRedirects(buildRepoContentsApiUrl(UPDATE_INSTALLER_DIR));
-  const patchNoteEntriesRaw = await fetchJsonWithRedirects(buildRepoContentsApiUrl(UPDATE_PATCH_NOTES_DIR));
+  const currentVersion = normalizeVersionString(app.getVersion());
 
-  if (!Array.isArray(installerEntriesRaw) || installerEntriesRaw.length === 0) {
-    throw new Error(`No installers found in "${UPDATE_INSTALLER_DIR}" folder.`);
+  // ─── Fetch latest version from raw package.json (no API rate limit) ───
+  const rawPackageUrl = `https://raw.githubusercontent.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/${UPDATE_REPO_BRANCH}/package.json`;
+  let remotePackage;
+  try {
+    remotePackage = await fetchJsonWithRedirects(rawPackageUrl);
+  } catch (err) {
+    throw new Error(`Could not fetch latest version info: ${err.message}`);
   }
 
-  const installerFiles = installerEntriesRaw
-    .filter((entry) => entry?.type === 'file' && /\.exe$/i.test(String(entry?.name || '')));
-  const installerEntries = await enrichRepoEntriesWithLatestCommit(installerFiles, UPDATE_INSTALLER_DIR);
-  const latestInstaller = pickLatestInstallerFile(installerEntries, () => true);
-  if (!latestInstaller) {
-    throw new Error(`No installer (.exe) file found in "${UPDATE_INSTALLER_DIR}".`);
+  const latestVersion = normalizeVersionString(remotePackage?.version || '');
+  if (!latestVersion) {
+    throw new Error('Could not determine latest version from repository.');
   }
 
-  const patchFilesRaw = Array.isArray(patchNoteEntriesRaw)
-    ? patchNoteEntriesRaw
-      .filter((entry) => entry?.type === 'file' && /\.(txt|md)$/i.test(String(entry?.name || '')))
-    : [];
-  const patchFiles = await enrichRepoEntriesWithLatestCommit(patchFilesRaw, UPDATE_PATCH_NOTES_DIR);
-  patchFiles.sort((a, b) => {
-    const versionDiff = compareVersions(b.parsedVersion || '0.0.0', a.parsedVersion || '0.0.0');
-    if (versionDiff !== 0) return versionDiff;
-    const commitDiff = (Number(b.latestCommitTs) || 0) - (Number(a.latestCommitTs) || 0);
-    if (commitDiff !== 0) return commitDiff;
-    return String(a.name || '').localeCompare(String(b.name || ''));
-  });
-  const versionedPatchFiles = patchFiles.filter((entry) => !!entry.parsedVersion);
+  const hasUpdate = isVersionNewer(latestVersion, currentVersion);
+  const installerName = `VM-Xposed-Setup-v${latestVersion}.exe`;
+  const installerUrl = `https://raw.githubusercontent.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/${UPDATE_REPO_BRANCH}/${encodeRepoPath(UPDATE_INSTALLER_DIR)}/${encodeURIComponent(installerName)}`;
 
-  let selectedPatch = null;
-  if (latestInstaller.parsedVersion) {
-    selectedPatch = versionedPatchFiles.find((entry) => entry.parsedVersion === latestInstaller.parsedVersion) || null;
-  }
-  if (!selectedPatch && patchFiles.length > 0) selectedPatch = patchFiles[0];
-
+  // ─── Fetch patch notes for the latest version (no API rate limit) ───
   let releaseNotes = '';
-  if (selectedPatch?.download_url) {
+  const patchFileName = `patch-v${latestVersion}.txt`;
+  const patchUrl = `https://raw.githubusercontent.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/${UPDATE_REPO_BRANCH}/${encodeRepoPath(UPDATE_PATCH_NOTES_DIR)}/${encodeURIComponent(patchFileName)}`;
+  try {
+    releaseNotes = await fetchTextWithRedirects(patchUrl);
+  } catch {
+    // Try .md extension as fallback
     try {
-      releaseNotes = await fetchTextWithRedirects(selectedPatch.download_url);
-    } catch (err) {
-      releaseNotes = `Patch notes could not be loaded: ${err.message}`;
+      const patchMdUrl = `https://raw.githubusercontent.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/${UPDATE_REPO_BRANCH}/${encodeRepoPath(UPDATE_PATCH_NOTES_DIR)}/${encodeURIComponent(`patch-v${latestVersion}.md`)}`;
+      releaseNotes = await fetchTextWithRedirects(patchMdUrl);
+    } catch {
+      releaseNotes = '';
     }
   }
 
-  const latestVersion = normalizeVersionString(
-    latestInstaller.parsedVersion
-    || selectedPatch?.parsedVersion
-    || ''
-  );
-  const hasUpdate = Boolean(latestVersion && isVersionNewer(latestVersion, currentVersion));
+  // ─── Build patch history by scanning known version range ───
+  const patchHistory = [];
+  const [major, minor, patch] = parseVersionParts(latestVersion);
+  // Scan the last 10 patch versions for history
+  const scanCount = Math.min(patch, 10);
+  for (let p = patch; p >= Math.max(0, patch - scanCount); p--) {
+    const ver = `${major}.${minor}.${p}`;
+    const name = `patch-v${ver}.txt`;
+    patchHistory.push({
+      version: ver,
+      name,
+      url: `https://raw.githubusercontent.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/${UPDATE_REPO_BRANCH}/${encodeRepoPath(UPDATE_PATCH_NOTES_DIR)}/${encodeURIComponent(name)}`,
+      commitDate: ''
+    });
+  }
 
   return {
     success: true,
-    currentVersion: normalizeVersionString(currentVersion),
-    latestVersion: latestVersion || normalizeVersionString(currentVersion),
+    currentVersion,
+    latestVersion,
     hasUpdate,
-    releaseName: latestVersion ? `v${latestVersion}` : String(latestInstaller?.name || 'Latest installer'),
-    publishedAt: String(latestInstaller?.latestCommitDate || ''),
+    releaseName: `v${latestVersion}`,
+    publishedAt: '',
     releaseNotes: String(releaseNotes || '').trim(),
-    installerName: String(latestInstaller?.name || ''),
-    installerUrl: String(latestInstaller?.download_url || ''),
-    installerSize: Number(latestInstaller?.size || 0),
-    installerCommitSha: String(latestInstaller?.latestCommitSha || latestInstaller?.sha || ''),
-    installerCommitDate: String(latestInstaller?.latestCommitDate || ''),
-    patchNotesName: String(selectedPatch?.name || ''),
-    patchNotesUrl: String(selectedPatch?.download_url || ''),
-    patchHistory: versionedPatchFiles.map((entry) => ({
-      version: String(entry.parsedVersion || ''),
-      name: String(entry.name || ''),
-      url: String(entry.download_url || ''),
-      commitDate: String(entry.latestCommitDate || '')
-    })),
+    installerName,
+    installerUrl,
+    installerSize: 0,
+    installerCommitSha: '',
+    installerCommitDate: '',
+    patchNotesName: patchFileName,
+    patchNotesUrl: patchUrl,
+    patchHistory,
     releasesPage: buildRepoTreePageUrl(UPDATE_INSTALLER_DIR),
     patchNotesPage: buildRepoTreePageUrl(UPDATE_PATCH_NOTES_DIR)
   };

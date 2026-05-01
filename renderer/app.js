@@ -818,6 +818,7 @@ async function _checkForAppUpdates({
   if (!force && cached?.checkedAt) {
     const checkedAtMs = Date.parse(cached.checkedAt);
     if (Number.isFinite(checkedAtMs) && (Date.now() - checkedAtMs) < UPDATE_CHECK_CACHE_TTL_MS) {
+      _updateNavBadge(cached);
       return cached;
     }
   }
@@ -847,6 +848,9 @@ async function _checkForAppUpdates({
       latestVersion: updateInfo.latestVersion || ''
     });
 
+    // Show/hide the red dot badge on Updates nav button
+    _updateNavBadge(updateInfo);
+
     if (notifyOnUpdate && result.hasUpdate && !isIgnored) {
       _notify(`Update available: v${updateInfo.latestVersion}. Open Updates section to install.`, 'info');
     } else if (notifyOnNoUpdate && !result.hasUpdate) {
@@ -858,6 +862,13 @@ async function _checkForAppUpdates({
     if (notifyOnError) _notify(`Update check failed: ${err?.message || 'Unknown error'}`, 'error');
     return { success: false, error: err?.message || 'Update check failed.' };
   }
+}
+
+function _updateNavBadge(updateInfo) {
+  const dot = document.getElementById('navUpdateDot');
+  if (!dot) return;
+  const showDot = updateInfo?.hasUpdate && !updateInfo?.isIgnored;
+  dot.style.display = showDot ? 'inline-block' : 'none';
 }
 
 function _loadCatalogRefreshMeta() {
@@ -4668,6 +4679,7 @@ function _initDownload() {
         appState.updateInfo.ignoredVersion = latestVersion;
         appState.updateInfo.isIgnored = true;
       }
+      _updateNavBadge(appState.updateInfo);
       renderUpdateState(appState.updateInfo || {});
       _notify(`Ignored update v${latestVersion}.`, 'info');
     } catch (err) {
@@ -5210,6 +5222,7 @@ function _initSettings(initialState = {}) {
         appState.updateInfo.ignoredVersion = latestVersion;
         appState.updateInfo.isIgnored = true;
       }
+      _updateNavBadge(appState.updateInfo);
       renderUpdateState(appState.updateInfo || {});
       _notify(`Ignored update v${latestVersion}.`, 'info');
     } catch (err) {

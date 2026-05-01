@@ -476,6 +476,26 @@ body.perf-lite * {
   pointer-events: none;
 }
 
+/* Update available red dot indicator */
+.nav-update-dot {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.6), 0 0 12px rgba(239, 68, 68, 0.3);
+  animation: updateDotPulse 2s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 2;
+}
+
+@keyframes updateDotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.15); }
+}
+
 /* Main Area */
 .layout-main { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 .layout-main { background: transparent; }
