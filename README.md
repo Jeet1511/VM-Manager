@@ -34,10 +34,11 @@ Public update source is now repository folders:
 
 ### Windows Setup Installer
 
-[![Download Windows Installer](https://img.shields.io/badge/Download-Windows%20Installer-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/raw/main/Installer/VM-Xposed-Setup.exe)
+[![Download Windows Installer](https://img.shields.io/badge/Download-Windows%20Installer-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/blob/main/Installer/VM-Xposed-Setup.exe?raw=true)
 
 - Click the button above to directly download the latest Windows installer (.exe).
 - This link always points to the most recent build — no manual updates needed.
+- If the download seems outdated, grab the latest versioned file directly from the [📁 Installer folder](https://github.com/Jeet1511/VM-Manager/tree/main/Installer).
 
 ### Android APK Installer
 
