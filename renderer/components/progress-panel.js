@@ -91,14 +91,15 @@ const ProgressPanel = {
    * Render the completion screen.
    */
   renderComplete(result) {
-    const autoStarted = result?.autoStartVm === true;
+    const autoStarted = result?.autoStarted === true || (result?.autoStarted !== false && result?.autoStartVm === true);
+    const manualInstallRequired = result?.manualInstallRequired === true;
     const integrationReady = result?.guestConfigured === true;
-    const title = autoStarted ? 'V Os Setup Completed' : 'V Os Prepared Successfully';
+    const title = manualInstallRequired ? 'Manual OS Install Required' : (autoStarted ? 'V Os Setup Completed' : 'V Os Prepared Successfully');
     const message = result?.message
       || (autoStarted
         ? 'Your V Os has been created and configured.'
         : 'Auto-start is disabled to keep your PC responsive. Start the V Os manually when ready.');
-    const launchLabel = autoStarted ? 'Open V Os' : 'Start V Os';
+    const launchLabel = manualInstallRequired ? 'Open Installer' : (autoStarted ? 'Open V Os' : 'Start V Os');
     const passIcon = `<div class="check-icon pass">${Icons.sized(Icons.check, 16)}</div>`;
     const pendingIcon = `<div class="check-icon" style="color: var(--warn)">${Icons.sized(Icons.warning, 16)}</div>`;
 
@@ -143,10 +144,10 @@ const ProgressPanel = {
             </div>
           </div>
           <div class="check-item">
-            ${autoStarted ? passIcon : pendingIcon}
+            ${autoStarted && !manualInstallRequired ? passIcon : pendingIcon}
             <div class="check-details">
               <div class="check-name">OS Installation</div>
-              <div class="check-value">${autoStarted ? 'Installation was started automatically.' : 'Pending manual start to begin installation.'}</div>
+              <div class="check-value">${manualInstallRequired ? 'This ISO needs the OS installer to be completed manually.' : (autoStarted ? 'Installation was started automatically.' : 'Pending manual start to begin installation.')}</div>
             </div>
           </div>
           <div class="check-item">
@@ -178,7 +179,11 @@ const ProgressPanel = {
     const normalized = String(message || '').toLowerCase();
     const suggestions = [];
 
-    if (/constructmedia|0x80004005|vboxmanagemisc\.cpp/i.test(normalized)) {
+    if (/automatic setup is not available|manual-install only|legacy ubuntu|cannot be automated/i.test(normalized)) {
+      suggestions.push('Choose Ubuntu 20.04 LTS, 22.04 LTS, or 24.04 LTS for one-click automatic setup');
+      suggestions.push('Use Advanced mode only when you intentionally want to install the OS manually');
+      suggestions.push('VM Xposed cleaned up the partial V Os so retrying the same name starts fresh');
+    } else if (/constructmedia|0x80004005|vboxmanagemisc\.cpp/i.test(normalized)) {
       suggestions.push('Use a different VM install folder (e.g., D:\\VM Xposed\\V Os) and avoid protected/system folders');
       suggestions.push('Delete any partial VM with the same name from VirtualBox, then retry setup');
       suggestions.push('Use a simple VM name without special characters');

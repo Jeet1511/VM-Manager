@@ -59,7 +59,9 @@ async function createAndConfigureVM(config, onProgress = null) {
     accelerate3d = false,
     clipboardMode = 'bidirectional',
     dragAndDrop = 'bidirectional',
-    autoStartVm = false
+    autoStartVm = false,
+    displayWidth = 0,
+    displayHeight = 0
   } = config;
   const normalizedInstallPath = path.resolve(String(installPath || '').trim());
   const normalizedIsoPath = path.resolve(String(isoPath || '').trim());
@@ -204,7 +206,9 @@ async function createAndConfigureVM(config, onProgress = null) {
     graphicsController,
     vram,
     clipboardMode,
-    dragAndDrop
+    dragAndDrop,
+    width: displayWidth,
+    height: displayHeight
   });
 
   // Persist user integration preferences as VMXposed extradata so they
@@ -264,8 +268,37 @@ async function createAndConfigureVM(config, onProgress = null) {
     _emitProgress(onProgress, 'unattended', 'Skipping unattended install (manual OS install required)', 80);
   }
 
+  try {
+    await virtualbox._run(['setextradata', name, 'VMXposed/UnattendedApplied', unattendedApplied ? 'on' : 'off']);
+    await virtualbox._run(['setextradata', name, 'VMXposed/ManualInstallRequired', (!unattendedApplied) ? 'on' : 'off']);
+    await virtualbox._run(['setextradata', name, 'VMXposed/InstalledDiskReady', 'off']);
+    await virtualbox._run(['setextradata', name, 'VMXposed/GuestInstallMarker', 'off']);
+    await virtualbox._run(['setextradata', name, 'VMXposed/InstallPhase', unattendedApplied ? 'installing' : 'preinstall']);
+  } catch (installStateErr) {
+    logger.warn('VMManager', `Could not persist install state markers: ${installStateErr.message}`);
+  }
+
+  // Keep disk first for manual-install profiles. This prevents the VM from
+  // looping back into "Try/Install" ISO screens after the first reboot while
+  // still allowing ISO fallback if disk is not bootable yet.
+  if (!unattendedApplied) {
+    try {
+      await virtualbox._run([
+        'modifyvm', name,
+        '--boot1', 'disk',
+        '--boot2', 'dvd',
+        '--boot3', 'none',
+        '--boot4', 'none'
+      ]);
+    } catch (bootOrderErr) {
+      logger.warn('VMManager', `Could not apply disk-first manual install boot order: ${bootOrderErr.message}`);
+    }
+  }
+
   // ─── Step 9: Start VM ────────────────────────────────────────────
-  if (autoStartVm) {
+  const canAutoStartInstall = autoStartVm && unattendedApplied;
+
+  if (canAutoStartInstall) {
     _emitProgress(onProgress, 'start', 'Starting virtual OS...', 90);
     await virtualbox.startVM(name);
 
@@ -278,12 +311,22 @@ async function createAndConfigureVM(config, onProgress = null) {
       await virtualbox.applyRuntimeIntegration(name, {
         clipboardMode: clipboardMode || 'bidirectional',
         dragAndDrop: dragAndDrop || 'bidirectional',
+        width: displayWidth,
+        height: displayHeight,
+        bpp: 32,
+        display: 0,
         guestDisplayFullscreen: startFullscreen !== false,
         waitForGuestAdditionsMs: startFullscreen !== false ? 120000 : 0
       });
     } catch (err) {
       logger.warn('VMManager', `Runtime display integration warning: ${err.message}`);
     }
+  } else if (autoStartVm && unattended && !unattendedApplied) {
+    _emitProgress(onProgress, 'start', 'Automatic install is not available for this ISO. V Os was left powered off.', 90);
+    logger.warn('VMManager', `V Os "${name}" was left powered off because unattended install could not be prepared for the selected ISO.`);
+  } else if (autoStartVm && !unattended) {
+    _emitProgress(onProgress, 'start', 'This OS profile requires manual installation. V Os was left powered off.', 90);
+    logger.warn('VMManager', `V Os "${name}" was left powered off because the selected OS profile requires manual installation.`);
   } else {
     _emitProgress(onProgress, 'start', 'Auto-start disabled. V Os was prepared and left powered off.', 90);
   }
@@ -295,7 +338,7 @@ async function createAndConfigureVM(config, onProgress = null) {
   _emitProgress(
     onProgress,
     'complete',
-    autoStartVm
+    canAutoStartInstall
       ? `V Os is up and running!${manualInstallNote}`
       : `V Os is prepared. Start it manually when ready.${manualInstallNote}`,
     100
@@ -310,11 +353,11 @@ async function createAndConfigureVM(config, onProgress = null) {
     sharedFolder: sharedFolderResult,
     credentials: { username: normalizedUsername, password: normalizedPassword },
     unattendedApplied,
-    status: autoStartVm ? 'running' : 'poweroff'
+    status: canAutoStartInstall ? 'running' : 'poweroff'
   };
 
   logger.success('VMManager', '═══ V Os Creation Complete ═══');
-  if (autoStartVm) {
+  if (canAutoStartInstall) {
     logger.info('VMManager', `V Os "${name}" is now installing Ubuntu automatically.`);
   } else {
     logger.info('VMManager', `V Os "${name}" was prepared and left powered off (auto-start disabled).`);

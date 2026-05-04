@@ -4,6 +4,7 @@ const { execSync } = require('child_process');
 const logger = require('../core/logger');
 const { getAppDataPath } = require('../core/config');
 const virtualbox = require('../adapters/virtualbox');
+const { createVmState, buildVmStateFromLegacy, decideBoot } = require('../core/vm-state');
 
 function _detectVBoxDriverState() {
   const candidates = ['vboxsup', 'vboxdrv'];
@@ -181,11 +182,12 @@ async function diagnoseBootIssues(vmName) {
   };
 }
 
-async function prebootValidateAndFix(vmName) {
+async function prebootValidateAndFix(vmName, options = {}) {
   logger.info('BootFixer', `Running pre-boot validation for "${vmName}"`);
   const { diagnostics, info, existingDiskPaths, existingIsoPaths } = await diagnoseBootIssues(vmName);
   const fixesApplied = [];
   const pendingInstallState = _getPendingInstallState(vmName);
+  const providedState = options?.vmState ? createVmState(options.vmState) : null;
 
   if (process.platform === 'win32') {
     const vboxSupDiag = diagnostics.find((d) => d.key === 'vboxsup');
@@ -216,21 +218,25 @@ async function prebootValidateAndFix(vmName) {
   }
 
   const boot1 = (info.boot1 || '').toLowerCase();
-  if (!boot1 || boot1 === 'none') {
-    await virtualbox._run([
-      'modifyvm', vmName,
-      '--boot1', 'disk',
-      '--boot2', 'dvd',
-      '--boot3', 'none',
-      '--boot4', 'none'
-    ]);
-    fixesApplied.push('Repaired boot order (disk -> dvd)');
-  }
 
   const hasBootableDisk = existingDiskPaths.length > 0;
   let hasBootableIso = existingIsoPaths.length > 0;
 
-  if (pendingInstallState) {
+  const legacyExtras = {
+    installedDiskReady: false,
+    unattendedApplied: !!pendingInstallState,
+    manualInstallRequired: false,
+    markerPresent: false,
+    installPhase: pendingInstallState ? 'installing' : ''
+  };
+
+  const vmState = providedState || buildVmStateFromLegacy({ info, extras: legacyExtras });
+  const bootDecision = options?.bootDecision || decideBoot(vmState, {
+    hasBootableDisk,
+    hasBootableIso
+  });
+
+  if (pendingInstallState && (bootDecision.attachISO === true || !hasBootableDisk)) {
     const osType = String(info.ostype || '').toLowerCase();
     const graphicsController = String(info.graphicscontroller || '').toLowerCase();
     if ((osType.includes('ubuntu') || osType.includes('debian') || osType.includes('linux'))
@@ -245,17 +251,8 @@ async function prebootValidateAndFix(vmName) {
     }
 
     if (!hasBootableIso && pendingInstallState.isoPath && fs.existsSync(pendingInstallState.isoPath)) {
-      const controllerNames = Object.keys(info)
-        .filter((key) => /^storagecontrollername\d+$/i.test(key))
-        .map((key) => String(info[key] || '').trim())
-        .filter(Boolean);
-
-      let targetController = controllerNames.find((name) => /ide/i.test(name)) || controllerNames[0] || 'IDE Controller';
       try {
-        if (!controllerNames.includes(targetController) && /ide/i.test(targetController)) {
-          await virtualbox.addStorageController(vmName, targetController, 'ide');
-        }
-        await virtualbox.attachStorage(vmName, targetController, 0, 0, 'dvddrive', pendingInstallState.isoPath);
+        await virtualbox.attachInstallerIso(vmName, pendingInstallState.isoPath, info);
         hasBootableIso = true;
         fixesApplied.push('Re-attached installer ISO to resume interrupted unattended installation');
       } catch (attachErr) {
@@ -263,14 +260,7 @@ async function prebootValidateAndFix(vmName) {
       }
     }
 
-    await virtualbox._run([
-      'modifyvm', vmName,
-      '--boot1', 'dvd',
-      '--boot2', 'disk',
-      '--boot3', 'none',
-      '--boot4', 'none'
-    ]);
-    fixesApplied.push('Detected interrupted setup and switched boot priority to DVD first for recovery');
+    fixesApplied.push('Detected interrupted setup and prepared ISO recovery media');
   }
 
   if (!hasBootableDisk && !hasBootableIso) {
@@ -280,15 +270,24 @@ async function prebootValidateAndFix(vmName) {
     );
   }
 
-  if (boot1 === 'dvd' && !hasBootableIso && hasBootableDisk) {
+  const desiredBoot = Array.isArray(bootDecision.bootOrder) ? bootDecision.bootOrder : ['disk', 'dvd', 'none', 'none'];
+  const currentBoot = [info.boot1, info.boot2, info.boot3, info.boot4].map((value) => String(value || '').toLowerCase());
+  if (currentBoot.join('|') !== desiredBoot.join('|')) {
     await virtualbox._run([
       'modifyvm', vmName,
-      '--boot1', 'disk',
-      '--boot2', 'dvd',
-      '--boot3', 'none',
-      '--boot4', 'none'
-    ]);
-    fixesApplied.push('Prioritized disk boot because no valid ISO media was attached');
+      '--boot1', desiredBoot[0],
+      '--boot2', desiredBoot[1],
+      '--boot3', desiredBoot[2],
+      '--boot4', desiredBoot[3]
+    ]).catch(() => {});
+    fixesApplied.push(`Applied boot decision: ${desiredBoot.join(' -> ')}`);
+  } else if (!boot1 || boot1 === 'none') {
+    fixesApplied.push('Boot order already aligned with decision engine');
+  }
+
+  if (bootDecision.ejectISO === true) {
+    await virtualbox.ejectInstallerIso(vmName, info).catch(() => {});
+    fixesApplied.push('Ejected installer ISO based on centralized boot decision');
   }
 
   const accel3d = _asBool(info.accelerate3d);
@@ -300,6 +299,7 @@ async function prebootValidateAndFix(vmName) {
   return {
     success: true,
     vmName,
+    bootDecision,
     diagnostics,
     fixesApplied,
     fixed: fixesApplied.length > 0

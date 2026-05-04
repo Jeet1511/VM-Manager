@@ -20,6 +20,21 @@ class VirtualBoxAdapter {
     this.preferredManagePath = '';
   }
 
+  _normalizeDisplaySize(width = 0, height = 0) {
+    const guestWidth = Number(width) > 0
+      ? Math.min(Math.max(1024, Math.floor(Number(width))), 7680)
+      : 1920;
+    const guestHeight = Number(height) > 0
+      ? Math.min(Math.max(768, Math.floor(Number(height))), 4320)
+      : 1080;
+
+    return {
+      width: guestWidth,
+      height: guestHeight,
+      resolution: `${guestWidth}x${guestHeight}x32`
+    };
+  }
+
   setPreferredManagePath(managePath = '') {
     const raw = String(managePath || '').trim();
     this.preferredManagePath = raw.replace(/^"(.*)"$/, '$1').trim();
@@ -319,6 +334,105 @@ class VirtualBoxAdapter {
     ]);
   }
 
+  _parseStorageSlots(info = {}) {
+    const slots = [];
+    for (const [key, value] of Object.entries(info || {})) {
+      const match = String(key || '').match(/^(.+)-(\d+)-(\d+)$/);
+      if (!match) continue;
+
+      const controller = String(match[1] || '').trim();
+      const port = parseInt(match[2], 10);
+      const device = parseInt(match[3], 10);
+      if (!controller || !Number.isFinite(port) || !Number.isFinite(device)) continue;
+
+      const medium = String(value || '').replace(/^"(.*)"$/, '$1').trim();
+      if (!medium) continue;
+
+      const mediumLower = medium.toLowerCase();
+      let type = 'other';
+      if (/\.(iso|viso)$/i.test(medium)) type = 'iso';
+      else if (/\.(vdi|vmdk|vhd|qcow2)$/i.test(medium)) type = 'disk';
+      else if (mediumLower === 'emptydrive' || mediumLower === 'none') type = 'empty';
+
+      slots.push({ controller, port, device, medium, type });
+    }
+    return slots;
+  }
+
+  async ejectInstallerIso(vmName, info = null) {
+    const vmInfo = info || await this.getVMInfo(vmName, { quiet: true });
+    const slots = this._parseStorageSlots(vmInfo);
+    const isoSlots = slots.filter((slot) => slot.type === 'iso');
+
+    if (isoSlots.length === 0) {
+      return { success: true, changed: false, ejected: 0 };
+    }
+
+    let ejected = 0;
+    for (const slot of isoSlots) {
+      try {
+        await this._run([
+          'storageattach', vmName,
+          '--storagectl', slot.controller,
+          '--port', String(slot.port),
+          '--device', String(slot.device),
+          '--medium', 'none'
+        ]);
+        ejected += 1;
+      } catch (err) {
+        logger.debug('VirtualBox', `ISO eject skipped for ${slot.controller}:${slot.port}:${slot.device} (${err.message})`);
+      }
+    }
+
+    return { success: true, changed: ejected > 0, ejected };
+  }
+
+  async attachInstallerIso(vmName, isoPath, info = null) {
+    const normalizedIsoPath = String(isoPath || '').replace(/^"(.*)"$/, '$1').trim();
+    if (!normalizedIsoPath) {
+      throw new Error('ISO path is required to attach installer media.');
+    }
+
+    const vmInfo = info || await this.getVMInfo(vmName, { quiet: true });
+    const slots = this._parseStorageSlots(vmInfo);
+    const controllerNames = Object.keys(vmInfo || {})
+      .filter((key) => /^storagecontrollername\d+$/i.test(key))
+      .map((key) => String(vmInfo[key] || '').trim())
+      .filter(Boolean);
+
+    const preferIde = (slot) => /ide/i.test(String(slot?.controller || ''));
+    const isoSlot = slots.find((slot) => slot.type === 'iso' && preferIde(slot))
+      || slots.find((slot) => slot.type === 'iso');
+    const emptySlot = slots.find((slot) => slot.type === 'empty' && preferIde(slot))
+      || slots.find((slot) => slot.type === 'empty');
+
+    let target = isoSlot || emptySlot || null;
+
+    if (!target) {
+      let targetController = controllerNames.find((name) => /ide/i.test(name)) || 'IDE Controller';
+      if (!controllerNames.some((name) => name.toLowerCase() === targetController.toLowerCase())) {
+        await this.addStorageController(vmName, targetController, 'ide');
+      }
+      target = { controller: targetController, port: 0, device: 0 };
+    }
+
+    await this._run([
+      'storageattach', vmName,
+      '--storagectl', target.controller,
+      '--port', String(target.port),
+      '--device', String(target.device),
+      '--type', 'dvddrive',
+      '--medium', normalizedIsoPath
+    ]);
+
+    return {
+      success: true,
+      controller: target.controller,
+      port: target.port,
+      device: target.device
+    };
+  }
+
   /**
    * Configure network adapter.
    * 
@@ -448,8 +562,8 @@ class VirtualBoxAdapter {
   /**
    * Get VM information (state, settings, etc.)
    */
-  async getVMInfo(vmName) {
-    const result = await this._run(['showvminfo', vmName, '--machinereadable']);
+  async getVMInfo(vmName, options = {}) {
+    const result = await this._run(['showvminfo', vmName, '--machinereadable'], { quiet: !!options.quiet });
     const info = {};
 
     for (const line of result.split('\n')) {
@@ -473,7 +587,7 @@ class VirtualBoxAdapter {
    */
   async getVMState(vmName) {
     try {
-      const info = await this.getVMInfo(vmName);
+      const info = await this.getVMInfo(vmName, { quiet: true });
       return info.VMState || 'unknown';
     } catch {
       return 'unknown';
@@ -529,6 +643,9 @@ class VirtualBoxAdapter {
       if (state === 'running' || state === 'paused') {
         await this._run(['controlvm', vmName, 'poweroff']);
         await new Promise(r => setTimeout(r, 3000)); // Wait for shutdown and lock release
+      } else if (state === 'saved') {
+        await this._run(['discardstate', vmName]);
+        await new Promise(r => setTimeout(r, 1500));
       }
     } catch (err) {
       logger.debug('VirtualBox', `Poweroff attempt: ${err.message}`);
@@ -860,7 +977,9 @@ class VirtualBoxAdapter {
       fullscreen = true,
       accelerate3d = false,
       graphicsController = '',
-      vram = 128
+      vram = 128,
+      width = 0,
+      height = 0
     } = options;
     logger.info('VirtualBox', `Configuring display integration for "${vmName}"...`);
 
@@ -874,12 +993,45 @@ class VirtualBoxAdapter {
 
     await this._run(args);
 
+    const displayHint = await this.configureDisplayHints(vmName, {
+      fullscreen,
+      width,
+      height
+    });
+
+    logger.success('VirtualBox', `Display integration configured (${displayHint.resolution})`);
+  }
+
+  /**
+   * Configure GUI/display-size hints that are safe to apply while a VM is
+   * running. These make VirtualBox open in fullscreen/autoresize mode and
+   * give guests a full-screen resolution target as soon as Guest Additions
+   * can consume it.
+   */
+  async configureDisplayHints(vmName, options = {}) {
+    const {
+      fullscreen = true,
+      width = 0,
+      height = 0
+    } = options;
+    const displaySize = this._normalizeDisplaySize(width, height);
+    const guestWidth = displaySize.width;
+    const guestHeight = displaySize.height;
+    const resolutionStr = displaySize.resolution;
     const vmExtra = [
-      ['GUI/Fullscreen', fullscreen ? 'on' : 'off'],
-      ['GUI/AutoresizeGuest', 'on'],
+      // VM Xposed display fit means the guest OS fills the VM viewport.
+      // Do not force the VirtualBox application window itself fullscreen.
+      ['GUI/Fullscreen', 'off'],
+      ['GUI/AutoresizeGuest', fullscreen ? 'on' : 'off'],
       ['GUI/ScaleFactor', '1.0'],
       ['GUI/Seamless', 'off'],
-      ['VMXposed/GuestDisplayFullscreen', fullscreen ? 'on' : 'off']
+      ['VMXposed/GuestDisplayFullscreen', fullscreen ? 'on' : 'off'],
+      // Custom video modes so guest can use host resolution even without Guest Additions
+      ['CustomVideoMode1', resolutionStr],
+      // VBoxInternal hint for initial guest resolution (works with VMSVGA/VBoxSVGA)
+      ['VBoxInternal2/EfiGraphicsResolution', `${guestWidth}x${guestHeight}`],
+      // GUI last guest size hint — makes VirtualBox open at the right size
+      ['GUI/LastGuestSizeHint', `${guestWidth},${guestHeight}`]
     ];
 
     for (const [key, value] of vmExtra) {
@@ -896,7 +1048,12 @@ class VirtualBoxAdapter {
       logger.debug('VirtualBox', `global GUI/MaxGuestResolution warning: ${err.message}`);
     }
 
-    logger.success('VirtualBox', 'Display integration preferences configured');
+    logger.success('VirtualBox', `Display hints configured (${resolutionStr})`);
+    return {
+      width: guestWidth,
+      height: guestHeight,
+      resolution: resolutionStr
+    };
   }
 
   /**
@@ -918,6 +1075,29 @@ class VirtualBoxAdapter {
 
     const warnings = [];
     let guestAdditionsReady = false;
+    let targetDisplaySize = null;
+
+    if (guestDisplayFullscreen) {
+      try {
+        targetDisplaySize = await this.configureDisplayHints(vmName, {
+          fullscreen: true,
+          width,
+          height
+        });
+      } catch (err) {
+        warnings.push(`display hint apply: ${err.message}`);
+      }
+    } else {
+      try {
+        await this.configureDisplayHints(vmName, {
+          fullscreen: false,
+          width,
+          height
+        });
+      } catch (err) {
+        warnings.push(`display hint disable: ${err.message}`);
+      }
+    }
 
     try {
       const info = await this.getVMInfo(vmName);
@@ -948,10 +1128,10 @@ class VirtualBoxAdapter {
     } else {
       warnings.push('clipboard/drag-drop deferred until Guest Additions is fully ready (existing mode preserved)');
     }
-    if (guestDisplayFullscreen && Number(width) > 0 && Number(height) > 0) {
+    if (guestDisplayFullscreen && targetDisplaySize) {
       if (guestAdditionsReady) {
-        const safeWidth = Math.min(Math.max(640, Math.floor(Number(width))), 7680);
-        const safeHeight = Math.min(Math.max(480, Math.floor(Number(height))), 4320);
+        const safeWidth = targetDisplaySize.width;
+        const safeHeight = targetDisplaySize.height;
         await safeRun(
           ['controlvm', vmName, 'setvideomodehint', String(safeWidth), String(safeHeight), String(bpp), String(display)],
           'video mode hint apply'
@@ -1011,8 +1191,10 @@ class VirtualBoxAdapter {
       }, (error, stdout, stderr) => {
         if (error) {
           const errMsg = stderr?.trim() || error.message;
-          logger.error('VirtualBox', `Command failed: ${cmdStr}`);
-          logger.error('VirtualBox', `Error: ${errMsg}`);
+          if (!options.quiet) {
+            logger.error('VirtualBox', `Command failed: ${cmdStr}`);
+            logger.error('VirtualBox', `Error: ${errMsg}`);
+          }
           reject(new Error(`VBoxManage error: ${errMsg}`));
         } else {
           if (stderr?.trim()) {

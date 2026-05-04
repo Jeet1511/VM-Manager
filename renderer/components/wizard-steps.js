@@ -145,6 +145,16 @@ function _hydrateAutoVmNameState(state) {
   }
 }
 
+function _requiresAutomaticInstall(state) {
+  const usingExistingVm = state?.useExistingVm === true;
+  const isoSource = String(state?.isoSource || 'official').toLowerCase();
+  return !usingExistingVm && isoSource !== 'custom';
+}
+
+function _manualInstallBlockMessage(osName = 'This OS') {
+  return `${osName} needs manual OS installation. Official one-click setup only supports automatic install profiles so VM Xposed can create the user and complete guest setup for you. Choose Ubuntu 20.04 LTS or newer, or use Custom ISO / Import V Os for manual installers.`;
+}
+
 const WizardSteps = {
   // ─── Step 1: Choose OS ─────────────────────────────────────────────
   chooseOs: {
@@ -158,6 +168,7 @@ const WizardSteps = {
       }, {});
 
       const categories = Object.keys(grouped);
+      const automaticOnly = _requiresAutomaticInstall(state);
       const selectedCategory = state.osCategory && grouped[state.osCategory]
         ? state.osCategory
         : (state.osName && catalog[state.osName]?.category)
@@ -173,42 +184,60 @@ const WizardSteps = {
       });
 
       const recommendedByCategory = recommendation.byCategoryTop[selectedCategory]?.name || '';
+      const firstAutomaticVersion = versions.find(v => v.unattended !== false)?.name || '';
       const selectedVersion = (state.osName && versions.some(v => v.name === state.osName))
-        ? state.osName
-        : (recommendedByCategory || versions[0]?.name || '');
+        ? ((automaticOnly && catalog[state.osName]?.unattended === false) ? (firstAutomaticVersion || state.osName) : state.osName)
+        : (automaticOnly ? (firstAutomaticVersion || recommendedByCategory || versions[0]?.name || '') : (recommendedByCategory || versions[0]?.name || ''));
+      if (selectedVersion && selectedVersion !== state.osName) {
+        state.osName = selectedVersion;
+        state.osCategory = catalog[selectedVersion]?.category || selectedCategory || state.osCategory;
+        _syncVmNameWithSelectedOs(state);
+      }
 
       const cards = categories.map((category) => {
         const versionsCount = grouped[category]?.length || 0;
+        const automaticCount = (grouped[category] || []).filter((item) => item.unattended !== false).length;
         const isActive = category === selectedCategory;
         const topInCategory = recommendation.byCategoryTop[category];
         return `
           <div class="os-card" data-os-category="${category}" style="padding: 16px; border: 1px solid ${isActive ? '#007acc' : '#333'}; border-radius: 6px; cursor: pointer; background: ${isActive ? '#252526' : '#1e1e1e'}; flex: 1; min-width: 170px;">
             <div style="font-size: 22px; margin-bottom: 8px;">${typeof Icons !== 'undefined' ? Icons.monitor : ''}</div>
             <div style="font-weight: 600; color: #ccc;">${category}</div>
-            <div style="font-size: 12px; color: #888; margin-top: 4px;">${versionsCount} version${versionsCount !== 1 ? 's' : ''}</div>
+            <div style="font-size: 12px; color: #888; margin-top: 4px;">${versionsCount} version${versionsCount !== 1 ? 's' : ''}${automaticOnly ? ` · ${automaticCount} automatic` : ''}</div>
             ${topInCategory ? `<div style="font-size:11px; color:#58a6ff; margin-top:6px;">Top: ${topInCategory.name}</div>` : ''}
           </div>
         `;
       }).join('');
 
       const versionOptions = versions.map((version) => `
-        <option value="${version.name}" ${version.name === selectedVersion ? 'selected' : ''}>${version.name}${version.name === recommendedByCategory ? ' ★ Recommended' : ''}</option>
+        <option value="${version.name}" ${version.name === selectedVersion ? 'selected' : ''} ${automaticOnly && version.unattended === false ? 'disabled' : ''}>${version.name}${version.name === recommendedByCategory ? ' ★ Recommended' : ''}${version.unattended === false ? ' (Manual)' : ''}</option>
       `).join('');
 
       const selectedVersionInfo = catalog[selectedVersion] || {};
       const selectedScore = recommendation.scores[selectedVersion];
-      const top3 = versions.slice(0, 3).map((v) => recommendation.scores[v.name]).filter(Boolean);
+      const top3 = versions
+        .filter((v) => !automaticOnly || v.unattended !== false)
+        .slice(0, 3)
+        .map((v) => recommendation.scores[v.name])
+        .filter(Boolean);
       const sourceUrl = selectedVersionInfo.downloadUrl || '';
       const sourceDomain = sourceUrl ? new URL(sourceUrl).hostname : '';
       const lastSyncText = state.catalogRefreshMeta?.timestamp
         ? new Date(state.catalogRefreshMeta.timestamp).toLocaleString()
         : 'Not synced yet';
+      const manualBlocked = automaticOnly && selectedVersionInfo.unattended === false;
 
       return `
         <div class="glass-card wizard-shell">
           ${renderStepIndicator(0)}
           <h2 class="step-title" style="margin-bottom: 8px; color: #fff;">Choose OS</h2>
           <p class="step-description" style="color: #888; margin-bottom: 24px;">Choose OS family and version from the official catalog.</p>
+
+          ${automaticOnly ? `
+            <div class="wizard-section wizard-section-muted" style="margin-bottom: 16px; border-color:#29415f;">
+              <div style="font-size:12px; color:#9da7b3;">Automatic mode is on. VM Xposed will only continue with OS profiles that can create the guest user and apply guest OS display fit automatically.</div>
+            </div>
+          ` : ''}
 
           <div class="wizard-section wizard-section-muted" style="margin-bottom: 16px;">
             <div style="font-size:12px; color:#9da7b3; margin-bottom:6px;">Smart Recommendations ${state.systemReport ? '(Based on your PC specs)' : '(Analyzing your PC specs...)'}</div>
@@ -237,6 +266,7 @@ const WizardSteps = {
             <div style="font-size: 12px; color:#888; margin-bottom: 6px;">${selectedVersionInfo.notes || 'No notes available.'}</div>
             <div style="font-size: 12px; color:#888;">OS Type: ${selectedVersionInfo.osType || 'Other_64'} · Unattended: ${selectedVersionInfo.unattended ? 'Supported' : 'Manual'}</div>
             ${selectedScore ? `<div style="font-size:12px; color:${selectedScore.fit === 'Excellent' || selectedScore.fit === 'Good' ? '#2ea043' : (selectedScore.fit === 'Limited' ? '#d29922' : '#f85149')}; margin-top:6px;">Recommended Fit: ${selectedScore.fit} · Needs ${selectedScore.reasons.reqCpu} CPU, ${selectedScore.reasons.reqRamGb} GB RAM, ${selectedScore.reasons.reqDiskGb} GB disk</div>` : ''}
+            ${manualBlocked ? `<div style="font-size:12px; color:#f85149; margin-top:8px;">${_manualInstallBlockMessage(selectedVersion)}</div>` : ''}
 
             ${sourceUrl ? `
               <div style="margin-top: 12px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
@@ -250,7 +280,7 @@ const WizardSteps = {
 
           <div class="btn-row wizard-nav-row">
             <div></div> <!-- No back button on first step -->
-            <button class="btn btn-primary wizard-nav-next" id="btnNext">Next →</button>
+            <button class="btn btn-primary wizard-nav-next" id="btnNext" ${manualBlocked ? 'disabled' : ''}>Next →</button>
           </div>
         </div>
       `;
@@ -260,10 +290,15 @@ const WizardSteps = {
       const recommendation = buildRecommendations(catalog, state.systemReport);
 
       const pickBestVersion = (category) => {
+        const automaticOnly = _requiresAutomaticInstall(state);
         const best = recommendation.byCategoryTop[category]?.name;
-        if (best) return best;
-        const firstMatch = Object.entries(catalog).find(([name, info]) => info.category === category);
-        return firstMatch ? firstMatch[0] : '';
+        if (best && (!automaticOnly || catalog[best]?.unattended !== false)) return best;
+        const firstMatch = Object.entries(catalog).find(([name, info]) => (
+          info.category === category && (!automaticOnly || info.unattended !== false)
+        ));
+        if (firstMatch) return firstMatch[0];
+        const manualMatch = Object.entries(catalog).find(([name, info]) => info.category === category);
+        return manualMatch ? manualMatch[0] : '';
       };
 
       document.querySelectorAll('.os-card').forEach((card) => {
@@ -296,6 +331,13 @@ const WizardSteps = {
       document.getElementById('osVersionSelect')?.addEventListener('change', (e) => {
         const selected = e.target.value;
         if (!selected) return;
+        if (_requiresAutomaticInstall(state) && catalog[selected]?.unattended === false) {
+          if (typeof Dashboard !== 'undefined' && Dashboard._notify) {
+            Dashboard._notify(_manualInstallBlockMessage(selected), 'error');
+          }
+          if (typeof renderStep === 'function') renderStep(0);
+          return;
+        }
         state.osName = selected;
         state.osCategory = catalog[selected]?.category || state.osCategory;
         _syncVmNameWithSelectedOs(state);
@@ -382,6 +424,10 @@ const WizardSteps = {
     },
     validate(state) {
       if (!state.osName) return { valid: false, message: 'Please select an OS to continue.' };
+      const selected = state.defaults?.osCatalog?.[state.osName];
+      if (_requiresAutomaticInstall(state) && selected?.unattended === false) {
+        return { valid: false, message: _manualInstallBlockMessage(state.osName) };
+      }
       return { valid: true };
     }
   },

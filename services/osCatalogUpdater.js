@@ -60,6 +60,32 @@ function sortVersionsDesc(versions) {
   });
 }
 
+function parseUbuntuVersion(version = '') {
+  const match = String(version || '').match(/(\d{2})\.(\d{2})(?:\.(\d+))?/);
+  if (!match) return null;
+  const major = parseInt(match[1], 10);
+  const minor = parseInt(match[2], 10);
+  const patch = parseInt(match[3] || '0', 10);
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return null;
+  return { major, minor, patch, numeric: major * 100 + minor };
+}
+
+function isUbuntuUnattendedSupported(version = '', filename = '') {
+  const parsed = parseUbuntuVersion(version || filename);
+  if (!parsed) return false;
+
+  // VirtualBox unattended media generation fails for legacy Ubuntu desktop
+  // installers such as 10.04/11.04. Keep normal users on the known automatic
+  // path where VM Xposed can create the user and apply guest display fit.
+  return parsed.numeric >= 2004;
+}
+
+function buildUbuntuAutomationNote(version = '', filename = '') {
+  return isUbuntuUnattendedSupported(version, filename)
+    ? 'Automatic setup supported by VM Xposed'
+    : 'Manual install only: this legacy Ubuntu ISO cannot be automated by VirtualBox unattended install';
+}
+
 async function updateUbuntu(catalog) {
   const regex = /ubuntu-(\d{2}\.\d{2}(?:\.\d+)?)-(?:desktop|live-server|server)-amd64\.iso/gi;
   const dirRegex = /href=["']?(\d{2}\.\d{2}(?:\.\d+)?)\/?["']?/gi;
@@ -129,6 +155,7 @@ async function updateUbuntu(catalog) {
 
     if (!selected) continue;
 
+    const unattendedSupported = isUbuntuUnattendedSupported(version, selected.filename);
     const existing = catalog[key];
     catalog[key] = {
       ...(existing || {}),
@@ -137,7 +164,7 @@ async function updateUbuntu(catalog) {
       filename: selected.filename,
       downloadUrl: selected.downloadUrl,
       sha256Url: selected.sha256Url,
-      unattended: true,
+      unattended: unattendedSupported,
       defaultUser: 'user',
       defaultPass: 'password',
       ram: 4096,
@@ -145,7 +172,7 @@ async function updateUbuntu(catalog) {
       disk: 25600,
       vram: 128,
       graphicsController: 'vmsvga',
-      notes: `Ubuntu ${version} from official Ubuntu archives`
+      notes: `Ubuntu ${version} from official Ubuntu archives. ${buildUbuntuAutomationNote(version, selected.filename)}.`
     };
 
     if (!existing) {
@@ -174,7 +201,9 @@ async function updateUbuntu(catalog) {
     catalog[aliasKey] = {
       ...(existingAlias || {}),
       ...(sourceEntry || {}),
-      notes: `Ubuntu ${baseVersion} (latest point release: ${alias.key.replace('Ubuntu ', '')})`
+      notes: sourceEntry.unattended === false
+        ? `Ubuntu ${baseVersion} (latest point release: ${alias.key.replace('Ubuntu ', '')}). ${buildUbuntuAutomationNote(baseVersion, sourceEntry.filename)}.`
+        : `Ubuntu ${baseVersion} (latest point release: ${alias.key.replace('Ubuntu ', '')}). Automatic setup supported by VM Xposed.`
     };
     if (!existingAlias) {
       added += 1;
@@ -682,4 +711,4 @@ async function refreshOfficialCatalog(baseCatalog, log = null) {
   return { catalog, summary, totalAdded };
 }
 
-module.exports = { refreshOfficialCatalog };
+module.exports = { refreshOfficialCatalog, isUbuntuUnattendedSupported };

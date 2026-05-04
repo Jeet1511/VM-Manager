@@ -226,6 +226,53 @@ class Orchestrator extends EventEmitter {
     await stateManager.clearState();
   }
 
+  _automaticInstallUnsupportedError(osLabel = 'this OS', detail = '') {
+    const extra = detail ? ` ${detail}` : '';
+    const err = new Error(
+      `Automatic setup is not available for ${osLabel}.${extra} VM Xposed stopped before opening the raw OS installer, because user creation and guest OS display fit only work after a successful automatic install. Choose Ubuntu 20.04 LTS or newer for one-click setup, or use Custom ISO / Import V Os for manual installers.`
+    );
+    err.recoverable = false;
+    err.noResume = true;
+    return err;
+  }
+
+  async _cleanupFailedAutomaticVm(config = {}, reason = 'automatic setup failed') {
+    const vmName = String(config?.vmName || '').trim();
+    if (!vmName) return;
+
+    logger.warn('Orchestrator', `Cleaning up partial V Os "${vmName}" because ${reason}.`);
+
+    try {
+      const exists = await virtualbox.vmExists(vmName);
+      if (exists) {
+        await virtualbox.deleteVM(vmName);
+      }
+    } catch (err) {
+      logger.warn('Orchestrator', `Partial V Os cleanup warning: ${err.message}`);
+    }
+
+    try {
+      const installRoot = path.resolve(String(config?.installPath || '').trim());
+      const candidate = path.resolve(installRoot, vmName);
+      if (
+        installRoot
+        && candidate
+        && candidate !== installRoot
+        && candidate.toLowerCase().startsWith(`${installRoot.toLowerCase()}${path.sep}`)
+      ) {
+        await fs.promises.rm(candidate, { recursive: true, force: true });
+      }
+    } catch (err) {
+      logger.warn('Orchestrator', `Partial V Os folder cleanup warning: ${err.message}`);
+    }
+
+    try {
+      await stateManager.clearState();
+    } catch (err) {
+      logger.warn('Orchestrator', `Could not clear failed setup state: ${err.message}`);
+    }
+  }
+
   /**
    * Run the entire setup workflow.
    * Emits events for UI updates at every step.
@@ -360,7 +407,16 @@ class Orchestrator extends EventEmitter {
       const selectedOS = config._resolvedOsProfile || findOS(config.osName || config.ubuntuVersion) || OS_CATALOG['Custom ISO'];
       const selectedIsoConfig = selectedOS || UBUNTU_RELEASES[config.ubuntuVersion];
       const resolvedDownloadDir = String(config.downloadPath || '').trim() || getDownloadDir();
+      const requiresAutomaticInstall = config.requireAutomaticInstall === true;
       let isoPath;
+
+      if (requiresAutomaticInstall && selectedIsoConfig?.unattended === false) {
+        this._setPhase('download_iso', 'error');
+        throw this._automaticInstallUnsupportedError(
+          config.osName || config.ubuntuVersion || 'the selected OS',
+          'This profile is marked as manual-install only.'
+        );
+      }
 
       // Check if ISO was already downloaded in a previous run
       if (_shouldSkip('download_iso') && stateManager.state?.artifacts?.isoPath) {
@@ -514,7 +570,11 @@ class Orchestrator extends EventEmitter {
           this._setPhase('create_vm', 'complete');
           this._emitProgress('create_vm', 'V Os already created (previous run)', 100);
           logger.info('Orchestrator', `⏭ V Os create — "${config.vmName}" already exists, skipping`);
-          vmResult = { vmName: config.vmName, sharedFolder: stateManager.state.artifacts.sharedFolderResult || null };
+          vmResult = {
+            vmName: config.vmName,
+            sharedFolder: stateManager.state.artifacts.sharedFolderResult || null,
+            unattendedApplied: stateManager.state.artifacts.unattendedApplied === true
+          };
         } else {
           logger.warn('Orchestrator', 'V Os was deleted — recreating...');
           _shouldSkip('create_vm'); // fallthrough
@@ -546,7 +606,9 @@ class Orchestrator extends EventEmitter {
             accelerate3d: config.accelerate3d === true,
             clipboardMode: config.clipboardMode || 'bidirectional',
             dragAndDrop: config.dragAndDrop || 'bidirectional',
-            autoStartVm: config.autoStartVm === true
+            autoStartVm: config.autoStartVm === true,
+            displayWidth: config.displayWidth || 0,
+            displayHeight: config.displayHeight || 0
           },
           (p) => {
             this._emitProgress('create_vm', p.message, p.percent);
@@ -556,13 +618,28 @@ class Orchestrator extends EventEmitter {
         this._setPhase('create_vm', 'complete');
         await stateManager.completePhase('create_vm', {
           vmCreated: true,
-          sharedFolderResult: vmResult.sharedFolder
+          sharedFolderResult: vmResult.sharedFolder,
+          unattendedApplied: vmResult.unattendedApplied === true
         });
       }
 
       // ─── Phase 7: OS Installation Started ──────────────────────────
-      const unattendedInstall = selectedIsoConfig?.unattended !== false;
+      const requestedUnattendedInstall = selectedIsoConfig?.unattended !== false;
+      const unattendedInstall = requestedUnattendedInstall && vmResult?.unattendedApplied === true;
+      const unattendedUnavailable = requestedUnattendedInstall && vmResult?.unattendedApplied !== true;
       const autoStartVm = config.autoStartVm === true;
+
+      if (requiresAutomaticInstall && unattendedUnavailable) {
+        this._setPhase('install_os', 'error');
+        this._emitProgress('install_os', 'Automatic Ubuntu setup failed for this ISO. Cleaning up the partial V Os...', 100);
+        await this._cleanupFailedAutomaticVm(config, 'VirtualBox could not prepare unattended install media');
+        throw this._automaticInstallUnsupportedError(
+          config.osName || config.ubuntuVersion || 'the selected Ubuntu ISO',
+          'VirtualBox could not prepare unattended install media for it.'
+        );
+      }
+
+      const vmRunningForInstall = String(await virtualbox.getVMState(config.vmName) || '').toLowerCase() === 'running';
       if (_shouldSkip('install_os')) {
         if (autoStartVm) {
           this._setPhase('install_os', 'complete');
@@ -584,6 +661,16 @@ class Orchestrator extends EventEmitter {
         this._setPhase('install_os', 'skipped');
         this._emitProgress('install_os', 'Auto-start is disabled. Start the V Os manually to begin OS installation.', 100);
         logger.info('Orchestrator', 'Skipping automatic V Os boot to keep host responsive.');
+        await stateManager.skipPhase('install_os');
+      } else if (unattendedUnavailable) {
+        this._setPhase('install_os', 'skipped');
+        this._emitProgress('install_os', 'Automatic Ubuntu installation could not be prepared for this ISO. Manual OS install is required for this version.', 100);
+        logger.warn('Orchestrator', 'Skipping OS install wait because unattended setup was unavailable for this ISO.');
+        await stateManager.skipPhase('install_os');
+      } else if (!vmRunningForInstall) {
+        this._setPhase('install_os', 'skipped');
+        this._emitProgress('install_os', 'This OS profile requires manual installation. V Os was created but not started automatically.', 100);
+        logger.warn('Orchestrator', 'Skipping OS install wait because the VM was not started automatically.');
         await stateManager.skipPhase('install_os');
       } else {
         this._setPhase('install_os', 'active');
@@ -608,7 +695,10 @@ class Orchestrator extends EventEmitter {
       if (!unattendedInstall) {
         this._setPhase('wait_boot', 'skipped');
         this._setPhase('guest_config', 'skipped');
-        logger.info('Orchestrator', 'Skipping guest auto-configuration for manual-install OS profile.');
+        guestConfigWarning = unattendedUnavailable
+          ? 'Automatic install could not be prepared for this Ubuntu ISO. Complete the Ubuntu installer manually, then run Guest Setup/Fix All.'
+          : 'Manual-install OS profile. Complete OS installation manually, then run Guest Setup/Fix All.';
+        logger.info('Orchestrator', `Skipping guest auto-configuration: ${guestConfigWarning}`);
       } else if (!autoStartVm) {
         this._setPhase('wait_boot', 'skipped');
         this._setPhase('guest_config', 'skipped');
@@ -634,13 +724,15 @@ class Orchestrator extends EventEmitter {
           // Eject the ISO and set boot order to disk-first now that OS is installed
           try {
             // Remove the ISO from the virtual DVD drive so it doesn't boot from it again
-            await virtualbox._run(['storageattach', config.vmName, '--storagectl', 'IDE Controller', '--port', '1', '--device', '0', '--medium', 'none']).catch(() => {});
-            await virtualbox._run(['storageattach', config.vmName, '--storagectl', 'IDE Controller', '--port', '0', '--device', '1', '--medium', 'none']).catch(() => {});
+            await virtualbox.ejectInstallerIso(config.vmName).catch(() => {});
             // Change boot order to disk first
             await virtualbox._run(['modifyvm', config.vmName, '--boot1', 'disk', '--boot2', 'dvd', '--boot3', 'none', '--boot4', 'none']).catch(async () => {
               // If modifyvm fails because VM is running, try via setextradata
               await virtualbox._run(['setextradata', config.vmName, 'GUI/DefaultCloseAction', 'PowerOff']).catch(() => {});
             });
+            await virtualbox._run(['setextradata', config.vmName, 'VMXposed/InstalledDiskReady', 'on']).catch(() => {});
+            await virtualbox._run(['setextradata', config.vmName, 'VMXposed/GuestInstallMarker', 'on']).catch(() => {});
+            await virtualbox._run(['setextradata', config.vmName, 'VMXposed/InstallPhase', 'postinstall']).catch(() => {});
             logger.success('Orchestrator', 'Install media ejected and boot order set to disk-first');
           } catch (ejectErr) {
             logger.warn('Orchestrator', `Could not eject install media: ${ejectErr.message}`);
@@ -684,6 +776,21 @@ class Orchestrator extends EventEmitter {
               }
 
               guestConfigured = true;
+              await virtualbox._run(['setextradata', config.vmName, 'VMXposed/InstallPhase', 'ready']).catch(() => {});
+              try {
+                await virtualbox.applyRuntimeIntegration(config.vmName, {
+                  clipboardMode: config.clipboardMode || 'bidirectional',
+                  dragAndDrop: config.dragAndDrop || 'bidirectional',
+                  width: config.displayWidth || 0,
+                  height: config.displayHeight || 0,
+                  bpp: 32,
+                  display: 0,
+                  guestDisplayFullscreen: config.startFullscreen !== false,
+                  waitForGuestAdditionsMs: config.startFullscreen !== false ? 90000 : 0
+                });
+              } catch (displayErr) {
+                logger.warn('Orchestrator', `Runtime display fit warning: ${displayErr.message}`);
+              }
               this._emitProgress('guest_config', 'Guest integration fully configured!', 100);
               this._setPhase('guest_config', 'complete');
               await stateManager.completePhase('guest_config', { guestConfigured: true });
@@ -713,6 +820,7 @@ class Orchestrator extends EventEmitter {
 
       // ─── Phase 10: Complete ────────────────────────────────────────
       this._setPhase('complete', 'active');
+      const finalVmRunning = String(await virtualbox.getVMState(config.vmName) || '').toLowerCase() === 'running';
 
       const finalResult = {
         success: true,
@@ -723,10 +831,14 @@ class Orchestrator extends EventEmitter {
         },
         guestConfigured,
         autoStartVm,
+        autoStarted: finalVmRunning,
+        manualInstallRequired: !unattendedInstall,
         guestConfigWarning,
         sharedFolder: vmResult.sharedFolder,
         installPath: config.installPath,
-        message: unattendedInstall
+        message: unattendedUnavailable
+          ? 'Automatic install is not available for this Ubuntu ISO. The V Os was created, but Ubuntu must be installed manually before guest display fit can work.'
+          : unattendedInstall
           ? (!autoStartVm
             ? 'V Os prepared successfully. Start it manually to begin OS installation.'
             : (guestConfigured
@@ -734,7 +846,9 @@ class Orchestrator extends EventEmitter {
               : 'V Os setup complete. OS is installed and guest integration will finish after first login.'))
           : (!autoStartVm
             ? 'V Os prepared successfully. Start it manually and complete installation from the ISO.'
-            : 'V Os created and booted. Complete manual installation in the V Os window.')
+            : (finalVmRunning
+              ? 'V Os created and booted. Complete manual installation in the V Os window.'
+              : 'V Os created. This OS profile requires manual installation, so it was not started automatically.'))
       };
 
       this._emitProgress('complete', finalResult.message, 100);
@@ -746,9 +860,11 @@ class Orchestrator extends EventEmitter {
         'Orchestrator',
         (!autoStartVm)
           ? '  Setup Complete — V Os Prepared (Manual Start Required)'
-          : ((guestConfigured || !unattendedInstall)
+          : (unattendedUnavailable
+            ? '  Setup Complete — Manual Ubuntu Install Required'
+            : ((guestConfigured || !unattendedInstall)
             ? '  Setup Complete — Everything Configured!'
-            : '  Setup Complete — OS Ready, Integration Pending')
+            : '  Setup Complete — OS Ready, Integration Pending'))
       );
       logger.success('Orchestrator', `  V Os: ${config.vmName}`);
       logger.success('Orchestrator', `  Username: ${finalResult.credentials.username}`);
@@ -760,7 +876,7 @@ class Orchestrator extends EventEmitter {
         logger.success('Orchestrator', '  ✓ Fullscreen / dynamic resolution');
         logger.success('Orchestrator', '  ✓ Shared folder auto-mounted');
         logger.success('Orchestrator', '  ✓ All settings persist across reboots');
-      } else if (unattendedInstall) {
+      } else if (unattendedInstall || unattendedUnavailable) {
         logger.warn('Orchestrator', `  ⚠ Guest integration pending: ${guestConfigWarning || 'Will complete after login.'}`);
       }
       logger.success('Orchestrator', '══════════════════════════════════════════');
@@ -796,7 +912,12 @@ class Orchestrator extends EventEmitter {
       logger.error('Orchestrator', `Setup failed: ${err.message}`);
 
       // Save the failure to state — so we can resume from here
-      if (this.currentPhase) {
+      const recoverable = err?.recoverable !== false && err?.noResume !== true;
+      if (err?.noResume === true) {
+        await stateManager.clearState().catch((clearErr) => {
+          logger.warn('Orchestrator', `Could not clear non-resumable setup state: ${clearErr.message}`);
+        });
+      } else if (this.currentPhase) {
         await stateManager.failPhase(this.currentPhase, err.message);
         this._setPhase(this.currentPhase, 'error');
       }
@@ -804,7 +925,7 @@ class Orchestrator extends EventEmitter {
       this.emit('error', {
         phase: this.currentPhase,
         message: err.message,
-        recoverable: true  // Can resume from saved state
+        recoverable
       });
 
       throw err;

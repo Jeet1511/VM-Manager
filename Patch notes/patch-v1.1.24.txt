@@ -1,0 +1,20 @@
+VM Xposed v1.1.24 - Patch Notes
+================================
+
+Bug Fixes & Improvements:
+
+Install State Accuracy:
+- Fixed setup reporting completion when VirtualBox could not prepare unattended install media for an older Ubuntu ISO
+- VM Xposed now uses the real unattended-install result instead of assuming every Ubuntu ISO can be automated
+- Manual-install-required V Os profiles are left powered off instead of automatically opening the Ubuntu language/setup screen
+- Completion UI now clearly distinguishes automatic setup from manual OS installation requirements
+
+Installer Media Handling:
+- The Start action no longer ejects the installer ISO until VM Xposed has verified that the installed disk is ready
+- VM Xposed now writes install-state markers so later starts know whether to preserve installer media or boot from disk
+- This prevents broken first boots while still avoiding the old "Install Ubuntu" screen after a successful install
+
+Guest OS Display Fit:
+- Legacy VirtualBox window fullscreen flags are no longer treated as the Guest Display Fit preference
+- VM Xposed clears the VirtualBox window fullscreen flag before launch and applies guest display hints separately
+- Display Fit continues to mean the Ubuntu desktop fills the VM viewport, not that the VirtualBox app window is forced fullscreen

@@ -1,0 +1,22 @@
+VM Xposed v1.1.25 - Patch Notes
+================================
+
+Critical Fixes:
+
+Automatic Install Guard:
+- VM Xposed now blocks manual-only Ubuntu profiles in normal automatic mode
+- Legacy Ubuntu ISOs such as 10.04 and 11.04 are marked as manual install only instead of "unattended ready"
+- If VirtualBox still fails to prepare unattended install media, VM Xposed cleans up the partial V Os and stops before opening the raw Ubuntu welcome/setup screen
+
+Fresh Reinstall Behavior:
+- Fresh Create V Os no longer silently reuses an existing V Os with the same name
+- Users must delete the old V Os or choose a new name, which prevents broken/manual installs from being reused by mistake
+- Deleted V Os installs can be created again from zero while still reusing the already downloaded ISO file
+
+Guest OS Display Fit:
+- Display Fit remains a guest OS resolution feature, not VirtualBox window fullscreen
+- VM Xposed only reports display/user automation as complete after unattended install and Guest Additions are actually ready
+
+Normal User Safety:
+- Beginner and Balanced modes now continue only with OS profiles that can create the guest user and apply VM Xposed settings automatically
+- Advanced mode remains available for intentional manual ISO installs

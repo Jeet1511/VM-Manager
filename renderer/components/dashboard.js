@@ -146,10 +146,20 @@ const Dashboard = {
       if (hasMemoryIntegrityConflict) desc.push('Memory Integrity is enabled');
       if (hasPendingReboot) desc.push('Windows restart is pending');
       const safeDesc = Dashboard._escapeHtml(desc.join(' / '));
-      const alertTitle = adminIssue ? 'Administrator Access Recommended' : 'Host Attention Needed';
+      const onlyPendingRebootIssue = hasPendingReboot
+        && !adminIssue
+        && !hasDriverIssue
+        && !hasRuntimeIssue
+        && !hasHypervisorConflict
+        && !hasMemoryIntegrityConflict;
+      const alertTitle = adminIssue
+        ? 'Administrator Access Recommended'
+        : (onlyPendingRebootIssue ? 'Restart Required' : 'Host Attention Needed');
       const guidance = adminIssue
         ? 'Some V Os operations may fail without elevated access. Use the floating <strong>Continue with Admin Privilege</strong> action for full access.'
-        : 'Use the actions below to clear host blockers, then retry Start V Os.';
+        : (onlyPendingRebootIssue
+          ? 'Restart Windows first, then reopen VM Xposed, click <strong>Refresh</strong>, and retry Start V Os.'
+          : 'Use the actions below to clear host blockers, then retry Start V Os.');
 
       alertEl.innerHTML = `
         <div class="dash-alert dash-alert-warn">
@@ -517,7 +527,12 @@ const Dashboard = {
           return;
         }
 
-        Dashboard._notify(`Guest display fit ${enableFit ? 'enabled' : 'disabled'}.`, 'success');
+        const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+        if (enableFit && warnings.some((warning) => /guest additions|video mode hint|display fit/i.test(String(warning || '')))) {
+          Dashboard._notify('Guest display fit enabled. VM Xposed will apply the full OS resolution automatically when the guest display service is ready.', 'info');
+        } else {
+          Dashboard._notify(`Guest display fit ${enableFit ? 'enabled' : 'disabled'}.`, 'success');
+        }
         await Dashboard._refreshAfterMutation(app);
       });
 
@@ -652,6 +667,12 @@ const Dashboard = {
       if (!configured) {
         return { state: 'off', value: label, icon: Icons.sized(Icons.info, 14) };
       }
+      if (!runtimeCheckAvailable) {
+        return { state: 'pending', value: `${label} (verify after start)`, icon: Icons.sized(Icons.warning, 14) };
+      }
+      if (!guestAdditionsReady) {
+        return { state: 'pending', value: `${label} (waiting GA)`, icon: Icons.sized(Icons.warning, 14) };
+      }
       return { state: 'ok', value: label, icon: Icons.sized(Icons.checkCircle, 14) };
     };
 
@@ -663,7 +684,7 @@ const Dashboard = {
       ? { state: 'ok', value: 'Ready', icon: Icons.sized(Icons.checkCircle, 14) }
       : runtimeCheckAvailable
       ? { state: 'missing', value: 'Install GA', icon: Icons.sized(Icons.xCircle, 14) }
-      : { state: 'ok', value: 'Check after start', icon: Icons.sized(Icons.checkCircle, 14) };
+      : { state: 'pending', value: 'Check after start', icon: Icons.sized(Icons.warning, 14) };
     const integrationRows = [
       { label: 'Guest Additions', ...guestAdditionsStatus },
       { label: 'Guest Display Fit', ...buildHostSideStatus({ configured: vm.fullscreenEnabled !== false, onText: 'On' }) },

@@ -107,7 +107,9 @@ async function configureGuestFeatures(vmName, options = {}) {
     graphicsController = '',
     vram = 128,
     clipboardMode = 'bidirectional',
-    dragAndDrop = 'bidirectional'
+    dragAndDrop = 'bidirectional',
+    width = 0,
+    height = 0
   } = options;
   logger.info('GuestAdditions', `Configuring Guest Additions features for "${vmName}"...`);
 
@@ -117,7 +119,9 @@ async function configureGuestFeatures(vmName, options = {}) {
       fullscreen,
       accelerate3d: accelerate3d === true,
       graphicsController,
-      vram
+      vram,
+      width,
+      height
     });
     logger.success('GuestAdditions', 'Display integration preferences applied');
 
@@ -466,7 +470,13 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
     // ─── Verification ─────────────────────────────────────────────
     const verifyGroups = await virtualbox.guestShell(vmName, normalizedUsername, password, `id -nG ${shellQuote(normalizedUsername)} || true`, { timeout: 15000, ignoreErrors: false });
     const verifyAutostart = await virtualbox.guestShell(vmName, normalizedUsername, password, `test -f /home/${normalizedUsername}/.config/autostart/vboxclient.desktop && echo ok || echo missing`, { timeout: 15000, ignoreErrors: false });
-    const verifyDisplayClient = await virtualbox.guestShell(vmName, normalizedUsername, password, 'pgrep -f "VBoxClient --display" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
+    const verifyDisplayClient = await virtualbox.guestShell(
+      vmName,
+      normalizedUsername,
+      password,
+      'pgrep -f "VBoxClient --vmsvga" >/dev/null && echo running || pgrep -f "VBoxClient --display" >/dev/null && echo running || echo missing',
+      { timeout: 15000, ignoreErrors: false }
+    );
     const verifyClipboardClient = await virtualbox.guestShell(vmName, normalizedUsername, password, 'pgrep -f "VBoxClient --clipboard" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
     const verifyDnDClient = await virtualbox.guestShell(vmName, normalizedUsername, password, 'pgrep -f "VBoxClient --draganddrop" >/dev/null && echo running || echo missing', { timeout: 15000, ignoreErrors: false });
     const verifySessionType = await virtualbox.guestShell(

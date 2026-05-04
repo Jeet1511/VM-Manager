@@ -3011,7 +3011,15 @@ async function _initOverview() {
         _notify('Windows restart is pending. Reboot first, then retry Start V Os.', 'info');
       }
 
-      _notify('Final step: Restart Windows, open VM Xposed, then press Start V Os.', 'success');
+      const restartLikelyRequired = hostGuideState.hasPendingReboot
+        || hostGuideState.hasHypervisorConflict
+        || hostGuideState.hasMemoryIntegrityConflict;
+      _notify(
+        restartLikelyRequired
+          ? 'Final step: Restart Windows, open VM Xposed, then press Start V Os.'
+          : 'Final step: Click Refresh Health, then press Start V Os.',
+        'success'
+      );
     } catch (err) {
       _notify(err?.message || 'Guided host fix failed.', 'error');
     } finally {
@@ -6043,6 +6051,14 @@ async function _runSetup(resumeFrom) {
   });
 
   // Build config
+  const selectedOsProfile = (appState.defaults?.osCatalog && appState.osName)
+    ? appState.defaults.osCatalog[appState.osName]
+    : null;
+  const selectedRequiresCustomIso = selectedOsProfile?.requireCustomIso === true;
+  const requiresAutomaticInstall = !appState.useExistingVm
+    && String(appState.isoSource || 'official').toLowerCase() !== 'custom'
+    && !selectedRequiresCustomIso;
+
   const config = {
     vmName: appState.vmName || 'My V Os',
     installPath: appState.installPath,
@@ -6059,7 +6075,8 @@ async function _runSetup(resumeFrom) {
     dragAndDrop: appState.dragAndDrop,
     startFullscreen: appState.startFullscreen !== false,
     accelerate3d: appState.accelerate3d === true,
-    autoStartVm: false,
+    autoStartVm: true,
+    requireAutomaticInstall: requiresAutomaticInstall,
     enableSharedFolder: !!appState.enableSharedFolder,
     accountType: appState.accountType || 'guest',
     sharedFolderPath: appState.sharedFolderPath,
@@ -6104,7 +6121,9 @@ function showComplete(data) {
     id: 'complete',
     label: 'Complete',
     status: 'complete',
-    message: data?.autoStartVm === true ? 'V Os ready' : 'Manual start required'
+    message: data?.manualInstallRequired === true
+      ? 'Manual OS install required'
+      : (data?.autoStarted === true ? 'V Os ready' : 'Manual start required')
   });
 
   const container = document.getElementById('wizardContainer');

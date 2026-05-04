@@ -1,0 +1,86 @@
+VM Xposed v1.1.26 - Patch Notes
+================================
+
+CRITICAL FIXES: Complete OS Lifecycle & Boot Ordering
+
+🎯 FULL ONE-CLICK SETUP (No Manual Intervention Required)
+
+Boot Order & OS Installation:
+- FIXED: Newly installed OS no longer loops back to "Try/Install" ISO screen after reboot
+- FIXED: Boot order now intelligently switches to disk-first after installation begins, preventing ISO restart loops
+- FIXED: Disk-first fallback for manual install profiles prevents re-entering installer on subsequent reboots
+- Manual-install profiles (legacy Ubuntu, Fedora, Arch) now disabled in official one-click flow
+- User guidance now directs to Custom ISO or Import V Os for manual installers (instead of Advanced preset)
+
+VM Deletion & Cleanup:
+- FIXED: VM deletion now completely removes ALL associated files and artifacts
+- Previously: Only removed main VM folder, leaving orphaned snapshots, logs, media files, and config
+- Now removes: Machine folder, config file, log/snapshot directories, attached media (VDI/VMDK/SAV/NVRAM)
+- Deduplicates nested paths to avoid removing parent/child entries twice
+- More reliable VM cleanup before recreating same V Os
+
+Host Blocker Warnings:
+- FIXED: "Host Attention Needed" banner now shows "Restart Required" when pending reboot is the only issue
+- FIXED: Pending reboot detection hardened to ignore stale empty registry values
+- Guidance now reboot-specific: "Restart Windows first, then reopen VM Xposed and retry Start V Os"
+- Guided Host Fix final step now says "Click Refresh Health" if no restart needed, not always "Restart Windows"
+
+Automatic Install Enforcement (Non-Technical Users):
+- CHANGED: Automatic install requirement now tied to ISO SOURCE (official download vs. custom/import)
+- Previously: Tied to VM preset mode, allowing advanced users to select manual profiles but confusing normal users
+- Now: Official downloads ONLY work with automatic profiles (Ubuntu 20.04 LTS+)
+- Manual/legacy profiles available ONLY via Custom ISO or Import existing V Os paths
+- One-click flow enforces automatic install profiles at OS selection step with clear blocking messages
+- Advanced users can still use any profile by selecting Custom ISO or importing downloaded ISOs
+
+User Experience:
+- Setup now defaults to autoStartVm: true (previously false), so new installs boot automatically
+- Error messages guide users to "Custom ISO / Import V Os" instead of confusing "Switch to Advanced"
+- Boot decision logic now respects manual install markers and reboot history to stay disk-first
+- Complete guest setup happens automatically after unattended install if Guest Additions are ready
+
+Code Quality:
+- All files syntax validated
+- Boot decision engine centralized in core/vm-state.js
+- VM artifact collection pattern now matches all media types (VDI, VMDK, VHD, QCOW2, SAV, NVRAM)
+- Pending file operation check now properly handles PowerShell array/object wrapping
+
+Target User Impact:
+- Non-technical users: Download, create, install, setup, boot—no manual intervention
+- Advanced users: Full control still available via Custom ISO or Import paths
+- Mixed environments: Official catalog curated for automatic-only profiles
+- VM management: Cleaner deletion and creation cycles
+
+Tested Scenarios:
+✓ Ubuntu 20.04+ official download: Full automatic setup from download to login screen
+✓ VM deletion: All artifacts cleaned up, no orphaned files
+✓ Host reboot pending: Clear reboot-specific guidance, no false positives
+✓ Manual install profile selection: Blocked in one-click, available in custom paths
+✓ Multi-reboot install: Boot stays disk-first, no ISO loops
+✓ Resume after interruption: Boot order preserved, continues correctly
+
+Breaking Changes:
+- Manual Ubuntu profiles (10.04, 11.04, etc.) no longer selectable in official flow
+  → Use Custom ISO or Import V Os for these
+- VM Defaults preset setting no longer affects install requirement logic
+  → Install requirement now only depends on ISO source (official vs. custom)
+- autoStartVm config now defaults to true in setup (was false)
+  → OSes will boot automatically after creation; disable in settings if not wanted
+
+Deprecations:
+- "Advanced" preset references in error messages replaced with "Custom ISO / Import V Os"
+- Legacy manual install blocking message updated to reflect new workflow
+
+Migration:
+- Existing VMs unaffected; only new creation/deletion flows changed
+- Previous partial manual installs should be deleted and recreated with supported profiles
+- Existing snapshots/shared folders preserved in VM data directories
+
+Known Limitations:
+- Unattended install support limited to VirtualBox-supported profiles
+- Some older Linux distros may require manual setup; consider Custom ISO for these
+- Windows install profiles still require custom ISO (not in official catalog)
+
+Contributing:
+All code changes validated with syntax checker and tested against existing test suite.
+Ready for production deployment.

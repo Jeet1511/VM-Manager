@@ -1,0 +1,22 @@
+VM Xposed v1.1.23 - Patch Notes
+================================
+
+Bug Fixes & Improvements:
+
+Complete V Os Delete:
+- Delete now removes the VirtualBox machine and its owned VM folder, including leftover disks, configs, logs, and snapshots when VirtualBox leaves files behind
+- Saved setup/resume state for the deleted V Os is cleared so reinstalling the same version starts from zero
+- Runtime display-integration retry queues are cleared when a V Os is deleted
+- Saved-state V Ms are discarded before unregister/delete so stale saved sessions do not block cleanup
+
+Guest OS Display Fit:
+- Display Fit now targets the operating system inside the virtual machine, not the VirtualBox application window
+- VM Xposed no longer forces the VirtualBox window itself into fullscreen mode
+- Host monitor resolution is saved as a guest display hint and applied through Guest Additions when the guest OS is ready
+- Display fit retries automatically while the OS is installing or while Guest Additions are still starting
+- VBoxClient --vmsvga is now accepted as the correct display service for VMSVGA guests
+
+Automatic Post-Install Settings:
+- New V Os setup now starts the VM and continues into OS/guest integration automatically
+- Selected install options are carried into post-install setup: display fit, clipboard, drag and drop, shared folder, graphics, and runtime display resize
+- Existing/imported running V Os integrations now use the same display-fit pipeline as new installs
