@@ -16,6 +16,7 @@ const logger = require('../core/logger');
 const virtualbox = require('../adapters/virtualbox');
 const { configureGuestFeatures } = require('./guestAdditions');
 const { setupSharedFolder } = require('./sharedFolder');
+const { applyCloudInitFallback, applyPreseedFallback, sendAutomatedInstallKeystrokes, isSubiquityUbuntu } = require('./cloudInit');
 const LINUX_USERNAME_PATTERN = /^[a-z_][a-z0-9_-]{0,31}$/;
 const MIN_SUPPORTED_ISO_BYTES = 80 * 1024 * 1024;
 
@@ -249,28 +250,84 @@ async function createAndConfigureVM(config, onProgress = null) {
           `echo -e "[Desktop Entry]\\nType=Application\\nName=VBoxClient\\nExec=/usr/bin/VBoxClient-all\\nX-GNOME-Autostart-enabled=true\\nNoDisplay=true" > /home/${normalizedUsername}/.config/autostart/vboxclient.desktop`,
           'grep -q vboxsf /etc/fstab || echo "shared /media/sf_shared vboxsf rw,_netdev,umask=0007 0 0" >> /etc/fstab',
           'mkdir -p /media/sf_shared',
+          // Auto-login — user never sees login screen
+          'mkdir -p /etc/gdm3',
+          `printf "[daemon]\\nAutomaticLoginEnable=true\\nAutomaticLogin=${normalizedUsername}\\n" > /etc/gdm3/custom.conf`,
+          // Disable Wayland — VBox clipboard/drag-drop work better on Xorg
+          'sed -i "s/^#\\?WaylandEnable=.*/WaylandEnable=false/" /etc/gdm3/custom.conf 2>/dev/null || true',
+          // Disable screen lock and screensaver
           `su - ${normalizedUsername} -c "gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null" 2>/dev/null`,
+          `su - ${normalizedUsername} -c "gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null" 2>/dev/null`,
+          `su - ${normalizedUsername} -c "gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing 2>/dev/null" 2>/dev/null`,
         ].join(' ; ')
       });
       unattendedApplied = true;
     } catch (unattendedErr) {
-      // ConstructMedia failures mean VirtualBox can't automate this ISO
-      // (e.g. old/unsupported OS versions). The VM is fully created and
-      // usable — the user just needs to install the OS manually.
       if (_isConstructMediaError(unattendedErr)) {
-        logger.warn('VMManager', `Unattended install is not supported for this ISO. The V Os will boot from the ISO for manual installation. (${unattendedErr.message})`);
-        _emitProgress(onProgress, 'unattended', 'Unattended install not supported for this ISO — manual OS installation will be required on first boot.', 85);
+        // VBox can't generate automation media for this ISO.
+        // Try cloud-init ISO fallback for Ubuntu 20.04+ (Subiquity installer).
+        // Older Ubuntu (< 20.04) uses Ubiquity which doesn't support cloud-init autoinstall.
+        const isUbuntuIso = /ubuntu/i.test(osType) || /ubuntu/i.test(normalizedIsoPath);
+        const supportsAutoinstall = isUbuntuIso && isSubiquityUbuntu(normalizedIsoPath, osType);
+
+        if (supportsAutoinstall) {
+          logger.info('VMManager', 'VBox unattended failed — applying cloud-init ISO fallback for Ubuntu 20.04+...');
+          _emitProgress(onProgress, 'unattended', 'Applying VM Xposed cloud-init automation...', 83);
+          const vmDir = path.join(normalizedInstallPath, name);
+          const fallbackResult = await applyCloudInitFallback(name, vmDir, virtualbox, {
+            hostname: name.replace(/\s+/g, '-').toLowerCase(),
+            username: normalizedUsername,
+            password: normalizedPassword,
+            fullName: normalizedUsername,
+            enableSharedFolder: !!sharedFolderPath
+          });
+          if (fallbackResult.success) {
+            unattendedApplied = true;
+            _emitProgress(onProgress, 'unattended', 'Cloud-init automation applied — OS will install automatically.', 85);
+            logger.success('VMManager', 'Cloud-init ISO fallback applied successfully.');
+          } else {
+            logger.warn('VMManager', `Cloud-init fallback also failed: ${fallbackResult.error}. VM will auto-boot from ISO.`);
+            _emitProgress(onProgress, 'unattended', 'VM Xposed will auto-start the VM from the ISO.', 85);
+          }
+        } else if (isUbuntuIso) {
+          // Pre-20.04 Ubuntu uses Ubiquity — apply preseed + keyboard automation
+          logger.info('VMManager', 'VBox unattended failed — applying preseed fallback for pre-20.04 Ubuntu (Ubiquity)...');
+          _emitProgress(onProgress, 'unattended', 'Applying VM Xposed preseed automation for legacy Ubuntu...', 83);
+          const vmDir = path.join(normalizedInstallPath, name);
+          const preseedResult = await applyPreseedFallback(name, vmDir, virtualbox, {
+            hostname: name.replace(/\s+/g, '-').toLowerCase(),
+            username: normalizedUsername,
+            password: normalizedPassword,
+            fullName: normalizedUsername,
+            enableSharedFolder: !!sharedFolderPath
+          });
+          if (preseedResult.success) {
+            // Mark that we need keyboard automation after VM starts
+            _emitProgress(onProgress, 'unattended', 'Preseed attached — automated installer will start after boot.', 85);
+            logger.success('VMManager', 'Preseed ISO attached. Keyboard automation scheduled.');
+            // Store marker so we know to run keyboard automation after VM starts
+            try {
+              await virtualbox._run(['setextradata', name, 'VMXposed/PreseedPending', 'on']);
+            } catch {}
+          } else {
+            logger.warn('VMManager', `Preseed fallback failed: ${preseedResult.error}. VM will auto-boot from ISO.`);
+            _emitProgress(onProgress, 'unattended', 'VM Xposed will auto-start the VM from the ISO.', 85);
+          }
+        } else {
+          logger.warn('VMManager', `VBox automation not available for this ISO — VM will auto-boot from ISO. (${unattendedErr.message})`);
+          _emitProgress(onProgress, 'unattended', 'VM Xposed will auto-start the VM from the ISO.', 85);
+        }
       } else {
         throw unattendedErr;
       }
     }
   } else {
-    _emitProgress(onProgress, 'unattended', 'Skipping unattended install (manual OS install required)', 80);
+    _emitProgress(onProgress, 'unattended', 'Skipping unattended install configuration', 80);
   }
 
   try {
     await virtualbox._run(['setextradata', name, 'VMXposed/UnattendedApplied', unattendedApplied ? 'on' : 'off']);
-    await virtualbox._run(['setextradata', name, 'VMXposed/ManualInstallRequired', (!unattendedApplied) ? 'on' : 'off']);
+    await virtualbox._run(['setextradata', name, 'VMXposed/ManualInstallRequired', 'off']);
     await virtualbox._run(['setextradata', name, 'VMXposed/InstalledDiskReady', 'off']);
     await virtualbox._run(['setextradata', name, 'VMXposed/GuestInstallMarker', 'off']);
     await virtualbox._run(['setextradata', name, 'VMXposed/InstallPhase', unattendedApplied ? 'installing' : 'preinstall']);
@@ -278,27 +335,28 @@ async function createAndConfigureVM(config, onProgress = null) {
     logger.warn('VMManager', `Could not persist install state markers: ${installStateErr.message}`);
   }
 
-  // Keep disk first for manual-install profiles. This prevents the VM from
-  // looping back into "Try/Install" ISO screens after the first reboot while
-  // still allowing ISO fallback if disk is not bootable yet.
+  // When unattended was NOT applied, boot from DVD first so the ISO
+  // installer runs automatically when the VM starts.
   if (!unattendedApplied) {
     try {
       await virtualbox._run([
         'modifyvm', name,
-        '--boot1', 'disk',
-        '--boot2', 'dvd',
+        '--boot1', 'dvd',
+        '--boot2', 'disk',
         '--boot3', 'none',
         '--boot4', 'none'
       ]);
     } catch (bootOrderErr) {
-      logger.warn('VMManager', `Could not apply disk-first manual install boot order: ${bootOrderErr.message}`);
+      logger.warn('VMManager', `Could not apply fallback boot order: ${bootOrderErr.message}`);
     }
   }
 
   // ─── Step 9: Start VM ────────────────────────────────────────────
-  const canAutoStartInstall = autoStartVm && unattendedApplied;
-
-  if (canAutoStartInstall) {
+  // VM Xposed always auto-starts the VM when autoStartVm is true.
+  // If unattended was applied, installation runs fully automatically.
+  // If unattended was NOT applied, the VM boots from the ISO so the
+  // installer runs inside the VM window — no dead-ends.
+  if (autoStartVm) {
     _emitProgress(onProgress, 'start', 'Starting virtual OS...', 90);
     await virtualbox.startVM(name);
 
@@ -321,26 +379,50 @@ async function createAndConfigureVM(config, onProgress = null) {
     } catch (err) {
       logger.warn('VMManager', `Runtime display integration warning: ${err.message}`);
     }
-  } else if (autoStartVm && unattended && !unattendedApplied) {
-    _emitProgress(onProgress, 'start', 'Automatic install is not available for this ISO. V Os was left powered off.', 90);
-    logger.warn('VMManager', `V Os "${name}" was left powered off because unattended install could not be prepared for the selected ISO.`);
-  } else if (autoStartVm && !unattended) {
-    _emitProgress(onProgress, 'start', 'This OS profile requires manual installation. V Os was left powered off.', 90);
-    logger.warn('VMManager', `V Os "${name}" was left powered off because the selected OS profile requires manual installation.`);
+
+    // ─── Step 10: Keyboard Automation for Ubiquity (pre-20.04 Ubuntu) ──
+    // If preseed was attached, launch keyboard automation asynchronously.
+    // This waits for the live desktop, dismisses dialogs, opens terminal,
+    // and types the command to start Ubiquity with preseed.
+    try {
+      const preseedPendingOut = await virtualbox._run(['getextradata', name, 'VMXposed/PreseedPending']);
+      const preseedPending = String(preseedPendingOut || '').includes('on');
+      if (preseedPending) {
+        logger.info('VMManager', 'Preseed pending — scheduling keyboard automation for Ubiquity installer...');
+        _emitProgress(onProgress, 'start', 'VM started. Automated installer will launch after desktop loads (~90s)...', 92);
+        // Run keyboard automation asynchronously — don't block the setup flow
+        sendAutomatedInstallKeystrokes(name, virtualbox, { bootWaitMs: 90000 })
+          .then(result => {
+            if (result.success) {
+              logger.success('VMManager', 'Keyboard automation completed — Ubiquity installer should be running.');
+            } else {
+              logger.warn('VMManager', `Keyboard automation warning: ${result.error}`);
+            }
+            // Clear the marker regardless of outcome
+            virtualbox._run(['setextradata', name, 'VMXposed/PreseedPending', 'off']).catch(() => {});
+          })
+          .catch(err => {
+            logger.warn('VMManager', `Keyboard automation error: ${err.message}`);
+            virtualbox._run(['setextradata', name, 'VMXposed/PreseedPending', 'off']).catch(() => {});
+          });
+      }
+    } catch (preseedCheckErr) {
+      // Non-critical — preseed marker check failed, skip automation
+    }
   } else {
     _emitProgress(onProgress, 'start', 'Auto-start disabled. V Os was prepared and left powered off.', 90);
   }
 
   // ─── Complete ────────────────────────────────────────────────────
-  const manualInstallNote = (unattended && !unattendedApplied)
-    ? ' Note: manual OS installation required on first boot.'
+  const fallbackNote = (!unattendedApplied && unattended)
+    ? ' The OS installer is running inside the VM window.'
     : '';
   _emitProgress(
     onProgress,
     'complete',
-    canAutoStartInstall
-      ? `V Os is up and running!${manualInstallNote}`
-      : `V Os is prepared. Start it manually when ready.${manualInstallNote}`,
+    autoStartVm
+      ? `V Os is up and running!${fallbackNote}`
+      : `V Os is prepared. Start it when ready.`,
     100
   );
 
@@ -353,17 +435,17 @@ async function createAndConfigureVM(config, onProgress = null) {
     sharedFolder: sharedFolderResult,
     credentials: { username: normalizedUsername, password: normalizedPassword },
     unattendedApplied,
-    status: canAutoStartInstall ? 'running' : 'poweroff'
+    autoStarted: autoStartVm,
+    status: autoStartVm ? 'running' : 'poweroff'
   };
 
   logger.success('VMManager', '═══ V Os Creation Complete ═══');
-  if (canAutoStartInstall) {
-    logger.info('VMManager', `V Os "${name}" is now installing Ubuntu automatically.`);
+  if (autoStartVm && unattendedApplied) {
+    logger.info('VMManager', `V Os "${name}" is now installing the OS automatically.`);
+  } else if (autoStartVm) {
+    logger.info('VMManager', `V Os "${name}" is running — the OS installer is active in the VM window.`);
   } else {
     logger.info('VMManager', `V Os "${name}" was prepared and left powered off (auto-start disabled).`);
-  }
-  if (!unattendedApplied && unattended) {
-    logger.warn('VMManager', `Manual OS installation required — unattended install was not supported for the selected ISO.`);
   }
   logger.info('VMManager', `Login credentials: ${normalizedUsername} / ${normalizedPassword}`);
   if (sharedFolderResult) {

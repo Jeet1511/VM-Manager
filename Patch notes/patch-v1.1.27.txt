@@ -1,0 +1,37 @@
+VM Xposed v1.1.27 - Patch Notes
+================================
+
+Release Focus: Catalog stability, Ubuntu version visibility, and smarter restart guidance
+
+What’s Fixed:
+
+1) Create V Os - Ubuntu Versions Visibility
+- Fixed incomplete-looking Ubuntu version list in the wizard dropdown.
+- Version list now renders fully for the selected OS category.
+- Manual-only entries remain visible with clear "(Manual)" labeling.
+
+2) Refresh Official Versions Reliability
+- Fixed wizard refresh flow that could appear stuck or inconsistent.
+- Added proper timeout/error handling for catalog refresh calls.
+- Refresh button state now always recovers correctly after success/failure.
+
+3) Ubuntu Catalog + Download Source Resilience
+- Updated Ubuntu catalog generation to avoid slow per-version probing.
+- Catalog entries now include deterministic official source mapping.
+- Added fallback official mirrors for ISO and SHA256 lookups:
+  - old-releases.ubuntu.com
+  - mirrors.edge.kernel.org
+
+4) Setup Download Robustness (Installer Flow)
+- Official ISO/SHA download now retries across multiple source candidates automatically.
+- Clearer failure message when DNS lookup issues are detected (ENOTFOUND / getaddrinfo).
+
+5) Restart Windows Prompt Logic
+- Guided Host Fix now re-checks host health before final instruction.
+- Restart prompt is now shown only when restart-related blockers are actually still present.
+- If restart is not needed, user gets a no-restart completion message.
+
+User Impact:
+- Better first-try success in slow/unstable network conditions.
+- More predictable version dropdown behavior in Create V Os.
+- Less confusing host-fix completion guidance (restart only when genuinely required).

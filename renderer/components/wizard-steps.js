@@ -151,8 +151,8 @@ function _requiresAutomaticInstall(state) {
   return !usingExistingVm && isoSource !== 'custom';
 }
 
-function _manualInstallBlockMessage(osName = 'This OS') {
-  return `${osName} needs manual OS installation. Official one-click setup only supports automatic install profiles so VM Xposed can create the user and complete guest setup for you. Choose Ubuntu 20.04 LTS or newer, or use Custom ISO / Import V Os for manual installers.`;
+function _autoInstallInfoNote(osName = 'This OS') {
+  return `${osName} will be set up by VM Xposed. If full unattended automation is not available for this particular ISO, the VM will auto-boot from the ISO so the installer runs inside the VM window.`;
 }
 
 const WizardSteps = {
@@ -182,6 +182,7 @@ const WizardSteps = {
         if (aScore !== bScore) return bScore - aScore;
         return a.name.localeCompare(b.name);
       });
+      const visibleVersions = versions;
 
       const recommendedByCategory = recommendation.byCategoryTop[selectedCategory]?.name || '';
       const firstAutomaticVersion = versions.find(v => v.unattended !== false)?.name || '';
@@ -209,13 +210,13 @@ const WizardSteps = {
         `;
       }).join('');
 
-      const versionOptions = versions.map((version) => `
-        <option value="${version.name}" ${version.name === selectedVersion ? 'selected' : ''} ${automaticOnly && version.unattended === false ? 'disabled' : ''}>${version.name}${version.name === recommendedByCategory ? ' ★ Recommended' : ''}${version.unattended === false ? ' (Manual)' : ''}</option>
+      const versionOptions = visibleVersions.map((version) => `
+        <option value="${version.name}" ${version.name === selectedVersion ? 'selected' : ''}>${version.name}${version.name === recommendedByCategory ? ' ★ Recommended' : ''}</option>
       `).join('');
 
       const selectedVersionInfo = catalog[selectedVersion] || {};
       const selectedScore = recommendation.scores[selectedVersion];
-      const top3 = versions
+      const top3 = visibleVersions
         .filter((v) => !automaticOnly || v.unattended !== false)
         .slice(0, 3)
         .map((v) => recommendation.scores[v.name])
@@ -225,7 +226,7 @@ const WizardSteps = {
       const lastSyncText = state.catalogRefreshMeta?.timestamp
         ? new Date(state.catalogRefreshMeta.timestamp).toLocaleString()
         : 'Not synced yet';
-      const manualBlocked = automaticOnly && selectedVersionInfo.unattended === false;
+      const showInfoNote = selectedVersionInfo.unattended === false;
 
       return `
         <div class="glass-card wizard-shell">
@@ -264,9 +265,9 @@ const WizardSteps = {
             </select>
 
             <div style="font-size: 12px; color:#888; margin-bottom: 6px;">${selectedVersionInfo.notes || 'No notes available.'}</div>
-            <div style="font-size: 12px; color:#888;">OS Type: ${selectedVersionInfo.osType || 'Other_64'} · Unattended: ${selectedVersionInfo.unattended ? 'Supported' : 'Manual'}</div>
+            <div style="font-size: 12px; color:#888;">OS Type: ${selectedVersionInfo.osType || 'Other_64'} · Setup: ${selectedVersionInfo.unattended !== false ? 'Fully Automatic' : 'Auto-boot from ISO'}</div>
             ${selectedScore ? `<div style="font-size:12px; color:${selectedScore.fit === 'Excellent' || selectedScore.fit === 'Good' ? '#2ea043' : (selectedScore.fit === 'Limited' ? '#d29922' : '#f85149')}; margin-top:6px;">Recommended Fit: ${selectedScore.fit} · Needs ${selectedScore.reasons.reqCpu} CPU, ${selectedScore.reasons.reqRamGb} GB RAM, ${selectedScore.reasons.reqDiskGb} GB disk</div>` : ''}
-            ${manualBlocked ? `<div style="font-size:12px; color:#f85149; margin-top:8px;">${_manualInstallBlockMessage(selectedVersion)}</div>` : ''}
+            ${showInfoNote ? `<div style="font-size:12px; color:#9da7b3; margin-top:8px;">${_autoInstallInfoNote(selectedVersion)}</div>` : ''}
 
             ${sourceUrl ? `
               <div style="margin-top: 12px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
@@ -280,7 +281,7 @@ const WizardSteps = {
 
           <div class="btn-row wizard-nav-row">
             <div></div> <!-- No back button on first step -->
-            <button class="btn btn-primary wizard-nav-next" id="btnNext" ${manualBlocked ? 'disabled' : ''}>Next →</button>
+            <button class="btn btn-primary wizard-nav-next" id="btnNext">Next →</button>
           </div>
         </div>
       `;
@@ -332,11 +333,10 @@ const WizardSteps = {
         const selected = e.target.value;
         if (!selected) return;
         if (_requiresAutomaticInstall(state) && catalog[selected]?.unattended === false) {
+          // Show informational note but allow selection
           if (typeof Dashboard !== 'undefined' && Dashboard._notify) {
-            Dashboard._notify(_manualInstallBlockMessage(selected), 'error');
+            Dashboard._notify(_autoInstallInfoNote(selected), 'info');
           }
-          if (typeof renderStep === 'function') renderStep(0);
-          return;
         }
         state.osName = selected;
         state.osCategory = catalog[selected]?.category || state.osCategory;
@@ -357,7 +357,13 @@ const WizardSteps = {
         btn.textContent = 'Refreshing...';
 
         try {
-          const refreshed = await window.vmInstaller.refreshOfficialCatalog();
+          const refreshPromise = window.vmInstaller.refreshOfficialCatalog();
+          const refreshed = await Promise.race([
+            refreshPromise,
+            new Promise((_, reject) => {
+              setTimeout(() => reject(new Error('Catalog refresh timed out. Please try again.')), 90000);
+            })
+          ]);
           if (!refreshed?.success) {
             if (typeof Dashboard !== 'undefined' && Dashboard._notify) {
               Dashboard._notify(`Catalog refresh failed: ${refreshed?.error || 'Unknown error'}`, 'error');
@@ -385,6 +391,10 @@ const WizardSteps = {
 
           if (typeof renderStep === 'function') {
             renderStep(0);
+          }
+        } catch (err) {
+          if (typeof Dashboard !== 'undefined' && Dashboard._notify) {
+            Dashboard._notify(err?.message || 'Catalog refresh failed. Please try again.', 'error');
           }
         } finally {
           btn.disabled = false;
@@ -425,9 +435,7 @@ const WizardSteps = {
     validate(state) {
       if (!state.osName) return { valid: false, message: 'Please select an OS to continue.' };
       const selected = state.defaults?.osCatalog?.[state.osName];
-      if (_requiresAutomaticInstall(state) && selected?.unattended === false) {
-        return { valid: false, message: _manualInstallBlockMessage(state.osName) };
-      }
+      // All OS versions are selectable — VM Xposed handles automation or graceful fallback
       return { valid: true };
     }
   },

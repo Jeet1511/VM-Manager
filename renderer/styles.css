@@ -3150,6 +3150,15 @@ body.motion-prime .bg-glow::after {
   border-radius: 10px !important;
 }
 
+.wizard-shell select option {
+  background: #0f172a;
+  color: #dbe3ee;
+}
+
+.wizard-shell select option:disabled {
+  color: #8b949e;
+}
+
 .wizard-shell input[type="text"]:focus,
 .wizard-shell input[type="password"]:focus,
 .wizard-shell select:focus,

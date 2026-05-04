@@ -48,6 +48,104 @@ const PHASES = [
   { id: 'complete', label: 'Setup Complete', icon: '✅' }
 ];
 
+function _dedupeUrls(urls = []) {
+  const seen = new Set();
+  const result = [];
+  for (const raw of urls) {
+    const value = String(raw || '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
+function _sourceHost(url = '') {
+  try {
+    return new URL(url).host || String(url);
+  } catch {
+    return String(url);
+  }
+}
+
+function _extractUbuntuVersionFromIsoProfile(selectedIsoConfig = {}, osLabel = '') {
+  const text = `${selectedIsoConfig?.filename || ''} ${selectedIsoConfig?.downloadUrl || ''} ${osLabel || ''}`;
+  const match = text.match(/(?:ubuntu-|\bUbuntu\s+)(\d{2}\.\d{2}(?:\.\d+)?)/i);
+  return match?.[1] || '';
+}
+
+function _isUbuntuIsoProfile(selectedIsoConfig = {}, osLabel = '') {
+  const category = String(selectedIsoConfig?.category || '').toLowerCase();
+  const osType = String(selectedIsoConfig?.osType || '').toLowerCase();
+  const filename = String(selectedIsoConfig?.filename || '');
+  const downloadUrl = String(selectedIsoConfig?.downloadUrl || '');
+  return category === 'ubuntu'
+    || osType.includes('ubuntu')
+    || /^ubuntu\b/i.test(String(osLabel || ''))
+    || /ubuntu-/i.test(filename)
+    || /ubuntu\.com/i.test(downloadUrl);
+}
+
+function _buildUbuntuCandidateBaseUrls(version = '') {
+  if (!version) return [];
+  return [
+    `https://releases.ubuntu.com/${version}/`,
+    `https://old-releases.ubuntu.com/releases/${version}/`,
+    `https://mirrors.edge.kernel.org/ubuntu-releases/${version}/`
+  ];
+}
+
+function _buildIsoDownloadUrlCandidates(selectedIsoConfig = {}, osLabel = '') {
+  const urls = [];
+  const push = (candidate) => {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      urls.push(candidate.trim());
+    }
+  };
+
+  push(selectedIsoConfig?.downloadUrl);
+  if (Array.isArray(selectedIsoConfig?.fallbackDownloadUrls)) {
+    selectedIsoConfig.fallbackDownloadUrls.forEach(push);
+  }
+
+  if (_isUbuntuIsoProfile(selectedIsoConfig, osLabel)) {
+    const version = _extractUbuntuVersionFromIsoProfile(selectedIsoConfig, osLabel);
+    const filename = String(selectedIsoConfig?.filename || '').trim();
+    if (version && filename) {
+      for (const baseUrl of _buildUbuntuCandidateBaseUrls(version)) {
+        push(`${baseUrl}${filename}`);
+      }
+    }
+  }
+
+  return _dedupeUrls(urls);
+}
+
+function _buildSha256UrlCandidates(selectedIsoConfig = {}, osLabel = '') {
+  const urls = [];
+  const push = (candidate) => {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      urls.push(candidate.trim());
+    }
+  };
+
+  push(selectedIsoConfig?.sha256Url);
+  if (Array.isArray(selectedIsoConfig?.fallbackSha256Urls)) {
+    selectedIsoConfig.fallbackSha256Urls.forEach(push);
+  }
+
+  if (_isUbuntuIsoProfile(selectedIsoConfig, osLabel)) {
+    const version = _extractUbuntuVersionFromIsoProfile(selectedIsoConfig, osLabel);
+    if (version) {
+      for (const baseUrl of _buildUbuntuCandidateBaseUrls(version)) {
+        push(`${baseUrl}SHA256SUMS`);
+      }
+    }
+  }
+
+  return _dedupeUrls(urls);
+}
+
 class Orchestrator extends EventEmitter {
   constructor() {
     super();
@@ -229,10 +327,10 @@ class Orchestrator extends EventEmitter {
   _automaticInstallUnsupportedError(osLabel = 'this OS', detail = '') {
     const extra = detail ? ` ${detail}` : '';
     const err = new Error(
-      `Automatic setup is not available for ${osLabel}.${extra} VM Xposed stopped before opening the raw OS installer, because user creation and guest OS display fit only work after a successful automatic install. Choose Ubuntu 20.04 LTS or newer for one-click setup, or use Custom ISO / Import V Os for manual installers.`
+      `VM Xposed could not fully automate ${osLabel}.${extra} The VM has been auto-started from the ISO so the installer runs inside the VM window.`
     );
-    err.recoverable = false;
-    err.noResume = true;
+    err.recoverable = true;
+    err.noResume = false;
     return err;
   }
 
@@ -271,6 +369,47 @@ class Orchestrator extends EventEmitter {
     } catch (err) {
       logger.warn('Orchestrator', `Could not clear failed setup state: ${err.message}`);
     }
+  }
+
+  async _downloadFromCandidates(urlCandidates, destDir, filename, options = {}, phaseId = 'download_iso') {
+    const candidates = _dedupeUrls(urlCandidates);
+    if (candidates.length === 0) {
+      throw new Error('No official download source URL is available.');
+    }
+
+    const errors = [];
+    for (let i = 0; i < candidates.length; i += 1) {
+      const sourceUrl = candidates[i];
+      const sourceHost = _sourceHost(sourceUrl);
+      if (candidates.length > 1) {
+        this._emitProgress(
+          phaseId,
+          i === 0
+            ? `Trying source ${i + 1}/${candidates.length}: ${sourceHost}`
+            : `Primary source failed. Trying mirror ${i + 1}/${candidates.length}: ${sourceHost}`,
+          null
+        );
+      }
+
+      try {
+        const filePath = await downloadFile(sourceUrl, destDir, filename, options);
+        return { filePath, sourceUrl };
+      } catch (err) {
+        if (err?.name === 'AbortError' || options?.signal?.aborted) {
+          throw err;
+        }
+        const errorMessage = err?.message || 'Unknown download error';
+        errors.push({ sourceUrl, errorMessage });
+        logger.warn('Orchestrator', `Download source failed (${sourceHost}): ${errorMessage}`);
+      }
+    }
+
+    const hasDnsError = errors.some((entry) => /ENOTFOUND|getaddrinfo|EAI_AGAIN/i.test(String(entry.errorMessage || '')));
+    const lastError = errors[errors.length - 1]?.errorMessage || 'Unknown download error';
+    const dnsHint = hasDnsError
+      ? ' DNS lookup failed for one or more source hosts. Check DNS/internet or switch to Local ISO.'
+      : '';
+    throw new Error(`All official download sources failed.${dnsHint} Last error: ${lastError}`);
   }
 
   /**
@@ -407,16 +546,13 @@ class Orchestrator extends EventEmitter {
       const selectedOS = config._resolvedOsProfile || findOS(config.osName || config.ubuntuVersion) || OS_CATALOG['Custom ISO'];
       const selectedIsoConfig = selectedOS || UBUNTU_RELEASES[config.ubuntuVersion];
       const resolvedDownloadDir = String(config.downloadPath || '').trim() || getDownloadDir();
+      const osLabel = config.osName || config.ubuntuVersion || '';
+      const isoDownloadCandidates = _buildIsoDownloadUrlCandidates(selectedIsoConfig || {}, osLabel);
+      const sha256Candidates = _buildSha256UrlCandidates(selectedIsoConfig || {}, osLabel);
       const requiresAutomaticInstall = config.requireAutomaticInstall === true;
       let isoPath;
 
-      if (requiresAutomaticInstall && selectedIsoConfig?.unattended === false) {
-        this._setPhase('download_iso', 'error');
-        throw this._automaticInstallUnsupportedError(
-          config.osName || config.ubuntuVersion || 'the selected OS',
-          'This profile is marked as manual-install only.'
-        );
-      }
+      // VM Xposed now handles all profiles — no blocking for unattended status
 
       // Check if ISO was already downloaded in a previous run
       if (_shouldSkip('download_iso') && stateManager.state?.artifacts?.isoPath) {
@@ -441,7 +577,7 @@ class Orchestrator extends EventEmitter {
           this._emitProgress('download_iso', 'Using custom ISO file', 100);
           this._setPhase('download_iso', 'skipped');
           await stateManager.skipPhase('download_iso');
-        } else if (selectedIsoConfig?.downloadUrl && selectedIsoConfig?.filename) {
+        } else if (isoDownloadCandidates.length > 0 && selectedIsoConfig?.filename) {
           const expectedPath = path.join(resolvedDownloadDir, selectedIsoConfig.filename);
 
           this._emitProgress('download_iso', `ISO storage path: ${expectedPath}`, 1);
@@ -453,8 +589,8 @@ class Orchestrator extends EventEmitter {
           } else {
             this._emitProgress('download_iso', `Downloading ${config.osName || 'OS'} ISO...`, 0);
 
-            isoPath = await downloadFile(
-              selectedIsoConfig.downloadUrl,
+            const downloadResult = await this._downloadFromCandidates(
+              isoDownloadCandidates,
               resolvedDownloadDir,
               selectedIsoConfig.filename,
               {
@@ -466,8 +602,13 @@ class Orchestrator extends EventEmitter {
                     p
                   );
                 }
-              }
+              },
+              'download_iso'
             );
+            isoPath = downloadResult.filePath;
+            if (downloadResult.sourceUrl && downloadResult.sourceUrl !== selectedIsoConfig.downloadUrl) {
+              logger.info('Orchestrator', `ISO downloaded from fallback mirror: ${_sourceHost(downloadResult.sourceUrl)}`);
+            }
           }
 
           this._emitProgress('download_iso', 'ISO downloaded', 100);
@@ -482,15 +623,17 @@ class Orchestrator extends EventEmitter {
       this._setPhase('verify_iso', 'active');
       this._emitProgress('verify_iso', 'Verifying ISO checksum...', 0);
 
-      if (selectedIsoConfig && selectedIsoConfig.sha256Url && !config.customIsoPath) {
+      if (selectedIsoConfig && sha256Candidates.length > 0 && !config.customIsoPath) {
         try {
           // Download SHA256SUMS file
-          const sha256sumsPath = await downloadFile(
-            selectedIsoConfig.sha256Url,
+          const shaDownloadResult = await this._downloadFromCandidates(
+            sha256Candidates,
             resolvedDownloadDir,
             'SHA256SUMS',
-            { signal: this.abortController.signal }
+            { signal: this.abortController.signal },
+            'verify_iso'
           );
+          const sha256sumsPath = shaDownloadResult.filePath;
 
           const sha256sumsContent = await fs.promises.readFile(sha256sumsPath, 'utf8');
           const expectedHash = parseHashFromSHA256SUMS(sha256sumsContent, selectedIsoConfig.filename);
@@ -504,7 +647,7 @@ class Orchestrator extends EventEmitter {
 
             let actualHash = await verifyCurrentIso();
             if (actualHash.toLowerCase() !== expectedHash.toLowerCase()) {
-              if (!selectedIsoConfig.downloadUrl || !selectedIsoConfig.filename) {
+              if (isoDownloadCandidates.length === 0 || !selectedIsoConfig.filename) {
                 throw new Error('ISO checksum verification FAILED. Automatic re-download is unavailable for this OS profile. Please select a custom ISO.');
               }
               logger.warn('Orchestrator', `Checksum mismatch for ${isoPath}. Re-downloading clean copy...`);
@@ -516,8 +659,8 @@ class Orchestrator extends EventEmitter {
                 logger.warn('Orchestrator', `Could not remove corrupted ISO before retry: ${unlinkErr.message}`);
               }
 
-              isoPath = await downloadFile(
-                selectedIsoConfig.downloadUrl,
+              const redownloadResult = await this._downloadFromCandidates(
+                isoDownloadCandidates,
                 resolvedDownloadDir,
                 selectedIsoConfig.filename,
                 {
@@ -530,8 +673,10 @@ class Orchestrator extends EventEmitter {
                       p.percent || 0
                     );
                   }
-                }
+                },
+                'verify_iso'
               );
+              isoPath = redownloadResult.filePath;
               await stateManager.completePhase('download_iso', { isoPath });
               this._emitProgress('verify_iso', 'Re-download complete. Verifying checksum again...', 70);
 
@@ -629,14 +774,10 @@ class Orchestrator extends EventEmitter {
       const unattendedUnavailable = requestedUnattendedInstall && vmResult?.unattendedApplied !== true;
       const autoStartVm = config.autoStartVm === true;
 
-      if (requiresAutomaticInstall && unattendedUnavailable) {
-        this._setPhase('install_os', 'error');
-        this._emitProgress('install_os', 'Automatic Ubuntu setup failed for this ISO. Cleaning up the partial V Os...', 100);
-        await this._cleanupFailedAutomaticVm(config, 'VirtualBox could not prepare unattended install media');
-        throw this._automaticInstallUnsupportedError(
-          config.osName || config.ubuntuVersion || 'the selected Ubuntu ISO',
-          'VirtualBox could not prepare unattended install media for it.'
-        );
+      // VM Xposed no longer blocks when unattended is unavailable.
+      // The VM was already auto-started by vmManager.
+      if (unattendedUnavailable) {
+        logger.info('Orchestrator', 'VBox unattended not available for this ISO — VM was auto-started from the ISO.');
       }
 
       const vmRunningForInstall = String(await virtualbox.getVMState(config.vmName) || '').toLowerCase() === 'running';
@@ -659,18 +800,24 @@ class Orchestrator extends EventEmitter {
         }
       } else if (!autoStartVm) {
         this._setPhase('install_os', 'skipped');
-        this._emitProgress('install_os', 'Auto-start is disabled. Start the V Os manually to begin OS installation.', 100);
+        this._emitProgress('install_os', 'Auto-start is disabled. Start the V Os when ready to begin OS installation.', 100);
         logger.info('Orchestrator', 'Skipping automatic V Os boot to keep host responsive.');
         await stateManager.skipPhase('install_os');
+      } else if (unattendedUnavailable && vmRunningForInstall) {
+        this._setPhase('install_os', 'active');
+        this._emitProgress('install_os', 'V Os booted from ISO — the installer is running inside the VM window.', 100);
+        logger.info('Orchestrator', 'VM auto-started from ISO. Installer is active in the VM window.');
+        this._setPhase('install_os', 'complete');
+        await stateManager.completePhase('install_os', { vmStarted: true });
       } else if (unattendedUnavailable) {
         this._setPhase('install_os', 'skipped');
-        this._emitProgress('install_os', 'Automatic Ubuntu installation could not be prepared for this ISO. Manual OS install is required for this version.', 100);
-        logger.warn('Orchestrator', 'Skipping OS install wait because unattended setup was unavailable for this ISO.');
+        this._emitProgress('install_os', 'VBox automation not available for this ISO. Start the V Os to begin setup.', 100);
+        logger.info('Orchestrator', 'VBox unattended not available. V Os needs to be started to boot from ISO.');
         await stateManager.skipPhase('install_os');
       } else if (!vmRunningForInstall) {
         this._setPhase('install_os', 'skipped');
-        this._emitProgress('install_os', 'This OS profile requires manual installation. V Os was created but not started automatically.', 100);
-        logger.warn('Orchestrator', 'Skipping OS install wait because the VM was not started automatically.');
+        this._emitProgress('install_os', 'V Os was created but not started. Start the V Os to begin installation.', 100);
+        logger.info('Orchestrator', 'V Os not running — user can start manually.');
         await stateManager.skipPhase('install_os');
       } else {
         this._setPhase('install_os', 'active');
@@ -678,8 +825,8 @@ class Orchestrator extends EventEmitter {
           this._emitProgress('install_os', 'OS is installing automatically in the V Os window...', 10);
           logger.info('Orchestrator', 'The V Os is now running. OS installation is unattended.');
         } else {
-          this._emitProgress('install_os', 'V Os booted. Complete OS installation manually from the ISO.', 10);
-          logger.info('Orchestrator', 'Manual installation required for this OS profile.');
+          this._emitProgress('install_os', 'V Os booted — OS installer is active in the VM window.', 10);
+          logger.info('Orchestrator', 'V Os booted from ISO. Installer is active in the VM window.');
         }
         logger.info('Orchestrator', 'This may take 10-20 minutes. Please do not close the V Os window.');
         this._setPhase('install_os', 'complete');
@@ -692,17 +839,22 @@ class Orchestrator extends EventEmitter {
       let guestConfigured = false;
       let guestConfigWarning = '';
 
-      if (!unattendedInstall) {
+      if (!unattendedInstall && !vmRunningForInstall) {
+        // VM isn't running and unattended wasn't applied — guest config deferred
         this._setPhase('wait_boot', 'skipped');
         this._setPhase('guest_config', 'skipped');
-        guestConfigWarning = unattendedUnavailable
-          ? 'Automatic install could not be prepared for this Ubuntu ISO. Complete the Ubuntu installer manually, then run Guest Setup/Fix All.'
-          : 'Manual-install OS profile. Complete OS installation manually, then run Guest Setup/Fix All.';
-        logger.info('Orchestrator', `Skipping guest auto-configuration: ${guestConfigWarning}`);
+        guestConfigWarning = 'V Os was not auto-started. Start the V Os and run Guest Setup from the dashboard when the OS is ready.';
+        logger.info('Orchestrator', 'Guest config deferred — V Os not running.');
+      } else if (!unattendedInstall && vmRunningForInstall) {
+        // VM is running from ISO — guest config deferred until OS is installed
+        this._setPhase('wait_boot', 'skipped');
+        this._setPhase('guest_config', 'skipped');
+        guestConfigWarning = 'OS is being installed from the ISO. Guest integration will be configured when the OS is ready.';
+        logger.info('Orchestrator', 'Guest config deferred — OS installing from ISO. Integration will be configured after OS boots.');
       } else if (!autoStartVm) {
         this._setPhase('wait_boot', 'skipped');
         this._setPhase('guest_config', 'skipped');
-        guestConfigWarning = 'Automatic V Os start is disabled. Start the V Os manually and run Guest Setup when the OS is ready.';
+        guestConfigWarning = 'Automatic V Os start is disabled. Start the V Os and run Guest Setup when the OS is ready.';
         logger.info('Orchestrator', 'Skipping wait_boot/guest_config because auto-start is disabled.');
       } else {
         this._setPhase('wait_boot', 'active');
@@ -832,23 +984,19 @@ class Orchestrator extends EventEmitter {
         guestConfigured,
         autoStartVm,
         autoStarted: finalVmRunning,
-        manualInstallRequired: !unattendedInstall,
+        unattendedApplied: unattendedInstall,
         guestConfigWarning,
         sharedFolder: vmResult.sharedFolder,
         installPath: config.installPath,
-        message: unattendedUnavailable
-          ? 'Automatic install is not available for this Ubuntu ISO. The V Os was created, but Ubuntu must be installed manually before guest display fit can work.'
+        message: !autoStartVm
+          ? 'V Os prepared successfully. Start it when ready.'
           : unattendedInstall
-          ? (!autoStartVm
-            ? 'V Os prepared successfully. Start it manually to begin OS installation.'
-            : (guestConfigured
+            ? (guestConfigured
               ? 'V Os setup complete! OS and guest integration are fully configured.'
-              : 'V Os setup complete. OS is installed and guest integration will finish after first login.'))
-          : (!autoStartVm
-            ? 'V Os prepared successfully. Start it manually and complete installation from the ISO.'
+              : 'V Os setup complete. OS is installed and guest integration will finish after first login.')
             : (finalVmRunning
-              ? 'V Os created and booted. Complete manual installation in the V Os window.'
-              : 'V Os created. This OS profile requires manual installation, so it was not started automatically.'))
+              ? 'V Os is running. The OS installer is active inside the VM window.'
+              : 'V Os prepared. Start it to begin OS installation.')
       };
 
       this._emitProgress('complete', finalResult.message, 100);
@@ -859,9 +1007,9 @@ class Orchestrator extends EventEmitter {
       logger.success(
         'Orchestrator',
         (!autoStartVm)
-          ? '  Setup Complete — V Os Prepared (Manual Start Required)'
+          ? '  Setup Complete — V Os Prepared'
           : (unattendedUnavailable
-            ? '  Setup Complete — Manual Ubuntu Install Required'
+            ? '  Setup Complete — Installer Running in VM Window'
             : ((guestConfigured || !unattendedInstall)
             ? '  Setup Complete — Everything Configured!'
             : '  Setup Complete — OS Ready, Integration Pending'))

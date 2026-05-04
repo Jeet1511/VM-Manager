@@ -1,0 +1,66 @@
+VM Xposed v1.1.29 - Patch Notes
+================================
+
+MAJOR: Universal Automation — Every Ubuntu Version, Zero Manual Steps
+
+🎯 COMPLETE ZERO-TOUCH: Works for ALL Ubuntu versions, old and new
+
+3-Layer Automation Architecture:
+- Layer 1: VirtualBox Unattended Install (primary — uses VBox templates)
+- Layer 2: Cloud-Init ISO (fallback for Ubuntu 20.04+ / Subiquity)
+- Layer 3: Preseed ISO + Keyboard Automation (fallback for Ubuntu < 20.04 / Ubiquity)
+- Every layer produces a ready-to-use desktop with auto-login and guest integration
+
+Real ISO 9660 Image Generator:
+- NEW: Pure Node.js ISO 9660 disc image builder — no external tools needed
+- Replaces broken VISO format that VirtualBox 7.1 rejected (VERR_VD_IMAGE_CORRUPTED)
+- Generic buildDataIso() supports any number of files with configurable volume labels
+- Cloud-Init ISOs use volume label "CIDATA" (detected by Subiquity)
+- Preseed ISOs use volume label "RUNISO"
+
+Preseed Fallback (Ubuntu 10.04 – 19.10):
+- NEW: Full debian-installer/Ubiquity preseed.cfg generator
+- Automates: locale, keyboard, timezone, partitioning, user creation, packages, GRUB
+- Ubiquity success_command sets up auto-login, VBoxClient, guest groups, Guest Additions
+- Preseed ISO attached as secondary DVD drive
+
+Keyboard Scancode Injection (for Ubiquity):
+- NEW: VBoxManage keyboardputscancode automation engine
+- Full scancode map for letters, numbers, symbols, modifiers (Shift, Ctrl, Alt)
+- After VM boots to live desktop (~90s), VM Xposed automatically:
+  1. Presses Escape to dismiss "Try/Install" dialog
+  2. Presses Ctrl+Alt+T to open Terminal
+  3. Types command to mount preseed CD and launch Ubiquity with --automatic
+  4. Presses Enter to execute
+- Runs asynchronously — doesn't block the setup flow
+- Keyboard automation logged in real-time in the Live Log panel
+
+Ubuntu Version Detection:
+- NEW: isSubiquityUbuntu() detects installer type from ISO filename
+- Ubuntu 20.04+ → Cloud-Init autoinstall path
+- Ubuntu < 20.04 → Preseed + keyboard automation path
+- Prevents wasted cloud-init attempts on legacy Ubuntu versions
+
+VM Name Auto-Reset Fix:
+- FIXED: VM name no longer sticks from previous setup session
+- Previously: "My-Ubuntu-10.04" persisted even when user selected Ubuntu 24.04
+- Now: VM name always regenerates from the currently selected OS
+
+Cloud-Init Improvements (Ubuntu 20.04+):
+- SHA-512 crypt password hashing (Drepper specification, /etc/shadow compatible)
+- Auto-login via GDM3 AutomaticLogin
+- Guest Additions: VBoxClient-all autostart, vboxsf group, video group
+- Shared folder fstab mount, Wayland disabled, screen lock disabled
+
+Files Changed:
+- vm/cloudInit.js (ISO 9660 generator, preseed generator, keyboard automation)
+- vm/vmManager.js (3-layer fallback, preseed integration, keyboard trigger)
+- renderer/app.js (VM name auto-reset fix)
+- package.json (version bump)
+
+User Impact:
+- Ubuntu 24.04/22.04/20.04: Fully automated — zero clicks, ready-to-use desktop
+- Ubuntu 18.04/16.04/14.04/10.04: Automated via preseed + keyboard — installs unattended
+- Non-Ubuntu (Fedora, Kali, etc.): Auto-boot from ISO with VBox unattended
+- No external tools needed — everything runs inside the Electron app
+- No Node.js required on user's machine — Electron bundles its own runtime

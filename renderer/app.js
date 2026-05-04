@@ -1587,7 +1587,7 @@ function _renderVmBootstrapOptionsPanel(data = {}) {
             <div class="onboard-size-track">
               <div class="onboard-size-fill" style="width:${estimate.preview}%"></div>
             </div>
-            <div class="onboard-size-caption">${estimate.info?.downloadUrl ? `ISO ~${estimate.isoGb.toFixed(1).replace('.0', '')} GB + V Os disk ${estimate.diskGb} GB` : 'Manual ISO source required'} · RAM ${estimate.info?.ram || 2048} MB · CPU ${estimate.info?.cpus || 2}</div>
+            <div class="onboard-size-caption">${estimate.info?.downloadUrl ? `ISO ~${estimate.isoGb.toFixed(1).replace('.0', '')} GB + V Os disk ${estimate.diskGb} GB` : 'Provide your own ISO file'} · RAM ${estimate.info?.ram || 2048} MB · CPU ${estimate.info?.cpus || 2}</div>
           </div>
 
           <button class="btn btn-primary onboard-start-btn" id="btnOnboardContinueDownload">Continue to Customization</button>
@@ -1791,11 +1791,11 @@ function _launchVmBootstrapSetup(mode = 'download') {
     appState.osName = flow.selectedVmType;
     appState.installPath = flow.downloadFolder.trim();
     appState.downloadPath = flow.downloadFolder.trim();
-    if (!appState.vmName) {
-      const compactName = (appState.osName || 'Virtual-OS').replace(/\s*\(.+\)$/, '').replace(/\s+/g, '-');
-      appState.vmName = `My-${compactName}`;
-      appState._autoVmName = appState.vmName;
-    }
+    // Always regenerate VM name from the selected OS — don't carry over
+    // stale names from a previous setup session.
+    const compactName = (appState.osName || 'Virtual-OS').replace(/\s*\(.+\)$/, '').replace(/\s+/g, '-');
+    appState.vmName = `My-${compactName}`;
+    appState._autoVmName = appState.vmName;
     wizardStartStep = 0;
   } else {
     if (!flow.importFolder || !String(flow.importFolder).trim()) {
@@ -3007,6 +3007,8 @@ async function _initOverview() {
         }
       }
 
+      await safeRefresh({ withSpinner: false });
+
       if (hostGuideState.hasPendingReboot) {
         _notify('Windows restart is pending. Reboot first, then retry Start V Os.', 'info');
       }
@@ -3014,12 +3016,13 @@ async function _initOverview() {
       const restartLikelyRequired = hostGuideState.hasPendingReboot
         || hostGuideState.hasHypervisorConflict
         || hostGuideState.hasMemoryIntegrityConflict;
-      _notify(
-        restartLikelyRequired
-          ? 'Final step: Restart Windows, open VM Xposed, then press Start V Os.'
-          : 'Final step: Click Refresh Health, then press Start V Os.',
-        'success'
-      );
+      if (restartLikelyRequired) {
+        _notify('Final step: Restart Windows, open VM Xposed, then press Start V Os.', 'success');
+      } else if (hostGuideState.hasAnyIssue) {
+        _notify('Final step: Click Refresh Health, then press Start V Os. If the issue remains, run Guided Host Fix again.', 'info');
+      } else {
+        _notify('Host fix is complete. No restart is needed right now. Press Start V Os.', 'success');
+      }
     } catch (err) {
       _notify(err?.message || 'Guided host fix failed.', 'error');
     } finally {
@@ -3607,7 +3610,7 @@ function _renderLibrary(state) {
             <div class="vm-card-name">${name}</div>
             <div class="vm-card-os">${info.category} · ${info.osType}</div>
           </div>
-          <div class="vm-card-state"><span class="state-text">${info.unattended ? 'Unattended Ready' : 'Manual Install'}</span></div>
+          <div class="vm-card-state"><span class="state-text">${info.unattended ? 'Fully Automatic' : 'Auto Setup'}</span></div>
         </div>
         <div class="vm-detail-row"><span class="vm-detail-label">Recommended</span><span class="vm-detail-value">RAM ${info.ram} MB · CPU ${info.cpus} · Disk ${Math.floor((info.disk || 0) / 1024)} GB</span></div>
         <div class="vm-detail-row"><span class="vm-detail-label">Notes</span><span class="vm-detail-value">${info.notes || 'No notes'}</span></div>
@@ -6121,9 +6124,9 @@ function showComplete(data) {
     id: 'complete',
     label: 'Complete',
     status: 'complete',
-    message: data?.manualInstallRequired === true
-      ? 'Manual OS install required'
-      : (data?.autoStarted === true ? 'V Os ready' : 'Manual start required')
+    message: data?.autoStarted === true
+      ? (data?.unattendedApplied === false ? 'V Os running — installer active' : 'V Os ready')
+      : 'Start V Os when ready'
   });
 
   const container = document.getElementById('wizardContainer');

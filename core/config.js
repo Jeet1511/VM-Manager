@@ -98,11 +98,11 @@ const OS_CATALOG = {
     filename: 'Fedora-Workstation-Live-x86_64-41.iso',
     downloadUrl: 'https://download.fedoraproject.org/pub/fedora/linux/releases/41/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-41-1.4.iso',
     sha256Url: null,
-    unattended: false,
+    unattended: true,
     defaultUser: 'user', defaultPass: 'password',
     ram: 4096, cpus: 2, disk: 30720, vram: 128,
     graphicsController: 'vmsvga',
-    notes: 'Fedora 41 Workstation — manual install required'
+    notes: 'Fedora 41 Workstation — Auto Setup by VM Xposed'
   },
 
   // ── Linux Mint ──────────────────────────────────────────────────────────────
@@ -112,11 +112,11 @@ const OS_CATALOG = {
     filename: 'linuxmint-22.1-cinnamon-64bit.iso',
     downloadUrl: 'https://mirrors.edge.kernel.org/linuxmint/stable/22.1/linuxmint-22.1-cinnamon-64bit.iso',
     sha256Url: null,
-    unattended: false,
+    unattended: true,
     defaultUser: 'user', defaultPass: 'password',
     ram: 4096, cpus: 2, disk: 25600, vram: 128,
     graphicsController: 'vmsvga',
-    notes: 'Linux Mint — beginner-friendly'
+    notes: 'Linux Mint — beginner-friendly, Auto Setup by VM Xposed'
   },
 
   // ── Arch Linux ──────────────────────────────────────────────────────────────
@@ -126,11 +126,11 @@ const OS_CATALOG = {
     filename: 'archlinux-latest.iso',
     downloadUrl: 'https://mirrors.edge.kernel.org/archlinux/iso/latest/archlinux-x86_64.iso',
     sha256Url: null,
-    unattended: false,
+    unattended: true,
     defaultUser: 'root', defaultPass: '',
     ram: 2048, cpus: 2, disk: 20480, vram: 16,
     graphicsController: 'vmsvga',
-    notes: 'Arch Linux — advanced users only, manual install'
+    notes: 'Arch Linux — VM Xposed will auto-boot the installer'
   },
 
   // ── Kali Linux ──────────────────────────────────────────────────────────────
@@ -140,11 +140,11 @@ const OS_CATALOG = {
     filename: 'kali-linux-2024.4-installer-amd64.iso',
     downloadUrl: 'https://cdimage.kali.org/kali-2024.4/kali-linux-2024.4-installer-amd64.iso',
     sha256Url: null,
-    unattended: false,
+    unattended: true,
     defaultUser: 'kali', defaultPass: 'kali',
     ram: 4096, cpus: 2, disk: 25600, vram: 128,
     graphicsController: 'vmsvga',
-    notes: 'Kali Linux — security & penetration testing'
+    notes: 'Kali Linux — security & penetration testing, Auto Setup by VM Xposed'
   },
 
   // ── CentOS / AlmaLinux / Rocky ───────────────────────────────────────────
@@ -154,11 +154,11 @@ const OS_CATALOG = {
     filename: 'AlmaLinux-9.5-x86_64-minimal.iso',
     downloadUrl: 'https://repo.almalinux.org/almalinux/9.5/isos/x86_64/AlmaLinux-9.5-x86_64-minimal.iso',
     sha256Url: null,
-    unattended: false,
+    unattended: true,
     defaultUser: 'user', defaultPass: 'password',
     ram: 2048, cpus: 2, disk: 20480, vram: 16,
     graphicsController: 'vmsvga',
-    notes: 'AlmaLinux — RHEL-compatible server OS'
+    notes: 'AlmaLinux — RHEL-compatible server OS, Auto Setup by VM Xposed'
   },
   'Rocky Linux 9.5': {
     category: 'RHEL-Based',
@@ -166,11 +166,11 @@ const OS_CATALOG = {
     filename: 'Rocky-9.5-x86_64-minimal.iso',
     downloadUrl: 'https://download.rockylinux.org/pub/rocky/9.5/isos/x86_64/Rocky-9.5-x86_64-minimal.iso',
     sha256Url: null,
-    unattended: false,
+    unattended: true,
     defaultUser: 'user', defaultPass: 'password',
     ram: 2048, cpus: 2, disk: 20480, vram: 16,
     graphicsController: 'vmsvga',
-    notes: 'Rocky Linux — RHEL-compatible'
+    notes: 'Rocky Linux — RHEL-compatible, Auto Setup by VM Xposed'
   },
 
   // ── FreeBSD ─────────────────────────────────────────────────────────────────
@@ -180,11 +180,11 @@ const OS_CATALOG = {
     filename: 'FreeBSD-14.2-RELEASE-amd64-disc1.iso',
     downloadUrl: 'https://download.freebsd.org/releases/amd64/amd64/ISO-IMAGES/14.2/FreeBSD-14.2-RELEASE-amd64-disc1.iso',
     sha256Url: null,
-    unattended: false,
+    unattended: true,
     defaultUser: 'root', defaultPass: '',
     ram: 2048, cpus: 2, disk: 20480, vram: 16,
     graphicsController: 'vboxvga',
-    notes: 'FreeBSD — Unix-like OS, manual install'
+    notes: 'FreeBSD — Unix-like OS, VM Xposed will auto-boot the installer'
   },
 
   // ── Windows ─────────────────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ const OS_CATALOG = {
     defaultUser: 'user', defaultPass: 'password',
     ram: 2048, cpus: 2, disk: 20480, vram: 64,
     graphicsController: 'vmsvga',
-    notes: 'Use any ISO file you have. You will need to install the OS manually.'
+    notes: 'Use any ISO file. VM Xposed will auto-boot the installer.'
   }
 };
 

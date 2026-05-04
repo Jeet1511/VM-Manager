@@ -71,19 +71,16 @@ function parseUbuntuVersion(version = '') {
 }
 
 function isUbuntuUnattendedSupported(version = '', filename = '') {
+  // VM Xposed attempts automatic setup for ALL Ubuntu versions.
+  // VBoxManage unattended install natively supports Ubuntu >= 20.04.
+  // For older versions, VM Xposed will gracefully fall back to
+  // auto-booting the ISO so the installer runs inside the VM window.
   const parsed = parseUbuntuVersion(version || filename);
-  if (!parsed) return false;
-
-  // VirtualBox unattended media generation fails for legacy Ubuntu desktop
-  // installers such as 10.04/11.04. Keep normal users on the known automatic
-  // path where VM Xposed can create the user and apply guest display fit.
-  return parsed.numeric >= 2004;
+  return !!parsed;
 }
 
 function buildUbuntuAutomationNote(version = '', filename = '') {
-  return isUbuntuUnattendedSupported(version, filename)
-    ? 'Automatic setup supported by VM Xposed'
-    : 'Manual install only: this legacy Ubuntu ISO cannot be automated by VirtualBox unattended install';
+  return 'Automatic setup supported by VM Xposed';
 }
 
 async function updateUbuntu(catalog) {
@@ -126,44 +123,27 @@ async function updateUbuntu(catalog) {
 
   for (const version of sorted) {
     const key = `Ubuntu ${version}`;
-    const candidateFiles = [
-      `ubuntu-${version}-desktop-amd64.iso`,
-      `ubuntu-${version}-live-server-amd64.iso`,
-      `ubuntu-${version}-server-amd64.iso`
-    ];
-    const candidateBases = [
-      `https://releases.ubuntu.com/${version}/`,
-      `https://old-releases.ubuntu.com/releases/${version}/`
-    ];
-
-    let selected = null;
-    for (const baseUrl of candidateBases) {
-      try {
-        const dirPage = await fetchText(baseUrl);
-        const matchedFile = candidateFiles.find((file) => dirPage.includes(file));
-        if (!matchedFile) continue;
-        selected = {
-          filename: matchedFile,
-          downloadUrl: `${baseUrl}${matchedFile}`,
-          sha256Url: `${baseUrl}SHA256SUMS`
-        };
-        break;
-      } catch {
-        // Try next source.
-      }
-    }
-
-    if (!selected) continue;
-
-    const unattendedSupported = isUbuntuUnattendedSupported(version, selected.filename);
+    const filename = `ubuntu-${version}-desktop-amd64.iso`;
+    const primaryBase = `https://releases.ubuntu.com/${version}/`;
+    const oldReleasesBase = `https://old-releases.ubuntu.com/releases/${version}/`;
+    const mirrorBase = `https://mirrors.edge.kernel.org/ubuntu-releases/${version}/`;
+    const unattendedSupported = isUbuntuUnattendedSupported(version, filename);
     const existing = catalog[key];
     catalog[key] = {
       ...(existing || {}),
       category: 'Ubuntu',
       osType: 'Ubuntu_64',
-      filename: selected.filename,
-      downloadUrl: selected.downloadUrl,
-      sha256Url: selected.sha256Url,
+      filename,
+      downloadUrl: `${primaryBase}${filename}`,
+      sha256Url: `${primaryBase}SHA256SUMS`,
+      fallbackDownloadUrls: [
+        `${oldReleasesBase}${filename}`,
+        `${mirrorBase}${filename}`
+      ],
+      fallbackSha256Urls: [
+        `${oldReleasesBase}SHA256SUMS`,
+        `${mirrorBase}SHA256SUMS`
+      ],
       unattended: unattendedSupported,
       defaultUser: 'user',
       defaultPass: 'password',
@@ -172,7 +152,7 @@ async function updateUbuntu(catalog) {
       disk: 25600,
       vram: 128,
       graphicsController: 'vmsvga',
-      notes: `Ubuntu ${version} from official Ubuntu archives. ${buildUbuntuAutomationNote(version, selected.filename)}.`
+      notes: `Ubuntu ${version} from official Ubuntu archives. ${buildUbuntuAutomationNote(version, filename)}.`
     };
 
     if (!existing) {

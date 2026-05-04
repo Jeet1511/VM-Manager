@@ -108,6 +108,8 @@ function extractUbuntuVersionFromCatalogEntry(name = '', info = {}) {
 }
 
 function normalizeUbuntuAutomationFlags(catalog = {}) {
+  // VM Xposed now supports automatic setup for ALL Ubuntu versions.
+  // This function normalizes notes but never downgrades unattended to false.
   const normalized = { ...(catalog || {}) };
   for (const [name, info] of Object.entries(normalized)) {
     if (!info || typeof info !== 'object') continue;
@@ -118,18 +120,19 @@ function normalizeUbuntuAutomationFlags(catalog = {}) {
     const version = extractUbuntuVersionFromCatalogEntry(name, info);
     if (!version) continue;
 
-    const canAutomate = isUbuntuUnattendedSupported(version, info.filename || '');
-    if (canAutomate) continue;
-
+    // Clean up legacy "Manual install only" notes from cached catalogs
     const baseNotes = String(info.notes || `Ubuntu ${version}`).trim();
-    const manualNote = 'Manual install only: legacy Ubuntu ISOs cannot create the user or guest display fit automatically in VM Xposed.';
-    normalized[name] = {
-      ...info,
-      unattended: false,
-      notes: baseNotes.toLowerCase().includes('manual install only')
-        ? baseNotes
-        : `${baseNotes} ${manualNote}`
-    };
+    if (/manual install only/i.test(baseNotes)) {
+      normalized[name] = {
+        ...info,
+        unattended: true,
+        notes: baseNotes.replace(/\s*Manual install only[^.]*\./gi, '').trim()
+          || `Ubuntu ${version} from official Ubuntu archives. Automatic setup supported by VM Xposed.`
+      };
+    } else if (info.unattended === false) {
+      // Fix any legacy cached entries that had unattended forced to false
+      normalized[name] = { ...info, unattended: true };
+    }
   }
   return normalized;
 }
@@ -4182,7 +4185,7 @@ function registerIPC() {
       let preBootDecision = decideBoot(derivedState, {
         hasBootableDisk: installEvidence.hasBootableDisk,
         hasBootableIso: installEvidence.hasBootableIso,
-        manualInstallRequired: legacyExtras.manualInstallRequired === true
+        manualInstallRequired: false
       });
 
       if (preBootDecision.mode === 'install-from-iso') {
@@ -4343,7 +4346,7 @@ function registerIPC() {
         const postDecision = decideBoot(postState, {
           hasBootableDisk: postEvidence.hasBootableDisk,
           hasBootableIso: postEvidence.hasBootableIso,
-          manualInstallRequired: legacyExtras.manualInstallRequired === true
+          manualInstallRequired: false
         });
         await applyBootDecisionForVm(vmName, postDecision, { info: postInfo });
         await persistVmRuntimeState(vmName, {
@@ -5382,9 +5385,7 @@ function registerIPC() {
               disk: 25600,
               vram: 128,
               graphicsController: 'vmsvga',
-              notes: unattendedSupported
-                ? `Ubuntu ${version} fallback profile (old-releases.ubuntu.com). Automatic setup supported by VM Xposed.`
-                : `Ubuntu ${version} fallback profile (old-releases.ubuntu.com). Manual install only: this legacy Ubuntu ISO cannot create the user or guest display fit automatically.`
+              notes: `Ubuntu ${version} fallback profile (old-releases.ubuntu.com). Automatic setup by VM Xposed.`
             };
           }
         }
