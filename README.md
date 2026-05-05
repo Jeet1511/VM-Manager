@@ -36,7 +36,7 @@ Public update source is now repository folders:
 
 [![Download Latest Installer](https://img.shields.io/badge/⬇_Download-Latest_Windows_Setup-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/raw/main/Installer/VM-Xposed-Setup.exe)
 
-> **Current Version: v1.1.29** — Click the badge above to download.
+> **Current Version: v1.1.30** — Click the badge above to download.
 
 - `VM-Xposed-Setup.exe` is always the latest build — automatically updated with every release.
 - All versioned installers are available in the [📁 Installer folder](https://github.com/Jeet1511/VM-Manager/tree/main/Installer).

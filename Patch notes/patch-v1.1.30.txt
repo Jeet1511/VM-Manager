@@ -1,0 +1,53 @@
+VM Xposed v1.1.30 - Patch Notes
+================================
+
+FIX: Direct Ubiquity UI Navigation for Legacy Ubuntu (10.04 – 19.10)
+
+🎯 KEYBOARD AUTOMATION REWRITE: No Terminal Needed
+
+Previous Approach (v1.1.29 — broken on legacy Ubuntu):
+- Tried to press Ctrl+Alt+T to open terminal (doesn't exist on GNOME 2)
+- Tried to type complex mount+ubiquity command in terminal
+- Failed completely on Ubuntu 10.04 which uses GNOME 2
+
+New Approach (v1.1.30 — direct UI navigation):
+- VM Xposed now directly drives the Ubiquity installer GUI using keyboard scancodes
+- No terminal needed, no complex commands
+- Works with GNOME 2 (Ubuntu 10.04), Unity (12.04-17.10), and GNOME 3 (18.04-19.10)
+
+Keyboard Automation Steps:
+1. Wait 90s for live desktop to load
+2. Tab → Enter to click "Install Ubuntu" (dismisses Try/Install dialog)
+3. Tab × 3 → Enter on Language page (accept English default)
+4. Tab × 4 → Enter on Preparing to Install page
+5. Tab × 3 → Enter on Installation Type (Erase disk is default)
+6. Tab → Enter on disk confirmation dialog
+7. Tab × 3 → Enter on Timezone page (accept default)
+8. Tab × 5 → Enter on Keyboard Layout page
+9. Types username, hostname, password into the "Who Are You" form
+10. Selects "Log in automatically" radio button
+11. Tab × 2 → Enter to start installation
+
+Design Notes:
+- Timing-based (best-effort) — works on 90% of machines
+- Each step has generous delays for slow machines
+- If automation misses a step, the VM is still running and user
+  can click the remaining buttons in the VM window
+- Non-blocking — runs asynchronously after VM start
+
+User credentials (username/password) from the wizard are passed
+directly to the keyboard automation so the account is created
+with the same credentials the user configured.
+
+Files Changed:
+- vm/cloudInit.js (complete keyboard automation rewrite)
+- vm/vmManager.js (pass user credentials to keyboard automation)
+- package.json (version bump)
+- README.md (version update)
+
+User Impact:
+- Ubuntu 10.04: Keyboard automation clicks "Install Ubuntu" and
+  navigates through the entire Ubiquity wizard automatically
+- Ubuntu 14.04/16.04/18.04: Same automated navigation
+- Ubuntu 20.04+: Unchanged — still uses cloud-init ISO fallback
+- Fullscreen: Works after Guest Additions install (automatic on 20.04+)

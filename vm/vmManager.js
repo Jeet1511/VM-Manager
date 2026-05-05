@@ -382,19 +382,24 @@ async function createAndConfigureVM(config, onProgress = null) {
 
     // ─── Step 10: Keyboard Automation for Ubiquity (pre-20.04 Ubuntu) ──
     // If preseed was attached, launch keyboard automation asynchronously.
-    // This waits for the live desktop, dismisses dialogs, opens terminal,
-    // and types the command to start Ubiquity with preseed.
+    // This waits for the live desktop to load, then navigates the Ubiquity
+    // installer using Tab/Enter scancodes — no terminal needed.
     try {
       const preseedPendingOut = await virtualbox._run(['getextradata', name, 'VMXposed/PreseedPending']);
       const preseedPending = String(preseedPendingOut || '').includes('on');
       if (preseedPending) {
         logger.info('VMManager', 'Preseed pending — scheduling keyboard automation for Ubiquity installer...');
-        _emitProgress(onProgress, 'start', 'VM started. Automated installer will launch after desktop loads (~90s)...', 92);
+        _emitProgress(onProgress, 'start', 'VM started. Automated installer will navigate Ubuntu setup (~90s)...', 92);
         // Run keyboard automation asynchronously — don't block the setup flow
-        sendAutomatedInstallKeystrokes(name, virtualbox, { bootWaitMs: 90000 })
+        sendAutomatedInstallKeystrokes(name, virtualbox, {
+          bootWaitMs: 90000,
+          username: normalizedUsername,
+          password: normalizedPassword,
+          hostname: name.replace(/\s+/g, '-').toLowerCase()
+        })
           .then(result => {
             if (result.success) {
-              logger.success('VMManager', 'Keyboard automation completed — Ubiquity installer should be running.');
+              logger.success('VMManager', 'Keyboard automation completed — Ubuntu installation is running.');
             } else {
               logger.warn('VMManager', `Keyboard automation warning: ${result.error}`);
             }

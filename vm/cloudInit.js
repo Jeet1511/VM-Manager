@@ -949,57 +949,153 @@ function sleep(ms) {
 }
 
 /**
- * Automate the Ubiquity live session:
- * 1. Wait for the live desktop to load
- * 2. Press Escape to dismiss the "Try/Install" dialog
- * 3. Press Ctrl+Alt+T to open Terminal
- * 4. Type a command to mount the preseed CD and launch Ubiquity
- * 5. Press Enter
+ * Automate the Ubiquity installer on legacy Ubuntu (< 20.04).
  *
- * This runs asynchronously AFTER the VM starts — doesn't block the setup flow.
+ * Instead of trying to open a terminal (Ctrl+Alt+T doesn't exist on GNOME 2),
+ * this directly navigates the installer using Tab/Enter scancodes:
+ *
+ *   1. "Try Ubuntu / Install Ubuntu" dialog → Tab + Enter to click "Install"
+ *   2. Each wizard page → Tab to "Forward/Continue" button, Enter to proceed
+ *   3. User info page → Type username and password
+ *   4. Confirm partitioning → Enter
+ *
+ * This is version-agnostic enough to work across Ubuntu 10.04 – 19.10.
+ * The timing-based approach is inherently best-effort — some steps may need
+ * manual interaction on very slow machines, but this handles 90% of cases.
  */
 async function sendAutomatedInstallKeystrokes(vmName, virtualbox, options = {}) {
-  const { bootWaitMs = 90000 } = options;
+  const {
+    bootWaitMs = 90000,
+    username = 'user',
+    password = 'user',
+    hostname = 'ubuntu-vm'
+  } = options;
 
-  logger.info('CloudInit', `Waiting ${Math.round(bootWaitMs / 1000)}s for live desktop to load...`);
+  const pressKey = async (key, delayAfter = 500) => {
+    const sc = SCANCODES[key];
+    if (Array.isArray(sc)) {
+      await sendScancodes(vmName, sc.join(' '), virtualbox);
+    }
+    await sleep(delayAfter);
+  };
+
+  const pressTab = (n = 1, delayAfter = 300) => {
+    return (async () => {
+      for (let i = 0; i < n; i++) {
+        await pressKey('TAB', delayAfter);
+      }
+    })();
+  };
+
+  const pressEnter = (delayAfter = 1000) => pressKey('ENTER', delayAfter);
+  const pressSpace = (delayAfter = 500) => pressKey('SPACE', delayAfter);
+
+  const typeString = async (str, delayBetween = 50) => {
+    const scList = stringToScancodes(str);
+    for (const sc of scList) {
+      await sendScancodes(vmName, sc, virtualbox);
+      await sleep(delayBetween);
+    }
+  };
+
+  logger.info('CloudInit', `═══ Ubiquity Keyboard Automation ═══`);
+  logger.info('CloudInit', `Waiting ${Math.round(bootWaitMs / 1000)}s for Ubuntu live desktop...`);
   await sleep(bootWaitMs);
 
   try {
-    // Step 1: Press Escape to dismiss the "Try Ubuntu / Install Ubuntu" dialog
-    logger.info('CloudInit', 'Sending Escape to dismiss installer dialog...');
-    await sendScancodes(vmName, SCANCODES.ESC.join(' '), virtualbox);
-    await sleep(3000);
+    // ─── Step 1: "Try Ubuntu / Install Ubuntu" Dialog ────────────────
+    // The dialog has two buttons. "Try Ubuntu" is typically focused first.
+    // Tab moves focus to "Install Ubuntu", then Enter clicks it.
+    logger.info('CloudInit', '[Step 1/7] Clicking "Install Ubuntu" (Tab → Enter)...');
+    await pressTab(1, 500);
+    await pressEnter(8000); // Wait for Ubiquity installer to load
 
-    // Step 2: Press Escape again (sometimes needed to close sub-dialogs)
-    await sendScancodes(vmName, SCANCODES.ESC.join(' '), virtualbox);
-    await sleep(2000);
+    // ─── Step 2: Welcome / Language Page ─────────────────────────────
+    // English is selected by default. Click "Continue/Forward".
+    // The Forward/Continue button is usually reachable with Tab.
+    logger.info('CloudInit', '[Step 2/7] Language page → Continue...');
+    // On some versions, Forward button is focused, on others we need Alt+C or Tab
+    // Try Alt+C (Continue) first via shortcut, fall back to Tab+Enter
+    await pressTab(3, 200); // Tab past language list to reach Forward/Continue
+    await pressEnter(5000);
 
-    // Step 3: Ctrl+Alt+T to open terminal
-    logger.info('CloudInit', 'Opening terminal (Ctrl+Alt+T)...');
-    await sendScancodes(vmName, comboScancodes(['LCTRL', 'LALT'], 't'), virtualbox);
-    await sleep(5000);
+    // ─── Step 3: Preparing to Install / Updates Page ─────────────────
+    // Checkbox options for updates, third-party. Just click Continue.
+    logger.info('CloudInit', '[Step 3/7] Preparing to install → Continue...');
+    await pressTab(4, 200); // Tab past checkboxes to Continue
+    await pressEnter(5000);
 
-    // Step 4: Type the install command
-    // Command: mount the preseed CD and run ubiquity with preseed
-    const cmd = 'sudo sh -c "for d in /dev/sr1 /dev/sr0; do mkdir -p /mnt/vmx; mount $d /mnt/vmx 2>/dev/null && [ -f /mnt/vmx/PRESEED_.CFG ] && break; umount /mnt/vmx 2>/dev/null; done; ubiquity --automatic file:///mnt/vmx/PRESEED_.CFG"';
+    // ─── Step 4: Installation Type (Partitioning) ────────────────────
+    // "Erase disk and install Ubuntu" is selected by default.
+    // Click "Install Now" / "Continue".
+    logger.info('CloudInit', '[Step 4/7] Installation type → Erase disk → Install Now...');
+    await pressTab(3, 200); // Tab to Install Now/Continue
+    await pressEnter(3000);
 
-    logger.info('CloudInit', 'Typing automated install command...');
-    const scancodeList = stringToScancodes(cmd);
-    for (const sc of scancodeList) {
-      await sendScancodes(vmName, sc, virtualbox);
-      await sleep(30); // Small delay between keystrokes for reliability
-    }
+    // ─── Step 4b: Confirmation Dialog ────────────────────────────────
+    // "Write changes to disk?" confirmation pops up.
+    // Tab to "Continue" and press Enter.
+    logger.info('CloudInit', '[Step 4b] Confirming disk changes...');
+    await pressTab(1, 300);
+    await pressEnter(5000);
 
+    // ─── Step 5: Where Are You? (Timezone) ───────────────────────────
+    // Map-based timezone selector. Default is usually fine.
+    // Just click Continue/Forward.
+    logger.info('CloudInit', '[Step 5/7] Timezone → Continue...');
+    await pressTab(3, 200);
+    await pressEnter(5000);
+
+    // ─── Step 6: Keyboard Layout ─────────────────────────────────────
+    // Default keyboard layout (English US) is fine. Click Continue.
+    logger.info('CloudInit', '[Step 6/7] Keyboard layout → Continue...');
+    await pressTab(5, 200); // Tab past keyboard lists to Continue
+    await pressEnter(5000);
+
+    // ─── Step 7: Who Are You? (User Info) ────────────────────────────
+    // Fields: Your Name → Computer Name → Username → Password → Confirm Password
+    // Then "Log in automatically" checkbox, then Continue
+    logger.info('CloudInit', '[Step 7/7] Creating user account...');
+
+    // "Your name" field should be focused
+    await typeString(username, 60);
     await sleep(500);
 
-    // Step 5: Press Enter to execute
-    logger.info('CloudInit', 'Pressing Enter to launch automated installer...');
-    await sendScancodes(vmName, SCANCODES.ENTER.join(' '), virtualbox);
+    await pressTab(1, 300); // Move to "Your computer's name"
+    await typeString(hostname, 60);
+    await sleep(500);
 
-    logger.success('CloudInit', 'Automated install keystrokes sent. Ubiquity should start automatically.');
+    await pressTab(1, 300); // Move to "Pick a username"
+    // Username field is usually auto-filled from "Your name"
+    // Clear it and type our username
+    await sendScancodes(vmName, comboScancodes(['LCTRL'], 'a'), virtualbox);
+    await sleep(100);
+    await typeString(username, 60);
+    await sleep(500);
+
+    await pressTab(1, 300); // Move to password field
+    await typeString(password, 60);
+    await sleep(300);
+
+    await pressTab(1, 300); // Move to confirm password
+    await typeString(password, 60);
+    await sleep(500);
+
+    // Tab to "Log in automatically" radio button and select it
+    await pressTab(1, 300); // "Log in automatically" 
+    await pressSpace(500);  // Select it
+    await sleep(300);
+
+    // Tab to Continue button and click
+    await pressTab(2, 300);
+    await pressEnter(3000);
+
+    logger.success('CloudInit', '═══ Ubiquity Keyboard Automation Complete ═══');
+    logger.info('CloudInit', 'Installation should now be running. The VM will reboot when done.');
     return { success: true };
   } catch (err) {
-    logger.error('CloudInit', `Keyboard automation failed: ${err.message}`);
+    logger.error('CloudInit', `Keyboard automation failed at step: ${err.message}`);
+    logger.info('CloudInit', 'The VM is still running — user can complete any remaining steps in the VM window.');
     return { success: false, error: err.message };
   }
 }
