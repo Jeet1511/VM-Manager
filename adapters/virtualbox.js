@@ -502,6 +502,24 @@ class VirtualBoxAdapter {
   async startVM(vmName, type = 'gui') {
     logger.info('VirtualBox', `Starting VM "${vmName}" in ${type} mode...`);
 
+    // Pre-check: if VM is already running and we want GUI, use 'separate' to attach
+    if (type === 'gui') {
+      try {
+        const info = await this._run(['showvminfo', vmName, '--machinereadable'], { quiet: true });
+        const stateMatch = String(info).match(/VMState="([^"]+)"/);
+        const currentState = stateMatch ? stateMatch[1] : 'unknown';
+        if (currentState === 'running') {
+          logger.info('VirtualBox', `VM is already running — opening GUI window with --type separate`);
+          type = 'separate';
+        }
+      } catch {}
+    }
+
+    return this._startVMProcess(vmName, type);
+  }
+
+  /** @private */
+  async _startVMProcess(vmName, type) {
     // startvm launches a GUI process — use spawn detached so we don't wait for
     // the VirtualBox window to close. The _run method would timeout or fail.
     return new Promise((resolve, reject) => {
@@ -545,6 +563,12 @@ class VirtualBoxAdapter {
           logger.success('VirtualBox', `VM "${vmName}" started`);
           resolve(stdout);
         } else {
+          // Handle "already locked by a session" — VM is running headless
+          if (/already locked|already running/i.test(details)) {
+            logger.warn('VirtualBox', `VM is locked by another session (background install?). It is already running.`);
+            resolve(stdout); // Not an error — VM IS running
+            return;
+          }
           const errorDetail = details || `VBoxManage startvm exited with code ${code}.`;
           logger.error('VirtualBox', `startvm failed (exit ${code}): ${errorDetail}`);
           reject(new Error(`Failed to start VM: ${errorDetail}`));

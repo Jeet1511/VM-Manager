@@ -16,15 +16,32 @@ VM Xposed is a desktop automation tool that helps users set up and configure vir
 - Node.js
 - Vanilla JS (renderer + service modules)
 
-## Project Structure
+## Architecture
 
-- `main.js`, `preload.js` — Electron entry and preload bridge
-- `renderer/` — UI, components, and styles
-- `core/` — orchestration, config, state, logging
-- `services/` — downloader, checksum, OS catalog, system checks
-- `vm/` — V Os lifecycle helpers and post-install tooling
-- `adapters/` — virtualization platform adapters
-- `scripts/` — build helpers and utility scripts
+The app is split across Electron's two process boundaries with a layered design:
+
+```
+  Renderer (UI)              preload.js              Main Process
+┌─────────────────┐     ┌────────────────┐     ┌──────────────────────┐
+│  index.html     │     │  contextBridge │     │  main.js             │
+│  app.js         │◄───►│  IPC bridge    │◄───►│    ├── core/         │
+│  components/*   │     │  (typed API)   │     │    ├── services/     │
+│  styles.css     │     └────────────────┘     │    ├── adapters/     │
+└─────────────────┘                            │    └── vm/           │
+                                               └──────────────────────┘
+```
+
+| Layer | Folder | Role |
+|-------|--------|------|
+| **Entry** | `main.js`, `preload.js` | App lifecycle, window, IPC bridge |
+| **Core** | `core/` | Orchestrator, config, state, logger, admin elevation |
+| **Services** | `services/` | Downloads, checksum, OS catalog updater, system checks |
+| **Adapters** | `adapters/` | VirtualBox CLI wrapper, platform detection |
+| **VM** | `vm/` | VM creation, cloud-init, boot fixer, guest additions, shared folders |
+| **Renderer** | `renderer/` | Single-page UI: dashboard, wizard, settings, components |
+| **Scripts** | `scripts/` | Build helpers, icon generation, post-pack hooks |
+
+> **📖 Full architecture docs:** See [`ARCHITECTURE.md`](ARCHITECTURE.md) for detailed module breakdowns, data flow diagrams, the complete IPC contract, and design decisions.
 
 ## Download Installer (APK / Setup)
 
@@ -36,7 +53,7 @@ Public update source is now repository folders:
 
 [![Download Latest Installer](https://img.shields.io/badge/⬇_Download-Latest_Windows_Setup-2ea44f?style=for-the-badge&logo=windows)](https://github.com/Jeet1511/VM-Manager/raw/main/Installer/VM-Xposed-Setup.exe)
 
-> **Current Version: v1.1.30** — Click the badge above to download.
+> **Current Version: v1.1.31** — Click the badge above to download.
 
 - `VM-Xposed-Setup.exe` is always the latest build — automatically updated with every release.
 - All versioned installers are available in the [📁 Installer folder](https://github.com/Jeet1511/VM-Manager/tree/main/Installer).

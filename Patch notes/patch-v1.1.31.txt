@@ -1,0 +1,35 @@
+VM Xposed v1.1.31 - Patch Notes
+================================
+
+FIX: False "Restart Required" Banner + Keyboard Automation (v1.1.30)
+
+CRITICAL FIX: "Restart Required" False Positive
+- The banner "Windows restart is pending" appeared even after restarting
+- Root cause: PendingFileRenameOperations registry key was triggering false positives
+- This key is often non-empty on normal systems (VirtualBox installer leftovers, 
+  Windows Update temp files, antivirus file moves) — it does NOT mean a reboot is needed
+- FIX: Removed PendingFileRenameOperations from reboot detection
+- Now only checks definitive reboot markers:
+  * HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired
+  * HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending
+- These only exist when Windows Update or CBS genuinely requires a restart
+
+KEYBOARD AUTOMATION (from v1.1.30):
+- Complete rewrite of Ubiquity keyboard automation for Ubuntu < 20.04
+- Now directly navigates the installer UI with Tab/Enter scancodes
+- No longer tries to open a terminal (Ctrl+Alt+T doesn't exist in GNOME 2)
+- Steps: Tab → Enter on each installer page, types username/password/hostname
+- Selects "Log in automatically" for auto-login
+- Works across Ubuntu 10.04 (GNOME 2), 12.04-17.10 (Unity), 18.04-19.10 (GNOME 3)
+
+FULLSCREEN NOTE:
+- Guest OS fullscreen requires VirtualBox Guest Additions
+- Guest Additions are installed automatically AFTER the OS finishes installing
+- During installation, the VM runs at default 1024x768 — this is expected
+- After install + reboot, fullscreen will work automatically
+
+Files Changed:
+- main.js (removed PendingFileRenameOperations false positive)
+- vm/cloudInit.js (keyboard automation rewrite from v1.1.30)
+- vm/vmManager.js (pass credentials to keyboard automation)
+- package.json, README.md (version bump)

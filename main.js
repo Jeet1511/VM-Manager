@@ -2458,18 +2458,13 @@ async function collectWindowsVBoxRecoverySignals() {
     $hvci = (Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity' -Name Enabled -ErrorAction SilentlyContinue).Enabled
     $pendingWU = Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\RebootRequired'
     $pendingCBS = Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending'
-    $pendingFileOpsRaw = (Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
-    $pendingFileOps = @()
-    if ($null -ne $pendingFileOpsRaw) {
-      $pendingFileOps = @($pendingFileOpsRaw) | Where-Object { $_ -and $_.ToString().Trim() -ne '' }
-    }
 
     [PSCustomObject]@{
       hyperV = "$hyperV"
       hypervisorPlatform = "$hypervisorPlatform"
       virtualMachinePlatform = "$vmPlatform"
       memoryIntegrityEnabled = ([int]$hvci -eq 1)
-      pendingReboot = [bool]($pendingWU -or $pendingCBS -or ($pendingFileOps.Count -gt 0))
+      pendingReboot = [bool]($pendingWU -or $pendingCBS)
     } | ConvertTo-Json -Compress
   `;
 
