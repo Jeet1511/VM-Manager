@@ -1,0 +1,12 @@
+Version 1.1.42 (Major Stability Update)
+--------------------------------------
+
+This update brings comprehensive fixes for VirtualBox compatibility, especially for VBox 7 users, and resolves multiple issues with integration features like clipboard, drag-and-drop, shared folders, and fullscreen mode.
+
+Key Fixes & Improvements:
+- VirtualBox 7 Compatibility: Fixed clipboard and drag-and-drop flags (now correctly uses `--clipboard-mode` and `--drag-and-drop` for VBox 7+ while maintaining `--clipboard` for VBox 6).
+- Running VM Edits: Resolved E_ACCESSDENIED errors when attempting to toggle clipboard or drag-and-drop on running VMs (now uses `controlvm` instead of `modifyvm`).
+- Fullscreen Toggle Fix: Toggling Fullscreen on a running VM now waits correctly for Guest Additions to be ready, ensuring the video mode hint is actually applied.
+- Shared Folders: Changing shared folders while a VM is running will no longer block other simultaneous changes (like clipboard or fullscreen). Shared folder updates correctly notify the user that a restart is needed while other settings apply instantly.
+- Ubuntu Guest Additions Fix: Improved package installation for Ubuntu VMs. Added version detection (Ubuntu 18.04 vs 22.04+) to install the appropriate virtualbox-guest packages and gracefully fall back to `--display` if `--vmsvga` is unavailable.
+- Dashboard Layout: Improved responsiveness and compactness of the dashboard for small screens (max height 820px), ensuring the UI doesn't clip on 1366x768 monitors.
