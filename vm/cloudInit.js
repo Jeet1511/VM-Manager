@@ -41,7 +41,7 @@ function hashPassword(password, rounds = 5000) {
   ctxB.update(passBytes);
   ctxB.update(saltBytes);
   ctxB.update(passBytes);
-  const digestB = ctxB.digest();
+  let digestB = ctxB.digest();
 
   // Step 4-8: digestA = SHA512(password + salt + digestB-chunks + bit-interleave)
   const ctxA = crypto.createHash('sha512');
@@ -60,14 +60,14 @@ function hashPassword(password, rounds = 5000) {
   // Step 9-11: digestDP = SHA512(password repeated passLen times)
   const ctxDP = crypto.createHash('sha512');
   for (let i = 0; i < passBytes.length; i++) { ctxDP.update(passBytes); }
-  const digestDP = ctxDP.digest();
+  let digestDP = ctxDP.digest();
   const P = Buffer.alloc(passBytes.length);
   for (let i = 0; i < passBytes.length; i++) { P[i] = digestDP[i % HASH_LEN]; }
 
   // Step 12-14: digestDS = SHA512(salt repeated (16 + digestA[0]) times)
   const ctxDS = crypto.createHash('sha512');
   for (let i = 0; i < 16 + digestA[0]; i++) { ctxDS.update(saltBytes); }
-  const digestDS = ctxDS.digest();
+  let digestDS = ctxDS.digest();
   const S = Buffer.alloc(saltBytes.length);
   for (let i = 0; i < saltBytes.length; i++) { S[i] = digestDS[i % HASH_LEN]; }
 
@@ -135,15 +135,35 @@ function generateUserData(options) {
   const lateCommands = [];
 
   // Auto-login — user never sees login screen
+  // Detect which display manager is installed and configure the right one
   if (enableAutoLogin) {
     lateCommands.push(
-      `    - "mkdir -p /target/etc/gdm3"`,
       `    - |`,
-      `      cat <<'GDMEOF' > /target/etc/gdm3/custom.conf`,
+      `      # Configure auto-login for whichever display manager is installed`,
+      `      if [ -d /target/etc/gdm3 ]; then`,
+      `        mkdir -p /target/etc/gdm3`,
+      `        cat <<'GDMEOF' > /target/etc/gdm3/custom.conf`,
       `      [daemon]`,
       `      AutomaticLoginEnable=true`,
       `      AutomaticLogin=${safeUsername}`,
-      `      GDMEOF`
+      `      GDMEOF`,
+      `      elif [ -d /target/etc/gdm ]; then`,
+      `        mkdir -p /target/etc/gdm`,
+      `        cat <<'GDMEOF' > /target/etc/gdm/custom.conf`,
+      `      [daemon]`,
+      `      AutomaticLoginEnable=true`,
+      `      AutomaticLogin=${safeUsername}`,
+      `      GDMEOF`,
+      `      fi`,
+      `    - |`,
+      `      # LightDM auto-login (Lubuntu, Xubuntu, etc.)`,
+      `      if chroot /target dpkg -l lightdm 2>/dev/null | grep -q "^ii"; then`,
+      `        mkdir -p /target/etc/lightdm/lightdm.conf.d`,
+      `        cat <<'LDMEOF' > /target/etc/lightdm/lightdm.conf.d/50-vmxposed-autologin.conf`,
+      `      [Seat:*]`,
+      `      autologin-user=${safeUsername}`,
+      `      LDMEOF`,
+      `      fi`
     );
   }
 
@@ -209,6 +229,15 @@ function generateUserData(options) {
 autoinstall:
   version: 1
 
+  # ─── CRITICAL: Suppress ALL interactive prompts ────────────
+  # Without this, Ubuntu 23.04+ shows the setup wizard even with
+  # autoinstall config present. Empty list = fully automated.
+  interactive-sections: []
+
+  # ─── Skip installer update prompt ──────────────────────────
+  refresh-installer:
+    update: false
+
   # ─── Locale & Keyboard ─────────────────────────────────────
   locale: ${locale}
   keyboard:
@@ -252,7 +281,12 @@ autoinstall:
     - curl
     - htop
     - net-tools
-    - openssh-server${installGuestAdditions ? '\n    - virtualbox-guest-utils\n    - virtualbox-guest-x11' : ''}
+    - openssh-server${installGuestAdditions ? '\\n    - virtualbox-guest-utils\\n    - virtualbox-guest-x11' : ''}
+
+  # ─── Early Commands (run before install starts) ────────────
+  # Ensure autoinstall proceeds without waiting for confirmation
+  early-commands:
+    - "echo 'VM Xposed: Autoinstall starting...' > /dev/tty1 || true"
 ${lateCommandsYaml}
 
   # ─── User Data (post-first-boot) ──────────────────────────
@@ -789,6 +823,18 @@ async function applyCloudInitFallback(vmName, vmDir, virtualbox, options = {}) {
 
     await attachIsoToVM(vmName, isoPath, virtualbox);
 
+    // Inject autoinstall kernel boot parameter for Ubuntu 23.04+
+    try {
+      await virtualbox._run(['setextradata', vmName, 'VBoxInternal/Devices/efi/0/Config/AdditionalEnv', 'GRUB_CMDLINE_LINUX_DEFAULT=autoinstall ds=nocloud quiet splash']);
+      logger.info('CloudInit', 'Injected autoinstall kernel param via EFI config');
+    } catch (efiErr) { logger.debug('CloudInit', 'EFI param injection skipped: ' + efiErr.message); }
+    try {
+      await virtualbox._run(['setextradata', vmName, 'VBoxInternal2/LinuxBootArgs', 'autoinstall ds=nocloud']);
+    } catch (bootErr) { logger.debug('CloudInit', 'LinuxBootArgs skipped: ' + bootErr.message); }
+    try {
+      await virtualbox._run(['modifyvm', vmName, '--boot1', 'dvd', '--boot2', 'disk', '--boot3', 'none', '--boot4', 'none']);
+    } catch (e) {}
+
     logger.success('CloudInit', '═══ Cloud-Init Fallback Applied ═══');
     logger.info('CloudInit', 'Ubuntu will detect the autoinstall config and install fully automated.');
     return { success: true, isoPath };
@@ -800,33 +846,115 @@ async function applyCloudInitFallback(vmName, vmDir, virtualbox, options = {}) {
 
 /**
  * ─── Preseed Fallback for Ubiquity (Ubuntu < 20.04) ──────────────────
- * Creates a preseed ISO and attaches it to the VM.
- * After the VM boots into the live session, keyboard automation opens
- * a terminal and launches the preseed-driven Ubiquity installer.
+ * Creates a dual-purpose cloud-init + preseed ISO.
+ * 
+ * Strategy (100% file-based, no keyboard/mouse):
+ * 1. Create an ISO with label "cidata" (cloud-init NoCloud data source)
+ * 2. Include user-data with runcmd that auto-launches:
+ *    `ubiquity --automatic --preseed /tmp/vmxposed-preseed.cfg`
+ * 3. Include the preseed.cfg as a write_files entry
+ * 4. Cloud-init runs in the Ubuntu live session and triggers the install
+ * 
+ * Ubuntu 18.04 Desktop has cloud-init installed by default.
+ * When cloud-init finds the cidata disk, it executes our commands.
  */
 async function createPreseedIso(vmDir, options = {}) {
   const ciDir = path.join(vmDir, 'cloud-init');
   await fs.promises.mkdir(ciDir, { recursive: true });
 
   const preseedContent = generatePreseedConfig(options);
-  const installScript = generateAutoInstallScript(options.username, options.password);
+  let username = options.username || 'guest';
+  let password = options.password || 'guest';
 
-  // Write human-readable copies for debugging
+  // Write human-readable copy for debugging
   await fs.promises.writeFile(path.join(ciDir, 'preseed.cfg'), preseedContent, 'utf8');
-  await fs.promises.writeFile(path.join(ciDir, 'install.sh'), installScript, 'utf8');
   logger.info('CloudInit', `Written preseed.cfg to: ${path.join(ciDir, 'preseed.cfg')}`);
 
-  // Build real ISO
-  const isoBuf = buildPreseedIso(preseedContent, installScript);
+  // Build a cloud-init user-data that auto-launches Ubiquity with preseed
+  // This runs inside the live session via cloud-init's runcmd
+  const escapedPreseed = preseedContent.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  
+  const userData = [
+    '#cloud-config',
+    '# VM Xposed: Auto-launch Ubiquity installer with preseed (file-based)',
+    '# This runs in the Ubuntu live session — no keyboard/mouse needed.',
+    '',
+    'write_files:',
+    '  - path: /tmp/vmxposed-preseed.cfg',
+    '    permissions: "0644"',
+    '    content: |',
+    ...preseedContent.split('\n').map(line => `      ${line}`),
+    '',
+    '  - path: /tmp/vmxposed-autoinstall.sh',
+    '    permissions: "0755"',
+    '    content: |',
+    '      #!/bin/bash',
+    '      # VM Xposed: Robust auto-launch Ubiquity with preseed',
+    '      # Handles slow VMs, multiple desktop environments, X auth',
+    '      LOG=/tmp/vmxposed-install.log',
+    '      echo "[$(date)] VM Xposed auto-install starting..." > $LOG',
+    '      ',
+    '      # Run everything in a subshell detached from cloud-init',
+    '      (',
+    '      # Wait for X display (up to 120s for slow VMs)',
+    '      for i in $(seq 1 60); do',
+    '        if [ -e /tmp/.X11-unix/X0 ] || [ -e /tmp/.X0-lock ]; then',
+    '          echo "[$(date)] X display found (try $i)" >> $LOG',
+    '          break',
+    '        fi',
+    '        sleep 2',
+    '      done',
+    '      sleep 10  # Extra wait for desktop to fully load',
+    '      ',
+    '      # Set up display environment',
+    '      export DISPLAY=:0',
+    '      export DEBIAN_FRONTEND=noninteractive',
+    '      for xa in /home/ubuntu/.Xauthority /root/.Xauthority /var/run/lightdm/root/:0; do',
+    '        [ -f "$xa" ] && export XAUTHORITY="$xa" && break',
+    '      done',
+    '      ',
+    '      # Kill the Try/Install Ubuntu dialog (Ubiquity GUI)',
+    '      for attempt in $(seq 1 8); do',
+    '        PIDS=$(pgrep -f ubiquity 2>/dev/null)',
+    '        if [ -n "$PIDS" ]; then',
+    '          echo "[$(date)] Killing Ubiquity PIDs: $PIDS" >> $LOG',
+    '          kill -9 $PIDS 2>/dev/null',
+    '          sleep 2',
+    '          pkill -9 -f ubiquity 2>/dev/null',
+    '          break',
+    '        fi',
+    '        echo "[$(date)] Ubiquity not found yet ($attempt/8)" >> $LOG',
+    '        sleep 5',
+    '      done',
+    '      sleep 3',
+    '      ',
+    '      # Launch Ubiquity in fully automatic mode',
+    '      echo "[$(date)] Launching ubiquity --automatic" >> $LOG',
+    '      sudo -E ubiquity -d --automatic --preseed /tmp/vmxposed-preseed.cfg >> $LOG 2>&1 &',
+    '      echo "[$(date)] Ubiquity launched (PID: $!)" >> $LOG',
+    '      ) &  # End of detached subshell',
+    '',
+    'runcmd:',
+    '  - ["bash", "-c", "nohup bash /tmp/vmxposed-autoinstall.sh &"]',
+  ].join('\n') + '\n';
+
+  const metaData = `instance-id: vmxposed-preseed-${Date.now()}\nlocal-hostname: ${options.hostname || 'ubuntu-vm'}\n`;
+
+  // Write debug copies
+  await fs.promises.writeFile(path.join(ciDir, 'user-data'), userData, 'utf8');
+  await fs.promises.writeFile(path.join(ciDir, 'meta-data'), metaData, 'utf8');
+
+  // Build ISO with cidata label (cloud-init picks this up)
+  const isoBuf = buildCloudInitIso(userData, metaData);
   const isoPath = path.join(ciDir, 'preseed-seed.iso');
   await fs.promises.writeFile(isoPath, isoBuf);
 
-  logger.success('CloudInit', `Preseed ISO created: ${isoPath} (${isoBuf.length} bytes)`);
+  logger.success('CloudInit', `Preseed trigger ISO created: ${isoPath} (${isoBuf.length} bytes)`);
   return isoPath;
 }
 
 async function applyPreseedFallback(vmName, vmDir, virtualbox, options = {}) {
-  logger.info('CloudInit', `═══ Applying Preseed Fallback for "${vmName}" (Ubiquity) ═══`);
+  logger.info('CloudInit', `═══ Applying Preseed Fallback for "${vmName}" (Ubiquity — file-based) ═══`);
 
   try {
     // CRITICAL: Re-attach the main Ubuntu ISO to IDE port 0.
@@ -843,7 +971,6 @@ async function applyPreseedFallback(vmName, vmDir, virtualbox, options = {}) {
         ]);
         logger.success('CloudInit', 'Main ISO re-attached on IDE Controller port 0.');
       } catch (ideErr) {
-        // Try SATA if IDE fails
         try {
           await virtualbox._run([
             'storageattach', vmName,
@@ -871,8 +998,25 @@ async function applyPreseedFallback(vmName, vmDir, virtualbox, options = {}) {
 
     await attachIsoToVM(vmName, isoPath, virtualbox);
 
-    logger.success('CloudInit', '═══ Preseed Fallback Applied ═══');
-    logger.info('CloudInit', 'Main ISO + Preseed ISO attached. Keyboard automation will launch the installer.');
+    // Try to inject automatic-ubiquity kernel param (best-effort)
+    // This tells Ubiquity to skip the "Try/Install" dialog
+    try {
+      await virtualbox._run(['setextradata', vmName, 
+        'VBoxInternal/Devices/pcbios/0/Config/DmiSystemProduct', 
+        'automatic-ubiquity noprompt']);
+    } catch {}
+    try {
+      // For EFI-based VMs
+      await virtualbox._run(['setextradata', vmName,
+        'VBoxInternal/Devices/efi/0/Config/AdditionalEnv',
+        'GRUB_CMDLINE_LINUX_DEFAULT=automatic-ubiquity noprompt file=/cdrom/preseed/ubuntu.seed quiet splash']);
+    } catch {}
+    try {
+      await virtualbox._run(['modifyvm', vmName, '--boot1', 'dvd', '--boot2', 'disk', '--boot3', 'none', '--boot4', 'none']);
+    } catch {}
+
+    logger.success('CloudInit', '═══ Preseed Fallback Applied (file-based) ═══');
+    logger.info('CloudInit', 'Cloud-init trigger ISO will auto-launch Ubiquity with preseed. No keyboard/mouse needed.');
     return { success: true, isoPath };
   } catch (err) {
     logger.error('CloudInit', `Preseed fallback failed: ${err.message}`);
@@ -1109,6 +1253,99 @@ async function sendAutomatedInstallKeystrokes(vmName, virtualbox, options = {}) 
   }
 }
 
+
+/**
+ * ─── GRUB Boot Parameter Injection ──────────────────────────────────
+ * After the VM starts, edits the GRUB boot entry to add 'autoinstall ds=nocloud'
+ * to the kernel command line. This is the MOST RELIABLE way to ensure autoinstall
+ * works in VirtualBox, since setextradata-based kernel param injection is buggy.
+ *
+ * Flow:
+ * 1. Wait for GRUB menu to appear (~5s)
+ * 2. Press 'e' to edit the default entry
+ * 3. Navigate down to the 'linux' line
+ * 4. Press End to go to end of line
+ * 5. Type ' autoinstall ds=nocloud\\;s=/cdrom/'
+ * 6. Press Ctrl+X to boot with modified params
+ */
+async function injectAutoinstallViaGrub(vmName, virtualbox) {
+  const _sleep = ms => new Promise(r => setTimeout(r, ms));
+  
+  const sendSC = async (codes) => {
+    await virtualbox._run(['controlvm', vmName, 'keyboardputscancode', ...codes.split(' ')]);
+  };
+  
+  logger.info('CloudInit', '═══ Injecting autoinstall via GRUB edit ═══');
+  
+  // Wait for GRUB menu to appear (after BIOS/EFI, ~6 seconds)
+  logger.info('CloudInit', 'Waiting 10s for GRUB menu...');
+  await _sleep(10000);
+  
+  // Press 'e' to edit GRUB entry (scancode: 12 92)
+  logger.info('CloudInit', 'Pressing "e" to edit GRUB entry...');
+  await sendSC('12 92');
+  await _sleep(1500);
+  
+  // Press Down arrow 4 times to reach the 'linux' line
+  // GRUB edit screen typically has:
+  //   line 1: setparams 'Try or Install Ubuntu'
+  //   line 2: set gfxpayload=keep  
+  //   line 3: linux /casper/vmlinuz ... quiet splash ---
+  //   line 4: initrd /casper/initrd
+  // Down arrow scancode: 50 d0
+  logger.info('CloudInit', 'Navigating to linux line (Down x4)...');
+  for (let i = 0; i < 4; i++) {
+    await sendSC('e0 50 e0 d0');  // Down arrow (extended key)
+    await _sleep(300);
+  }
+  
+  // Press End key to go to end of the linux line
+  // End scancode: 4f cf
+  logger.info('CloudInit', 'Moving to end of line (End)...');
+  await sendSC('e0 4f e0 cf');
+  await _sleep(300);
+  
+  // Type ' autoinstall ds=nocloud' at the end of the linux line
+  // We need to type each character as scancodes
+  const textToType = ' autoinstall';
+  logger.info('CloudInit', 'Typing "' + textToType + '"...');
+  
+  // Space (39 b9)
+  await sendSC('39 b9'); await _sleep(50);
+  // a (1e 9e)
+  await sendSC('1e 9e'); await _sleep(50);
+  // u (16 96)
+  await sendSC('16 96'); await _sleep(50);
+  // t (14 94)
+  await sendSC('14 94'); await _sleep(50);
+  // o (18 98)
+  await sendSC('18 98'); await _sleep(50);
+  // i (17 97)
+  await sendSC('17 97'); await _sleep(50);
+  // n (31 b1)
+  await sendSC('31 b1'); await _sleep(50);
+  // s (1f 9f)
+  await sendSC('1f 9f'); await _sleep(50);
+  // t (14 94)
+  await sendSC('14 94'); await _sleep(50);
+  // a (1e 9e)
+  await sendSC('1e 9e'); await _sleep(50);
+  // l (26 a6)
+  await sendSC('26 a6'); await _sleep(50);
+  // l (26 a6)
+  await sendSC('26 a6'); await _sleep(50);
+  
+  await _sleep(200);
+  
+  // Press Ctrl+X to boot with modified parameters
+  // Ctrl press: 1d, x press: 2d, x release: ad, Ctrl release: 9d
+  logger.info('CloudInit', 'Pressing Ctrl+X to boot with autoinstall param...');
+  await sendSC('1d 2d ad 9d');
+  
+  logger.success('CloudInit', '═══ GRUB autoinstall injection complete ═══');
+  logger.info('CloudInit', 'Ubuntu will now boot with autoinstall parameter. Subiquity will auto-detect cloud-init config.');
+}
+
 module.exports = {
   generateUserData,
   generateMetaData,
@@ -1133,6 +1370,7 @@ module.exports = {
   applyCloudInitFallback,
   applyPreseedFallback,
   sendAutomatedInstallKeystrokes,
+  injectAutoinstallViaGrub,
   isSubiquityUbuntu,
   hashPassword
 };

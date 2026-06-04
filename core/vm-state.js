@@ -61,13 +61,25 @@ function detectStorageFacts(info = {}) {
 function buildInstallEvidence(info = {}, extras = {}) {
   const storage = detectStorageFacts(info);
   const markerPresent = toBool(extras.markerPresent, false) || toBool(extras.installedDiskReady, false);
-  const installConfirmed = storage.hasBootableDisk && (storage.guestAgentReachable || markerPresent);
+  // GuestConfigPending means the orchestrator ran and deferred guest setup —
+  // this implies the OS was installed (ISO was ejected, disk boot was set)
+  const guestConfigPending = toBool(extras.guestConfigPending, false);
+  // If the disk file is larger than 2GB, the OS was almost certainly installed
+  const diskSizeBytes = parseInt(extras.diskSizeBytes || '0', 10) || 0;
+  const diskLargeEnough = diskSizeBytes > 2 * 1024 * 1024 * 1024; // > 2GB
+  const installConfirmed = storage.hasBootableDisk && (
+    storage.guestAgentReachable
+    || markerPresent
+    || guestConfigPending
+    || diskLargeEnough
+  );
 
   return {
     hasBootableDisk: storage.hasBootableDisk,
     hasBootableIso: storage.hasBootableIso,
     guestAgentReachable: storage.guestAgentReachable,
     markerPresent,
+    guestConfigPending,
     installConfirmed,
     bootSource: storage.bootSource
   };
@@ -127,6 +139,10 @@ function decideBoot(vmState = {}, liveFacts = {}) {
   }
 
   if (state.phase === 'installing' || state.phase === 'preinstall') {
+    // If the VM has rebooted even once while in 'installing' phase with a
+    // bootable disk, the OS is almost certainly installed — switch to disk.
+    // Previously this threshold was 3, but that allowed the installer to
+    // show again 3 times before the watchdog kicked in.
     const diskPreferredDuringInstall = hasBootableDisk && (
       manualInstallRequired
       || state.bootSource === 'disk'
@@ -137,7 +153,7 @@ function decideBoot(vmState = {}, liveFacts = {}) {
         mode: 'install-disk-preferred',
         bootOrder: ['disk', 'dvd', 'none', 'none'],
         attachISO: !hasBootableIso,
-        ejectISO: false,
+        ejectISO: state.rebootCount > 0, // Eject ISO if we've rebooted at all
         reason: 'Install phase with disk-first fallback'
       };
     }

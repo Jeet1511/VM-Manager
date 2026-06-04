@@ -18,6 +18,66 @@ class VirtualBoxAdapter {
   constructor() {
     this.vboxManagePath = null;
     this.preferredManagePath = '';
+    this._cachedMajorVersion = null;
+  }
+
+  /**
+   * Get the major version of VirtualBox (6 or 7).
+   * Cached after first call for performance.
+   */
+  async getMajorVersion() {
+    if (this._cachedMajorVersion !== null) return this._cachedMajorVersion;
+    try {
+      const ver = await this.getVersion();
+      if (ver) {
+        const major = parseInt(String(ver).split('.')[0], 10);
+        this._cachedMajorVersion = isNaN(major) ? 6 : major;
+      } else {
+        this._cachedMajorVersion = 6;
+      }
+    } catch {
+      this._cachedMajorVersion = 6;
+    }
+    return this._cachedMajorVersion;
+  }
+
+  /**
+   * Get the correct modifyvm flag for clipboard based on VBox version.
+   * VBox 6: --clipboard, VBox 7+: --clipboard-mode
+   */
+  async getClipboardFlag() {
+    const major = await this.getMajorVersion();
+    return major >= 7 ? '--clipboard-mode' : '--clipboard';
+  }
+
+  /**
+   * Get the correct modifyvm flag for drag-and-drop based on VBox version.
+   * VBox 6: --draganddrop, VBox 7+: --drag-and-drop
+   */
+  async getDragAndDropFlag() {
+    const major = await this.getMajorVersion();
+    return major >= 7 ? '--drag-and-drop' : '--draganddrop';
+  }
+
+  /**
+   * Get the correct controlvm subcommand for clipboard.
+   * VBox 6: 'clipboard', VBox 7+: 'clipboard mode'
+   * Returns array of args to splice into the command.
+   */
+  async getControlVmClipboardArgs(mode) {
+    const major = await this.getMajorVersion();
+    return major >= 7
+      ? ['clipboard', 'mode', mode]
+      : ['clipboard', mode];
+  }
+
+  /**
+   * Get the correct controlvm subcommand for drag-and-drop.
+   * VBox 6: 'draganddrop', VBox 7+: 'draganddrop'
+   * (Same on both versions for controlvm)
+   */
+  async getControlVmDragDropArgs(mode) {
+    return ['draganddrop', mode];
   }
 
   _normalizeDisplaySize(width = 0, height = 0) {
@@ -227,7 +287,11 @@ class VirtualBoxAdapter {
    * @param {object} options - Configuration options
    */
   async configureVM(name, options = {}) {
-    const args = ['modifyvm', name];
+    let args = ['modifyvm', name];
+
+    // Get version-appropriate flags for clipboard and drag-drop (VBox 6 vs 7)
+    const clipboardFlag = await this.getClipboardFlag();
+    const dndFlag = await this.getDragAndDropFlag();
 
     // Build arguments from options
     const optionMap = {
@@ -237,8 +301,8 @@ class VirtualBoxAdapter {
       graphicsController: '--graphicscontroller',
       accelerate3d: '--accelerate3d',
       audioController: '--audiocontroller',
-      clipboardMode: '--clipboard',
-      dragAndDrop: '--draganddrop',
+      clipboardMode: clipboardFlag,
+      dragAndDrop: dndFlag,
       ioapic: '--ioapic',
       acpi: '--acpi',
       pae: '--pae',
@@ -337,7 +401,7 @@ class VirtualBoxAdapter {
   _parseStorageSlots(info = {}) {
     const slots = [];
     for (const [key, value] of Object.entries(info || {})) {
-      const match = String(key || '').match(/^(.+)-(\d+)-(\d+)$/);
+      let match = String(key || '').match(/^(.+)-(\d+)-(\d+)$/);
       if (!match) continue;
 
       const controller = String(match[1] || '').trim();
@@ -443,7 +507,7 @@ class VirtualBoxAdapter {
   async configureNetwork(vmName, mode, adapterNum = 1) {
     logger.info('VirtualBox', `Configuring network adapter ${adapterNum}: ${mode.toUpperCase()}`);
 
-    const args = ['modifyvm', vmName];
+    let args = ['modifyvm', vmName];
 
     if (mode === 'nat') {
       args.push(`--nic${adapterNum}`, 'nat');
@@ -470,7 +534,7 @@ class VirtualBoxAdapter {
   async unattendedInstall(vmName, options) {
     logger.info('VirtualBox', `Setting up unattended installation for "${vmName}"`);
 
-    const args = [
+    let args = [
       'unattended', 'install', vmName,
       '--iso', options.isoPath,
       '--user', options.username || 'user',
@@ -478,8 +542,49 @@ class VirtualBoxAdapter {
       '--full-user-name', options.fullName || 'User',
       '--locale', options.locale || 'en_US',
       '--country', options.country || 'US',
+      '--time-zone', options.timezone || 'UTC',
       '--hostname', options.hostname || vmName.replace(/\s+/g, '-').toLowerCase(),
+      '--start-vm', 'none',
     ];
+
+    // CRITICAL: Add kernel boot parameters for Ubuntu ISOs.
+    //
+    // Ubuntu has TWO different installers across versions:
+    //   - Ubiquity (Ubuntu Desktop < 23.04): needs only-ubiquity, automatic-ubiquity
+    //   - Subiquity (Ubuntu Server 20.04+, Ubuntu Desktop 23.04+): needs 'autoinstall'
+    //
+    // Without 'autoinstall', Ubuntu 23.04+ shows the manual setup wizard
+    // (language, partitioning, user creation) instead of running unattended.
+    //
+    // 'ds=nocloud' tells cloud-init where to find the autoinstall config
+    // on the CIDATA volume (the cloud-init seed ISO we attach).
+    //
+    // All params are harmless on ISOs that don't use them — they're simply ignored.
+    const isoName = (options.isoPath || '').toLowerCase();
+    const isDesktop = isoName.includes('desktop') || (isoName.includes('ubuntu') && !isoName.includes('server') && !isoName.includes('mini'));
+    
+    // Extract Ubuntu version from ISO filename (e.g., ubuntu-24.04-desktop-amd64.iso → 24.04)
+    const versionMatch = isoName.match(/ubuntu[^0-9]*(\d+\.\d+)/);
+    const ubuntuVersion = versionMatch ? parseFloat(versionMatch[1]) : 0;
+    
+    const kernelParams = [
+      'auto=true',
+      'priority=critical',
+      'locale=' + (options.locale || 'en_US'),
+      // Subiquity autoinstall — required for Ubuntu 20.04+ server and 23.04+ desktop
+      'autoinstall',
+      'ds=nocloud',
+    ];
+    if (isDesktop && (!ubuntuVersion || ubuntuVersion < 23.04)) {
+      // Old Ubiquity installer (Ubuntu Desktop < 23.04)
+      kernelParams.push('only-ubiquity', 'automatic-ubiquity');
+      logger.info('VirtualBox', 'Detected pre-23.04 Desktop ISO — adding Ubiquity boot params');
+    }
+    if (isDesktop && ubuntuVersion >= 23.04) {
+      logger.info('VirtualBox', `Detected Ubuntu ${ubuntuVersion} Desktop — using Subiquity autoinstall params`);
+    }
+    kernelParams.push('quiet', 'splash', '---');
+    args.push('--extra-install-kernel-parameters', kernelParams.join(' '));
 
     if (options.installAdditions !== false) {
       args.push('--install-additions');
@@ -505,7 +610,7 @@ class VirtualBoxAdapter {
     // Pre-check: if VM is already running and we want GUI, use 'separate' to attach
     if (type === 'gui') {
       try {
-        const info = await this._run(['showvminfo', vmName, '--machinereadable'], { quiet: true });
+        let info = await this._run(['showvminfo', vmName, '--machinereadable'], { quiet: true });
         const stateMatch = String(info).match(/VMState="([^"]+)"/);
         const currentState = stateMatch ? stateMatch[1] : 'unknown';
         if (currentState === 'running') {
@@ -524,7 +629,7 @@ class VirtualBoxAdapter {
     // the VirtualBox window to close. The _run method would timeout or fail.
     return new Promise((resolve, reject) => {
       const { spawn } = require('child_process');
-      const args = ['startvm', vmName, '--type', type];
+      let args = ['startvm', vmName, '--type', type];
       const cmdStr = `VBoxManage ${args.join(' ')}`;
       logger.debug('VirtualBox', `Executing (detached): ${cmdStr}`);
 
@@ -588,7 +693,7 @@ class VirtualBoxAdapter {
    */
   async getVMInfo(vmName, options = {}) {
     const result = await this._run(['showvminfo', vmName, '--machinereadable'], { quiet: !!options.quiet });
-    const info = {};
+    let info = {};
 
     for (const line of result.split('\n')) {
       const clean = line.replace(/\r$/, '').trim();
@@ -611,7 +716,7 @@ class VirtualBoxAdapter {
    */
   async getVMState(vmName) {
     try {
-      const info = await this.getVMInfo(vmName, { quiet: true });
+      let info = await this.getVMInfo(vmName, { quiet: true });
       return info.VMState || 'unknown';
     } catch {
       return 'unknown';
@@ -629,7 +734,7 @@ class VirtualBoxAdapter {
   async addSharedFolder(vmName, shareName, hostPath, autoMount = true) {
     logger.info('VirtualBox', `Adding shared folder: "${shareName}" → ${hostPath}`);
 
-    const args = [
+    let args = [
       'sharedfolder', 'add', vmName,
       '--name', shareName,
       '--hostpath', hostPath,
@@ -722,7 +827,7 @@ class VirtualBoxAdapter {
       };
 
       for (const rawLine of String(output || '').split('\n')) {
-        const line = rawLine.trim();
+        let line = rawLine.trim();
         if (!line) continue;
 
         const kvMatch = line.match(/^([^=]+)=(.*)$/);
@@ -780,7 +885,7 @@ class VirtualBoxAdapter {
    */
   async createSnapshot(vmName, snapshotName) {
     const state = String(await this.getVMState(vmName)).toLowerCase();
-    const args = ['snapshot', vmName, 'take', snapshotName];
+    let args = ['snapshot', vmName, 'take', snapshotName];
     if (state === 'running' || state === 'paused') {
       args.push('--live');
     }
@@ -907,7 +1012,7 @@ class VirtualBoxAdapter {
     while (Date.now() - startTime < timeoutMs) {
       attempt++;
       try {
-        const info = await this.getVMInfo(vmName);
+        let info = await this.getVMInfo(vmName);
         const gaVersion = info.GuestAdditionsVersion;
         const gaRunLevel = info.GuestAdditionsRunLevel;
 
@@ -1007,7 +1112,7 @@ class VirtualBoxAdapter {
     } = options;
     logger.info('VirtualBox', `Configuring display integration for "${vmName}"...`);
 
-    const args = [
+    let args = [
       'modifyvm', vmName,
       ...(graphicsController ? ['--graphicscontroller', String(graphicsController).toLowerCase()] : []),
       '--vram', String(Number.isFinite(Number(vram)) ? Math.max(16, Number(vram)) : 128),
@@ -1124,7 +1229,7 @@ class VirtualBoxAdapter {
     }
 
     try {
-      const info = await this.getVMInfo(vmName);
+      let info = await this.getVMInfo(vmName);
       guestAdditionsReady = !!info.GuestAdditionsVersion && parseInt(info.GuestAdditionsRunLevel || '0', 10) >= 2;
     } catch (err) {
       warnings.push(`guest additions readiness check: ${err.message}`);
@@ -1147,8 +1252,10 @@ class VirtualBoxAdapter {
     };
 
     if (guestAdditionsReady) {
-      await safeRun(['controlvm', vmName, 'clipboard', clipboardMode], 'clipboard runtime apply');
-      await safeRun(['controlvm', vmName, 'draganddrop', dragAndDrop], 'drag-and-drop runtime apply');
+      const cbArgs = await this.getControlVmClipboardArgs(clipboardMode);
+      await safeRun(['controlvm', vmName, ...cbArgs], 'clipboard runtime apply');
+      const dndArgs = await this.getControlVmDragDropArgs(dragAndDrop);
+      await safeRun(['controlvm', vmName, ...dndArgs], 'drag-and-drop runtime apply');
     } else {
       warnings.push('clipboard/drag-drop deferred until Guest Additions is fully ready (existing mode preserved)');
     }
@@ -1180,6 +1287,32 @@ class VirtualBoxAdapter {
       success: warnings.length === 0,
       warnings
     };
+  }
+
+  /**
+   * Get the absolute path to a VM's .vbox configuration file.
+   *
+   * @param {string} vmName - VM name
+   * @returns {Promise<string>} Absolute path to the .vbox file
+   */
+  async getVboxFilePath(vmName) {
+    let info = await this.getVMInfo(vmName, { quiet: true });
+    const cfgFile = String(info?.CfgFile || '').replace(/^"+|"+$/g, '').trim();
+    if (!cfgFile) {
+      throw new Error(`Could not resolve configuration file path for VM "${vmName}".`);
+    }
+    return cfgFile;
+  }
+
+  /**
+   * Get the directory containing a VM's .vbox configuration file.
+   *
+   * @param {string} vmName - VM name
+   * @returns {Promise<string>} Absolute path to the VM's config directory
+   */
+  async getVboxDir(vmName) {
+    const cfgFile = await this.getVboxFilePath(vmName);
+    return path.dirname(cfgFile);
   }
 
   /**

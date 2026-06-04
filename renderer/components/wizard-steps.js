@@ -440,49 +440,95 @@ const WizardSteps = {
     }
   },
 
-  // ─── Step 2: ISO Fetch ─────────────────────────────────────────────
+  // ─── Step 2: Image Source ───────────────────────────────────────────
   fetchIso: {
     render(state) {
       const selected = state.defaults?.osCatalog?.[state.osName];
       const hasOfficial = !!selected?.downloadUrl;
+      const hasCloudImage = !!selected?.cloudImageUrl;
+      const installMethod = state.installMethod || (hasCloudImage ? 'cloud-image' : 'iso');
       const source = state.isoSource || 'official';
       const defaultDownloadDir = state.downloadPath || state.defaults?.defaultDownloadDir || '';
       const officialIsoPath = (hasOfficial && defaultDownloadDir && selected?.filename)
         ? `${defaultDownloadDir}/${selected.filename}`
         : '';
 
+      // Ensure state reflects current selection
+      if (!state.installMethod && hasCloudImage) state.installMethod = 'cloud-image';
+
       return `
         <div class="glass-card wizard-shell">
           ${renderStepIndicator(1)}
-          <h2 class="step-title" style="margin-bottom: 8px; color: #fff;">ISO Selection</h2>
-          <p class="step-description" style="color: #888; margin-bottom: 24px;">Download an official ISO or provide a path to a local ISO file.</p>
-          
-          <div class="wizard-section">
-            <label style="display: block; margin-bottom: 8px; color: #fff;">Download Official ISO</label>
-            <p style="font-size: 13px; color: #888; margin-bottom: 12px;">
-              ${hasOfficial ? `Use catalog download for ${state.osName}.` : `No official URL for ${state.osName}. Use Local ISO instead.`}
-            </p>
-            <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-              <input type="text" id="downloadPathInput" value="${state.downloadPath || state.defaults?.defaultDownloadDir || ''}" placeholder="Select official ISO download folder" style="flex: 1; padding: 8px; background: #252526; border: 1px solid #444; color: #ccc; border-radius: 4px;" />
-              <button class="btn btn-secondary" id="btnBrowseDownloadPath" style="background: #333; color: #ccc; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Browse</button>
+          <h2 class="step-title" style="margin-bottom: 8px; color: #fff;">Image Source</h2>
+          <p class="step-description" style="color: #888; margin-bottom: 24px;">Choose how to set up your virtual OS.</p>
+
+          ${hasCloudImage ? `
+          <div class="wizard-section" style="margin-bottom: 20px;">
+            <label style="display: block; margin-bottom: 12px; color: #fff; font-weight: 600;">Install Method</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+              <div id="methodCloudImage" class="install-method-card" data-method="cloud-image" style="padding: 16px; border: 2px solid ${installMethod === 'cloud-image' ? '#007acc' : '#333'}; border-radius: 8px; cursor: pointer; background: ${installMethod === 'cloud-image' ? '#1a2a3a' : '#1e1e1e'}; transition: all 0.2s;">
+                <div style="font-size: 20px; margin-bottom: 6px;">⚡</div>
+                <div style="font-weight: 600; color: ${installMethod === 'cloud-image' ? '#58a6ff' : '#ccc'}; margin-bottom: 4px;">Pre-built Installation</div>
+                <div style="font-size: 12px; color: #888;">Download a pre-installed cloud image (~${selected?.cloudImageFilename ? '570' : '570'} MB). OS boots in ~30 seconds — no installer needed.</div>
+                <div style="font-size: 11px; color: #58a6ff; margin-top: 6px;">✓ Recommended • Fastest</div>
+              </div>
+              <div id="methodIso" class="install-method-card" data-method="iso" style="padding: 16px; border: 2px solid ${installMethod === 'iso' ? '#007acc' : '#333'}; border-radius: 8px; cursor: pointer; background: ${installMethod === 'iso' ? '#1a2a3a' : '#1e1e1e'}; transition: all 0.2s;">
+                <div style="font-size: 20px; margin-bottom: 6px;">💿</div>
+                <div style="font-weight: 600; color: ${installMethod === 'iso' ? '#58a6ff' : '#ccc'}; margin-bottom: 4px;">Manual Installation (ISO)</div>
+                <div style="font-size: 12px; color: #888;">Download the full desktop ISO (~4.7 GB). The OS installer runs inside the VM window.</div>
+                <div style="font-size: 11px; color: #888; margin-top: 6px;">Traditional method • Full desktop</div>
+              </div>
             </div>
-            ${officialIsoPath ? `<p style="font-size:12px; color:#9da7b3; margin-bottom:10px;">ISO will be stored at: ${officialIsoPath}</p>` : ''}
-            <div style="display:flex; align-items:center; gap:10px;">
-              <input type="radio" id="isoOfficial" name="isoSource" value="official" ${source !== 'custom' ? 'checked' : ''} ${!hasOfficial ? 'disabled' : ''}>
-              <label for="isoOfficial">Use official catalog download</label>
+          </div>
+          ` : ''}
+
+          <div id="isoSection" style="display: ${installMethod === 'cloud-image' ? 'none' : 'block'};">
+            <div class="wizard-section">
+              <label style="display: block; margin-bottom: 8px; color: #fff;">Download Official ISO</label>
+              <p style="font-size: 13px; color: #888; margin-bottom: 12px;">
+                ${hasOfficial ? `Use catalog download for ${state.osName}.` : `No official URL for ${state.osName}. Use Local ISO instead.`}
+              </p>
+              <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                <input type="text" id="downloadPathInput" value="${state.downloadPath || state.defaults?.defaultDownloadDir || ''}" placeholder="Select official ISO download folder" style="flex: 1; padding: 8px; background: #252526; border: 1px solid #444; color: #ccc; border-radius: 4px;" />
+                <button class="btn btn-secondary" id="btnBrowseDownloadPath" style="background: #333; color: #ccc; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Browse</button>
+              </div>
+              ${officialIsoPath ? `<p style="font-size:12px; color:#9da7b3; margin-bottom:10px;">ISO will be stored at: ${officialIsoPath}</p>` : ''}
+              <div style="display:flex; align-items:center; gap:10px;">
+                <input type="radio" id="isoOfficial" name="isoSource" value="official" ${source !== 'custom' ? 'checked' : ''} ${!hasOfficial ? 'disabled' : ''}>
+                <label for="isoOfficial">Use official catalog download</label>
+              </div>
+            </div>
+
+            <div class="wizard-section">
+              <label style="display: block; margin-bottom: 8px; color: #fff;">Local ISO File</label>
+              <p style="font-size: 13px; color: #888; margin-bottom: 12px;">Already have an ISO? Provide the file path below.</p>
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom: 10px;">
+                <input type="radio" id="isoCustom" name="isoSource" value="custom" ${source === 'custom' || !hasOfficial ? 'checked' : ''}>
+                <label for="isoCustom">Use local ISO file</label>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <input type="text" id="isoPathInput" value="${state.customIsoPath || ''}" placeholder="/path/to/image.iso" style="flex: 1; padding: 8px; background: #252526; border: 1px solid #444; color: #ccc; border-radius: 4px;" />
+                <button class="btn btn-secondary" id="btnBrowseIso" style="background: #333; color: #ccc; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Browse</button>
+              </div>
             </div>
           </div>
 
-          <div class="wizard-section">
-            <label style="display: block; margin-bottom: 8px; color: #fff;">Local ISO File</label>
-            <p style="font-size: 13px; color: #888; margin-bottom: 12px;">Already have an ISO? Provide the file path below.</p>
-            <div style="display:flex; align-items:center; gap:10px; margin-bottom: 10px;">
-              <input type="radio" id="isoCustom" name="isoSource" value="custom" ${source === 'custom' || !hasOfficial ? 'checked' : ''}>
-              <label for="isoCustom">Use local ISO file</label>
-            </div>
-            <div style="display: flex; gap: 8px;">
-              <input type="text" id="isoPathInput" value="${state.customIsoPath || ''}" placeholder="/path/to/image.iso" style="flex: 1; padding: 8px; background: #252526; border: 1px solid #444; color: #ccc; border-radius: 4px;" />
-              <button class="btn btn-secondary" id="btnBrowseIso" style="background: #333; color: #ccc; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Browse</button>
+          <div id="cloudImageSection" style="display: ${installMethod === 'cloud-image' ? 'block' : 'none'};">
+            <div class="wizard-section">
+              <label style="display: block; margin-bottom: 8px; color: #fff;">Cloud Image Download Folder</label>
+              <p style="font-size: 13px; color: #888; margin-bottom: 12px;">The pre-built image will be downloaded and reused for future VM creation.</p>
+              <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                <input type="text" id="cloudDownloadPathInput" value="${state.downloadPath || state.defaults?.defaultDownloadDir || ''}" placeholder="Select download folder" style="flex: 1; padding: 8px; background: #252526; border: 1px solid #444; color: #ccc; border-radius: 4px;" />
+                <button class="btn btn-secondary" id="btnBrowseCloudPath" style="background: #333; color: #ccc; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Browse</button>
+              </div>
+              <div style="font-size: 12px; color: #9da7b3;">
+                Image: <strong style="color:#ccc;">${selected?.cloudImageFilename || 'cloud-image.vmdk'}</strong>
+                · Source: <span style="color:#58a6ff;">cloud-images.ubuntu.com</span>
+                · ~570 MB download
+              </div>
+              <div style="font-size: 12px; color: #d29922; margin-top: 8px;">
+                ⚠ Cloud images are Ubuntu Server (terminal-only). Desktop packages (GNOME) can be installed after first boot if needed.
+              </div>
             </div>
           </div>
 
@@ -498,7 +544,36 @@ const WizardSteps = {
       const downloadPathInput = document.getElementById('downloadPathInput');
       const radioOfficial = document.getElementById('isoOfficial');
       const radioCustom = document.getElementById('isoCustom');
+      const isoSection = document.getElementById('isoSection');
+      const cloudSection = document.getElementById('cloudImageSection');
 
+      // ─── Install method toggle ─────────────────────────────────────
+      const syncInstallMethod = (method) => {
+        state.installMethod = method;
+        if (isoSection) isoSection.style.display = method === 'cloud-image' ? 'none' : 'block';
+        if (cloudSection) cloudSection.style.display = method === 'cloud-image' ? 'block' : 'none';
+
+        // Update card visuals
+        const cloudCard = document.getElementById('methodCloudImage');
+        const isoCard = document.getElementById('methodIso');
+        if (cloudCard) {
+          cloudCard.style.borderColor = method === 'cloud-image' ? '#007acc' : '#333';
+          cloudCard.style.background = method === 'cloud-image' ? '#1a2a3a' : '#1e1e1e';
+        }
+        if (isoCard) {
+          isoCard.style.borderColor = method === 'iso' ? '#007acc' : '#333';
+          isoCard.style.background = method === 'iso' ? '#1a2a3a' : '#1e1e1e';
+        }
+      };
+
+      document.querySelectorAll('.install-method-card').forEach((card) => {
+        card.addEventListener('click', () => {
+          const method = card.dataset.method;
+          if (method) syncInstallMethod(method);
+        });
+      });
+
+      // ─── ISO mode controls ─────────────────────────────────────────
       const syncMode = () => {
         state.isoSource = radioCustom?.checked ? 'custom' : 'official';
         const customMode = state.isoSource === 'custom';
@@ -540,9 +615,33 @@ const WizardSteps = {
         }
       });
 
+      // ─── Cloud image download folder ───────────────────────────────
+      const cloudDownloadInput = document.getElementById('cloudDownloadPathInput');
+
+      cloudDownloadInput?.addEventListener('input', (e) => {
+        state.downloadPath = e.target.value;
+      });
+
+      document.getElementById('btnBrowseCloudPath')?.addEventListener('click', async () => {
+        const selected = await window.vmInstaller.selectFolder('Select cloud image download folder', state.downloadPath || state.defaults?.defaultDownloadDir || '');
+        if (selected) {
+          state.downloadPath = selected;
+          if (cloudDownloadInput) cloudDownloadInput.value = selected;
+        }
+      });
+
       syncMode();
     },
     validate(state) {
+      // Cloud image mode — just need a download path
+      if (state.installMethod === 'cloud-image') {
+        if (!state.downloadPath || !state.downloadPath.trim()) {
+          return { valid: false, message: 'Please select a folder for the cloud image download.' };
+        }
+        return { valid: true };
+      }
+
+      // ISO mode — existing validation
       const customIsoPath = String(state.customIsoPath || '').trim();
       if (state.isoSource === 'custom' && !customIsoPath) {
         return { valid: false, message: 'Please provide or download an ISO image.' };
@@ -743,6 +842,78 @@ const WizardSteps = {
 
             <hr style="border: 0; border-top: 1px solid #333; margin: 16px 0;" />
 
+            <div style="margin-bottom: 16px;">
+              <label style="display:block; margin-bottom:8px; color:#fff; font-weight:600;">OS Personalization</label>
+              <p style="font-size:12px; color:#888; margin-bottom:12px;">These settings are applied automatically during OS installation. No interaction with the OS installer needed.</p>
+              
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                <div>
+                  <label style="display:block; margin-bottom:6px; color:#ccc; font-size:13px;">Language</label>
+                  <select id="osLocale" style="width:100%; padding:8px; background:#252526; border:1px solid #444; color:#ccc; border-radius:4px;">
+                    <option value="en_US.UTF-8" ${(state.locale || 'en_US.UTF-8') === 'en_US.UTF-8' ? 'selected' : ''}>English (US)</option>
+                    <option value="en_GB.UTF-8" ${state.locale === 'en_GB.UTF-8' ? 'selected' : ''}>English (UK)</option>
+                    <option value="hi_IN.UTF-8" ${state.locale === 'hi_IN.UTF-8' ? 'selected' : ''}>Hindi (India)</option>
+                    <option value="es_ES.UTF-8" ${state.locale === 'es_ES.UTF-8' ? 'selected' : ''}>Spanish</option>
+                    <option value="fr_FR.UTF-8" ${state.locale === 'fr_FR.UTF-8' ? 'selected' : ''}>French</option>
+                    <option value="de_DE.UTF-8" ${state.locale === 'de_DE.UTF-8' ? 'selected' : ''}>German</option>
+                    <option value="it_IT.UTF-8" ${state.locale === 'it_IT.UTF-8' ? 'selected' : ''}>Italian</option>
+                    <option value="pt_BR.UTF-8" ${state.locale === 'pt_BR.UTF-8' ? 'selected' : ''}>Portuguese (Brazil)</option>
+                    <option value="ru_RU.UTF-8" ${state.locale === 'ru_RU.UTF-8' ? 'selected' : ''}>Russian</option>
+                    <option value="ja_JP.UTF-8" ${state.locale === 'ja_JP.UTF-8' ? 'selected' : ''}>Japanese</option>
+                    <option value="ko_KR.UTF-8" ${state.locale === 'ko_KR.UTF-8' ? 'selected' : ''}>Korean</option>
+                    <option value="zh_CN.UTF-8" ${state.locale === 'zh_CN.UTF-8' ? 'selected' : ''}>Chinese (Simplified)</option>
+                    <option value="ar_SA.UTF-8" ${state.locale === 'ar_SA.UTF-8' ? 'selected' : ''}>Arabic</option>
+                    <option value="nl_NL.UTF-8" ${state.locale === 'nl_NL.UTF-8' ? 'selected' : ''}>Dutch</option>
+                    <option value="pl_PL.UTF-8" ${state.locale === 'pl_PL.UTF-8' ? 'selected' : ''}>Polish</option>
+                    <option value="tr_TR.UTF-8" ${state.locale === 'tr_TR.UTF-8' ? 'selected' : ''}>Turkish</option>
+                  </select>
+                </div>
+                
+                <div>
+                  <label style="display:block; margin-bottom:6px; color:#ccc; font-size:13px;">Keyboard Layout</label>
+                  <select id="osKeyboard" style="width:100%; padding:8px; background:#252526; border:1px solid #444; color:#ccc; border-radius:4px;">
+                    <option value="us" ${(state.keyboardLayout || 'us') === 'us' ? 'selected' : ''}>US English (QWERTY)</option>
+                    <option value="gb" ${state.keyboardLayout === 'gb' ? 'selected' : ''}>UK English</option>
+                    <option value="in" ${state.keyboardLayout === 'in' ? 'selected' : ''}>Indian</option>
+                    <option value="de" ${state.keyboardLayout === 'de' ? 'selected' : ''}>German (QWERTZ)</option>
+                    <option value="fr" ${state.keyboardLayout === 'fr' ? 'selected' : ''}>French (AZERTY)</option>
+                    <option value="es" ${state.keyboardLayout === 'es' ? 'selected' : ''}>Spanish</option>
+                    <option value="it" ${state.keyboardLayout === 'it' ? 'selected' : ''}>Italian</option>
+                    <option value="pt" ${state.keyboardLayout === 'pt' ? 'selected' : ''}>Portuguese</option>
+                    <option value="ru" ${state.keyboardLayout === 'ru' ? 'selected' : ''}>Russian</option>
+                    <option value="jp" ${state.keyboardLayout === 'jp' ? 'selected' : ''}>Japanese</option>
+                    <option value="kr" ${state.keyboardLayout === 'kr' ? 'selected' : ''}>Korean</option>
+                    <option value="ar" ${state.keyboardLayout === 'ar' ? 'selected' : ''}>Arabic</option>
+                    <option value="latam" ${state.keyboardLayout === 'latam' ? 'selected' : ''}>Latin American</option>
+                  </select>
+                </div>
+              </div>
+              
+              <div>
+                <label style="display:block; margin-bottom:6px; color:#ccc; font-size:13px;">Timezone</label>
+                <select id="osTimezone" style="width:100%; padding:8px; background:#252526; border:1px solid #444; color:#ccc; border-radius:4px;">
+                  <option value="UTC" ${(state.timezone || 'UTC') === 'UTC' ? 'selected' : ''}>UTC</option>
+                  <option value="Asia/Kolkata" ${state.timezone === 'Asia/Kolkata' ? 'selected' : ''}>Asia/Kolkata (IST +05:30)</option>
+                  <option value="America/New_York" ${state.timezone === 'America/New_York' ? 'selected' : ''}>America/New_York (EST)</option>
+                  <option value="America/Chicago" ${state.timezone === 'America/Chicago' ? 'selected' : ''}>America/Chicago (CST)</option>
+                  <option value="America/Los_Angeles" ${state.timezone === 'America/Los_Angeles' ? 'selected' : ''}>America/Los_Angeles (PST)</option>
+                  <option value="Europe/London" ${state.timezone === 'Europe/London' ? 'selected' : ''}>Europe/London (GMT)</option>
+                  <option value="Europe/Paris" ${state.timezone === 'Europe/Paris' ? 'selected' : ''}>Europe/Paris (CET)</option>
+                  <option value="Europe/Berlin" ${state.timezone === 'Europe/Berlin' ? 'selected' : ''}>Europe/Berlin (CET)</option>
+                  <option value="Europe/Moscow" ${state.timezone === 'Europe/Moscow' ? 'selected' : ''}>Europe/Moscow (MSK)</option>
+                  <option value="Asia/Tokyo" ${state.timezone === 'Asia/Tokyo' ? 'selected' : ''}>Asia/Tokyo (JST)</option>
+                  <option value="Asia/Shanghai" ${state.timezone === 'Asia/Shanghai' ? 'selected' : ''}>Asia/Shanghai (CST)</option>
+                  <option value="Asia/Seoul" ${state.timezone === 'Asia/Seoul' ? 'selected' : ''}>Asia/Seoul (KST)</option>
+                  <option value="Asia/Dubai" ${state.timezone === 'Asia/Dubai' ? 'selected' : ''}>Asia/Dubai (GST)</option>
+                  <option value="Asia/Singapore" ${state.timezone === 'Asia/Singapore' ? 'selected' : ''}>Asia/Singapore (SGT)</option>
+                  <option value="Australia/Sydney" ${state.timezone === 'Australia/Sydney' ? 'selected' : ''}>Australia/Sydney (AEST)</option>
+                  <option value="America/Sao_Paulo" ${state.timezone === 'America/Sao_Paulo' ? 'selected' : ''}>America/Sao_Paulo (BRT)</option>
+                </select>
+              </div>
+            </div>
+
+            <hr style="border: 0; border-top: 1px solid #333; margin: 16px 0;" />
+
             <div>
               <label style="display:block; margin-bottom:8px; color:#fff;">Account Type</label>
               <select id="accountType" style="width:100%; padding:8px; background:#252526; border:1px solid #444; color:#ccc; border-radius:4px; margin-bottom:10px;">
@@ -846,6 +1017,17 @@ const WizardSteps = {
       });
 
       syncSharedFolderUi();
+
+      // OS Personalization listeners
+      document.getElementById('osLocale')?.addEventListener('change', (e) => {
+        state.locale = e.target.value;
+      });
+      document.getElementById('osKeyboard')?.addEventListener('change', (e) => {
+        state.keyboardLayout = e.target.value;
+      });
+      document.getElementById('osTimezone')?.addEventListener('change', (e) => {
+        state.timezone = e.target.value;
+      });
     },
     validate(state) {
       const username = String(state.username || '').trim();
@@ -870,12 +1052,18 @@ const WizardSteps = {
     render(state) {
       const selectedOs = state.defaults?.osCatalog?.[state.osName] || null;
       const downloadDir = state.defaults?.defaultDownloadDir || '';
+      const isCloudImage = state.installMethod === 'cloud-image';
       const officialIsoPath = (selectedOs?.filename && downloadDir)
         ? `${downloadDir}/${selectedOs.filename}`
         : 'Will be downloaded automatically';
-      const isoDisplay = state.isoSource === 'custom'
-        ? (state.customIsoPath || 'Not set')
-        : officialIsoPath;
+      const isoDisplay = isCloudImage
+        ? `⚡ ${selectedOs?.cloudImageFilename || 'cloud-image.vmdk'} (Pre-built)`
+        : (state.isoSource === 'custom'
+          ? (state.customIsoPath || 'Not set')
+          : officialIsoPath);
+      const installMethodLabel = isCloudImage
+        ? '⚡ Pre-built Installation (Cloud Image)'
+        : '💿 Manual Installation (ISO)';
 
       const existingVMs = Array.isArray(state.existingVMs) ? state.existingVMs : [];
       const selectedExisting = state.existingVmName || '';
@@ -894,14 +1082,30 @@ const WizardSteps = {
           <p class="step-description" style="color: #888; margin-bottom: 24px;">Review your virtual OS configuration before creating it.</p>
           
           <div class="wizard-section wizard-summary-grid" style="font-size: 14px;">
+            <div style="display:flex; justify-content:space-between; padding:6px 0;">
+              <span style="color: #888;">Language:</span>
+              <span style="color: #ccc;">${state.locale || "en_US.UTF-8"}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:6px 0;">
+              <span style="color: #888;">Timezone:</span>
+              <span style="color: #ccc;">${state.timezone || "UTC"}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; padding:6px 0;">
+              <span style="color: #888;">Keyboard:</span>
+              <span style="color: #ccc;">${state.keyboardLayout || "us"}</span>
+            </div>
+
             <div style="display: grid; grid-template-columns: 150px 1fr; gap: 12px; margin-bottom: 8px;">
               <span style="color: #888;">Name:</span>
               <strong style="color: #fff;">${state.vmName}</strong>
               
               <span style="color: #888;">OS Image:</span>
               <strong style="color: #fff;">${state.osName}</strong>
+
+              <span style="color: #888;">Install Method:</span>
+              <span style="color: ${isCloudImage ? '#58a6ff' : '#ccc'};">${installMethodLabel}</span>
               
-              <span style="color: #888;">ISO Path:</span>
+              <span style="color: #888;">Image Source:</span>
               <span style="color: #ccc; word-break: break-all;">${isoDisplay}</span>
               
               <span style="color: #888;">CPU:</span>

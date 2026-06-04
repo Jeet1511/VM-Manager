@@ -16,7 +16,7 @@ const logger = require('../core/logger');
 const virtualbox = require('../adapters/virtualbox');
 const { configureGuestFeatures } = require('./guestAdditions');
 const { setupSharedFolder } = require('./sharedFolder');
-const { applyCloudInitFallback, applyPreseedFallback, sendAutomatedInstallKeystrokes, isSubiquityUbuntu } = require('./cloudInit');
+const { applyCloudInitFallback, applyPreseedFallback, isSubiquityUbuntu, injectAutoinstallViaGrub } = require('./cloudInit');
 const LINUX_USERNAME_PATTERN = /^[a-z_][a-z0-9_-]{0,31}$/;
 const MIN_SUPPORTED_ISO_BYTES = 80 * 1024 * 1024;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -233,6 +233,7 @@ async function createAndConfigureVM(config, onProgress = null) {
 
   // ─── Step 8: Unattended Install ───────────────────────────────────
   let unattendedApplied = false;
+  let cloudInitFallbackUsed = false;
   if (unattended) {
     _emitProgress(onProgress, 'unattended', 'Setting up unattended OS installation...', 80);
     try {
@@ -241,7 +242,7 @@ async function createAndConfigureVM(config, onProgress = null) {
         username: normalizedUsername,
         password: normalizedPassword,
         fullName: normalizedUsername,
-        hostname: name.replace(/\s+/g, '-').toLowerCase() + '.local',
+        hostname: name.replace(/\s+/g, '-').toLowerCase(),
         installAdditions: true,
         postInstallCommand: [
           'apt-get install -y virtualbox-guest-utils virtualbox-guest-x11 2>/dev/null',
@@ -251,9 +252,10 @@ async function createAndConfigureVM(config, onProgress = null) {
           `echo -e "[Desktop Entry]\\nType=Application\\nName=VBoxClient\\nExec=/usr/bin/VBoxClient-all\\nX-GNOME-Autostart-enabled=true\\nNoDisplay=true" > /home/${normalizedUsername}/.config/autostart/vboxclient.desktop`,
           'grep -q vboxsf /etc/fstab || echo "shared /media/sf_shared vboxsf rw,_netdev,umask=0007 0 0" >> /etc/fstab',
           'mkdir -p /media/sf_shared',
-          // Auto-login — user never sees login screen
-          'mkdir -p /etc/gdm3',
-          `printf "[daemon]\\nAutomaticLoginEnable=true\\nAutomaticLogin=${normalizedUsername}\\n" > /etc/gdm3/custom.conf`,
+          // Auto-login — detect display manager and configure the right one
+          `if [ -d /etc/gdm3 ]; then mkdir -p /etc/gdm3; printf "[daemon]\\nAutomaticLoginEnable=true\\nAutomaticLogin=${normalizedUsername}\\n" > /etc/gdm3/custom.conf; fi`,
+          `if [ -d /etc/gdm ] && [ ! -d /etc/gdm3 ]; then mkdir -p /etc/gdm; printf "[daemon]\\nAutomaticLoginEnable=true\\nAutomaticLogin=${normalizedUsername}\\n" > /etc/gdm/custom.conf; fi`,
+          `if dpkg -l lightdm 2>/dev/null | grep -q "^ii"; then mkdir -p /etc/lightdm/lightdm.conf.d; printf "[Seat:*]\\nautologin-user=${normalizedUsername}\\n" > /etc/lightdm/lightdm.conf.d/50-vmxposed-autologin.conf; fi`,
           // Disable Wayland — VBox clipboard/drag-drop work better on Xorg
           'sed -i "s/^#\\?WaylandEnable=.*/WaylandEnable=false/" /etc/gdm3/custom.conf 2>/dev/null || true',
           // Disable screen lock and screensaver
@@ -280,10 +282,14 @@ async function createAndConfigureVM(config, onProgress = null) {
             username: normalizedUsername,
             password: normalizedPassword,
             fullName: normalizedUsername,
+            locale: options.locale || 'en_US.UTF-8',
+            timezone: options.timezone || 'UTC',
+            keyboardLayout: options.keyboardLayout || 'us',
             enableSharedFolder: !!sharedFolderPath
           });
           if (fallbackResult.success) {
             unattendedApplied = true;
+            cloudInitFallbackUsed = true;
             _emitProgress(onProgress, 'unattended', 'Cloud-init automation applied — OS will install automatically.', 85);
             logger.success('VMManager', 'Cloud-init ISO fallback applied successfully.');
           } else {
@@ -291,9 +297,10 @@ async function createAndConfigureVM(config, onProgress = null) {
             _emitProgress(onProgress, 'unattended', 'VM Xposed will auto-start the VM from the ISO.', 85);
           }
         } else if (isUbuntuIso) {
-          // Pre-20.04 Ubuntu uses Ubiquity — apply preseed + keyboard automation
-          logger.info('VMManager', 'VBox unattended failed — applying preseed fallback for pre-20.04 Ubuntu (Ubiquity)...');
-          _emitProgress(onProgress, 'unattended', 'Applying VM Xposed preseed automation for legacy Ubuntu...', 83);
+          // Pre-20.04 Ubuntu uses Ubiquity — apply preseed config via ISO (file-based)
+          // The preseed ISO + cloud-init trigger ISO will auto-launch the installer
+          logger.info('VMManager', 'VBox unattended failed — applying preseed + cloud-init trigger for pre-20.04 Ubuntu...');
+          _emitProgress(onProgress, 'unattended', 'Applying VM Xposed preseed configuration...', 83);
           const vmDir = path.join(normalizedInstallPath, name);
           const preseedResult = await applyPreseedFallback(name, vmDir, virtualbox, {
             hostname: name.replace(/\s+/g, '-').toLowerCase(),
@@ -301,18 +308,13 @@ async function createAndConfigureVM(config, onProgress = null) {
             password: normalizedPassword,
             fullName: normalizedUsername,
             enableSharedFolder: !!sharedFolderPath,
-            mainIsoPath: normalizedIsoPath  // CRITICAL: re-attach the boot ISO
+            mainIsoPath: normalizedIsoPath
           });
           if (preseedResult.success) {
-            // Mark that we need keyboard automation after VM starts
-            _emitProgress(onProgress, 'unattended', 'Preseed attached — automated installer will start after boot.', 85);
-            logger.success('VMManager', 'Preseed ISO attached. Keyboard automation scheduled.');
-            // Store marker so we know to run keyboard automation after VM starts
-            try {
-              await virtualbox._run(['setextradata', name, 'VMXposed/PreseedPending', 'on']);
-            } catch {}
+            _emitProgress(onProgress, 'unattended', 'Preseed config applied. OS will install automatically.', 85);
+            logger.success('VMManager', 'Preseed + cloud-init trigger ISOs attached — fully file-based.');
           } else {
-            logger.warn('VMManager', `Preseed fallback failed: ${preseedResult.error}. VM will auto-boot from ISO.`);
+            logger.warn('VMManager', `Preseed fallback failed: ${preseedResult.error}. VM will boot from ISO.`);
             _emitProgress(onProgress, 'unattended', 'VM Xposed will auto-start the VM from the ISO.', 85);
           }
         } else {
@@ -332,7 +334,11 @@ async function createAndConfigureVM(config, onProgress = null) {
     await virtualbox._run(['setextradata', name, 'VMXposed/ManualInstallRequired', 'off']);
     await virtualbox._run(['setextradata', name, 'VMXposed/InstalledDiskReady', 'off']);
     await virtualbox._run(['setextradata', name, 'VMXposed/GuestInstallMarker', 'off']);
+    await virtualbox._run(['setextradata', name, 'VMXposed/GuestConfigPending', 'on']); // Deferred setup will run on first boot
     await virtualbox._run(['setextradata', name, 'VMXposed/InstallPhase', unattendedApplied ? 'installing' : 'preinstall']);
+    // Store credentials so deferred guest setup can apply them
+    await virtualbox._run(['setextradata', name, 'VMXposed/GuestUsername', normalizedUsername]);
+    await virtualbox._run(['setextradata', name, 'VMXposed/GuestPassword', normalizedPassword]);
   } catch (installStateErr) {
     logger.warn('VMManager', `Could not persist install state markers: ${installStateErr.message}`);
   }
@@ -354,165 +360,45 @@ async function createAndConfigureVM(config, onProgress = null) {
   }
 
   // ─── Step 9: Start VM ────────────────────────────────────────────
-  // Check if preseed automation is pending (pre-20.04 Ubuntu).
-  // If yes: start HEADLESS → automate installer invisibly → monitor → finalize.
-  // If no: start GUI as usual.
-  let preseedPending = false;
-  try {
-    const preseedPendingOut = await virtualbox._run(['getextradata', name, 'VMXposed/PreseedPending']);
-    preseedPending = String(preseedPendingOut || '').includes('on');
-  } catch {}
-
+  // All configuration is done via files:
+  //   - VBox unattended install (injects preseed via boot params — works for all Ubuntu)
+  //   - Cloud-init ISO (autoinstall for Ubuntu 20.04+)
+  //   - Deferred guest setup (guestcontrol shell commands after first boot)
+  // No keyboard or mouse automation is used — it's slow, buggy, and unreliable.
   if (autoStartVm) {
-    if (preseedPending) {
-      // ─── HEADLESS INSTALL MODE ─────────────────────────────────────
-      // User never sees the installer. Everything happens in background.
-      _emitProgress(onProgress, 'start', 'Installing Ubuntu in background (this takes ~15-20 minutes)...', 88);
-      logger.info('VMManager', '═══ Starting HEADLESS installation for legacy Ubuntu ═══');
+    _emitProgress(onProgress, 'start', 'Starting virtual OS...', 90);
+    await virtualbox.startVM(name);
 
-      // Start VM headless (invisible)
-      await virtualbox.startVM(name, 'headless');
-      const running = await _waitForVMState(name, 'running', 45000, 3000);
-      if (!running) {
-        throw new Error('V Os failed to start in headless mode.');
-      }
-      logger.success('VMManager', 'VM started in headless mode — user cannot see the installer.');
+    const running = await _waitForVMState(name, 'running', 45000, 3000);
+    if (!running) {
+      throw new Error('V Os start command completed but V Os did not reach running state.');
+    }
 
-      // Run keyboard automation (navigates through installer wizard)
-      _emitProgress(onProgress, 'start', 'Navigating Ubuntu installer automatically...', 90);
-      const automationResult = await sendAutomatedInstallKeystrokes(name, virtualbox, {
-        bootWaitMs: 35000,
-        username: normalizedUsername,
-        password: normalizedPassword,
-        hostname: name.replace(/\s+/g, '-').toLowerCase()
-      });
-
-      if (automationResult.success) {
-        logger.success('VMManager', 'Keyboard automation complete — Ubuntu is now installing in background.');
-        _emitProgress(onProgress, 'start', 'Ubuntu is installing in background. This takes ~15-20 minutes...', 92);
-      } else {
-        logger.warn('VMManager', `Keyboard automation had issues: ${automationResult.error}`);
-        _emitProgress(onProgress, 'start', 'Installation started. Monitoring progress...', 92);
-      }
-
-      // ─── BACKGROUND MONITOR ──────────────────────────────────────
-      // Wait for installation to finish. The Ubiquity installer runs for
-      // ~15-20 minutes, then the VM either:
-      //   a) Powers off (install complete + user pressed "Restart Now")
-      //   b) Reboots into the live session again (ISO still attached)
-      //   c) Stays running (installation still in progress)
-      //
-      // We poll every 30s. After installation finishes, we:
-      //   1. Power off the VM
-      //   2. Eject the ISO
-      //   3. Set boot order to disk first
-      //   4. Clear PreseedPending marker
-      //   5. VM is now ready — next Start will boot the installed OS
-      const MAX_INSTALL_WAIT_MS = 30 * 60 * 1000; // 30 minutes max
-      const POLL_INTERVAL_MS = 30000; // Check every 30s
-      const installStartTime = Date.now();
-
-      // Run monitor asynchronously — don't block the setup flow
-      (async () => {
-        logger.info('VMManager', `Monitoring installation progress (max ${MAX_INSTALL_WAIT_MS / 60000} min)...`);
-        let installComplete = false;
-
-        while (Date.now() - installStartTime < MAX_INSTALL_WAIT_MS) {
-          await sleep(POLL_INTERVAL_MS);
-
-          try {
-            const stateOut = await virtualbox._run(['showvminfo', name, '--machinereadable']);
-            const stateMatch = String(stateOut).match(/VMState="([^"]+)"/);
-            const currentState = stateMatch ? stateMatch[1] : 'unknown';
-
-            if (currentState === 'poweroff' || currentState === 'aborted' || currentState === 'saved') {
-              logger.success('VMManager', `VM powered off — installation likely complete (state: ${currentState}).`);
-              installComplete = true;
-              break;
-            }
-
-            const elapsed = Math.round((Date.now() - installStartTime) / 60000);
-            logger.info('VMManager', `Installation in progress... (${elapsed} min elapsed, VM state: ${currentState})`);
-          } catch (pollErr) {
-            logger.debug('VMManager', `Poll error: ${pollErr.message}`);
-          }
-        }
-
-        // If VM is still running after max wait, power it off
-        if (!installComplete) {
-          logger.info('VMManager', 'Max install time reached. Powering off VM...');
-          try {
-            await virtualbox._run(['controlvm', name, 'poweroff']);
-            await sleep(3000);
-          } catch {}
-        }
-
-        // ─── FINALIZE: Make VM ready-to-use ───────────────────────
-        try {
-          // 1. Eject the Ubuntu ISO from DVD drive
-          logger.info('VMManager', 'Ejecting installation ISO...');
-          for (const ctrl of ['IDE Controller', 'SATA Controller']) {
-            try {
-              await virtualbox._run([
-                'storageattach', name,
-                '--storagectl', ctrl,
-                '--port', '0', '--device', '0',
-                '--type', 'dvddrive',
-                '--medium', 'emptydrive'
-              ]);
-              logger.success('VMManager', `ISO ejected from ${ctrl} port 0.`);
-            } catch {}
-          }
-
-          // 2. Set boot order: disk first (skip DVD)
-          logger.info('VMManager', 'Setting boot order to disk first...');
-          await virtualbox._run([
-            'modifyvm', name,
-            '--boot1', 'disk',
-            '--boot2', 'dvd',
-            '--boot3', 'none',
-            '--boot4', 'none'
-          ]);
-
-          // 3. Clear preseed markers
-          await virtualbox._run(['setextradata', name, 'VMXposed/PreseedPending', 'off']).catch(() => {});
-          await virtualbox._run(['setextradata', name, 'VMXposed/UnattendedApplied', 'on']).catch(() => {});
-          await virtualbox._run(['setextradata', name, 'VMXposed/InstalledDiskReady', 'on']).catch(() => {});
-          await virtualbox._run(['setextradata', name, 'VMXposed/InstallPhase', 'complete']).catch(() => {});
-
-          logger.success('VMManager', '═══ Ubuntu installation COMPLETE ═══');
-          logger.info('VMManager', 'VM is now ready. Next Start will boot directly into the installed OS.');
-        } catch (finalizeErr) {
-          logger.error('VMManager', `Finalization error: ${finalizeErr.message}`);
-        }
-      })();
-
-      _emitProgress(onProgress, 'start', 'Ubuntu is installing in background. You can close this window — installation continues automatically.', 95);
-
-    } else {
-      // ─── NORMAL START (unattended applied or non-preseed VM) ─────
-      _emitProgress(onProgress, 'start', 'Starting virtual OS...', 90);
-      await virtualbox.startVM(name);
-
-      const running = await _waitForVMState(name, 'running', 45000, 3000);
-      if (!running) {
-        throw new Error('V Os start command completed but V Os did not reach running state.');
-      }
-
+    // If cloud-init fallback was used, inject autoinstall via GRUB editing
+    // This ensures Ubuntu's Subiquity installer skips the "Try/Install" dialog
+    if (cloudInitFallbackUsed) {
       try {
-        await virtualbox.applyRuntimeIntegration(name, {
-          clipboardMode: clipboardMode || 'bidirectional',
-          dragAndDrop: dragAndDrop || 'bidirectional',
-          width: displayWidth,
-          height: displayHeight,
-          bpp: 32,
-          display: 0,
-          guestDisplayFullscreen: startFullscreen !== false,
-          waitForGuestAdditionsMs: startFullscreen !== false ? 120000 : 0
-        });
-      } catch (err) {
-        logger.warn('VMManager', `Runtime display integration warning: ${err.message}`);
+        _emitProgress(onProgress, 'start', 'Configuring OS auto-installer...', 92);
+        await injectAutoinstallViaGrub(name, virtualbox);
+        logger.success('VMManager', 'Autoinstall kernel parameter injected via GRUB.');
+      } catch (grubErr) {
+        logger.warn('VMManager', 'GRUB injection failed (non-fatal): ' + grubErr.message);
       }
+    }
+
+    try {
+      await virtualbox.applyRuntimeIntegration(name, {
+        clipboardMode: clipboardMode || 'bidirectional',
+        dragAndDrop: dragAndDrop || 'bidirectional',
+        width: displayWidth,
+        height: displayHeight,
+        bpp: 32,
+        display: 0,
+        guestDisplayFullscreen: startFullscreen !== false,
+        waitForGuestAdditionsMs: startFullscreen !== false ? 120000 : 0
+      });
+    } catch (err) {
+      logger.warn('VMManager', `Runtime display integration warning: ${err.message}`);
     }
   } else {
     _emitProgress(onProgress, 'start', 'Auto-start disabled. V Os was prepared and left powered off.', 90);
@@ -593,6 +479,9 @@ function _sanitizeDiskFileStem(vmName) {
 
 function _isConstructMediaError(err) {
   const msg = String(err?.message || '').toLowerCase();
+  // Only catch GENUINE media construction failures — not any VBox error.
+  // These are specific error codes from VBoxManage unattended install when
+  // it can't generate the automation media for a particular ISO.
   return (
     msg.includes('constructmedia')
     || msg.includes('code e_fail')
@@ -601,8 +490,8 @@ function _isConstructMediaError(err) {
     || msg.includes('e_invalidarg')
     || msg.includes('0x80070057')
     || msg.includes('incomplete hostname')
-    || msg.includes('unattended')
-    || msg.includes('vboxmanage')
+    // NOT matching 'unattended' or 'vboxmanage' — those are too broad
+    // and catch errors that VBox could actually fix (e.g., missing ISO, wrong path)
   );
 }
 

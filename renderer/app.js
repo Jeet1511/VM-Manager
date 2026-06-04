@@ -200,7 +200,7 @@ function _ensureMotionSystemMounted() {
   });
 
   if (_isLiteVisualMode()) {
-    const cursorLight = document.querySelector('.cursor-light');
+    let cursorLight = document.querySelector('.cursor-light');
     if (cursorLight) cursorLight.remove();
     return;
   }
@@ -479,8 +479,8 @@ function _ensureAdminFloatingCtaMounted() {
 }
 
 function _setAdminFloatingCtaVisible(visible, options = {}) {
-  const host = _ensureAdminFloatingCtaMounted();
-  const force = !!options.force;
+  let host = _ensureAdminFloatingCtaMounted();
+  let force = !!options.force;
   if (visible && adminFloatingDismissed && !force) {
     host.style.display = 'none';
     return;
@@ -492,7 +492,7 @@ function _setAdminFloatingCtaVisible(visible, options = {}) {
 }
 
 function _focusAdminFloatingCta(reason = '') {
-  const host = _ensureAdminFloatingCtaMounted();
+  let host = _ensureAdminFloatingCtaMounted();
   const desc = host.querySelector('#adminFloatingDesc');
   if (desc) {
     desc.textContent = reason
@@ -506,7 +506,7 @@ function _focusAdminFloatingCta(reason = '') {
 }
 
 async function _refreshAdminFloatingCta(options = {}) {
-  const force = !!options.force;
+  let force = !!options.force;
   const fallback = true;
 
   if (!window.vmInstaller?.isAdmin) {
@@ -671,7 +671,7 @@ function _normalizeVersionText(version) {
 }
 
 function _getCurrentLocale() {
-  const language = String(appState.language || _loadUiPrefs().language || 'en').toLowerCase();
+  let language = String(appState.language || _loadUiPrefs().language || 'en').toLowerCase();
   return language === 'hi' ? 'hi-IN' : 'en-US';
 }
 
@@ -831,10 +831,10 @@ async function _checkForAppUpdates({
     }
 
     const prefs = _loadUiPrefs();
-    const ignoredVersion = _normalizeVersionText(prefs.ignoredUpdateVersion || '');
+    let ignoredVersion = _normalizeVersionText(prefs.ignoredUpdateVersion || '');
     const latestVersion = _normalizeVersionText(result.latestVersion || '');
-    const isIgnored = !!latestVersion && ignoredVersion === latestVersion;
-    const updateInfo = {
+    let isIgnored = !!latestVersion && ignoredVersion === latestVersion;
+    let updateInfo = {
       ...result,
       currentVersion: _normalizeVersionText(result.currentVersion || ''),
       latestVersion,
@@ -852,9 +852,9 @@ async function _checkForAppUpdates({
     _updateNavBadge(updateInfo);
 
     if (notifyOnUpdate && result.hasUpdate && !isIgnored) {
-      _notify(`Update available: v${updateInfo.latestVersion}. Open Updates section to install.`, 'info');
+      _notify(`New version detected — v${updateInfo.latestVersion}. Open Updates section to install.`, 'info');
     } else if (notifyOnNoUpdate && !result.hasUpdate) {
-      _notify('VM Xposed is up to date.', 'success');
+      _notify(`Currently using the latest version (v${updateInfo.currentVersion}).`, 'success');
     }
 
     return updateInfo;
@@ -1030,8 +1030,8 @@ function _ensureVBoxInstallDefaults() {
 
 function _renderVBoxInstallPanel(status = 'Preparing installation checks...') {
   const vbox = appState.vboxInstall;
-  const installerPath = vbox.installerPath || '';
-  const downloadFolder = vbox.downloadFolder || '';
+  let installerPath = vbox.installerPath || '';
+  let downloadFolder = vbox.downloadFolder || '';
   const startLabel = vbox.isInstalling
     ? 'Installing VirtualBox...'
     : vbox.isPaused
@@ -1103,7 +1103,7 @@ function _renderVBoxInstallPanel(status = 'Preparing installation checks...') {
 
 function _syncVBoxInstallPanelControls(allowStart = false) {
   const vbox = appState.vboxInstall;
-  const isInstalling = !!vbox.isInstalling;
+  let isInstalling = !!vbox.isInstalling;
   const startBtn = document.getElementById('btnStartVBoxInstall');
   if (startBtn) {
     startBtn.textContent = isInstalling
@@ -1174,7 +1174,7 @@ function _formatVBoxEnsureProgress(data = {}) {
     download_vbox: 'Downloading',
     install_vbox: 'Installing'
   };
-  const phaseLabel = phaseLabelMap[phase] || 'Working';
+  let phaseLabel = phaseLabelMap[phase] || 'Working';
 
   if (phase === 'download_vbox') {
     const base = data.message || 'Downloading VirtualBox...';
@@ -1312,7 +1312,7 @@ function _showVBoxInstallPanel(status = 'Checking VirtualBox installation...') {
 }
 
 async function _ensureVirtualBoxOnStartup(options = {}) {
-  const force = !!options.force;
+  let force = !!options.force;
   const installNow = !!options.installNow;
   if (!window.vmInstaller?.detectVBox || !window.vmInstaller?.ensureVBoxInstalled) return;
   if (appState._vboxStartupChecked && !force) return;
@@ -1445,7 +1445,7 @@ async function _scanDownloadedVmsForBootstrap() {
 }
 
 function _estimateVmBootstrapIsoGb(typeName, info = {}) {
-  const name = String(typeName || '').toLowerCase();
+  let name = String(typeName || '').toLowerCase();
   const category = String(info.category || '').toLowerCase();
   const filename = String(info.filename || '').toLowerCase();
   const versionMatch = name.match(/(\d{2})\.(\d{2})/);
@@ -1478,7 +1478,7 @@ function _estimateVmBootstrapIsoGb(typeName, info = {}) {
 }
 
 function _getVmBootstrapEstimate(typeName) {
-  const info = appState.defaults?.osCatalog?.[typeName] || {};
+  let info = appState.defaults?.osCatalog?.[typeName] || {};
   const diskMb = Number(info.disk || 25600);
   const diskGb = Math.max(8, Math.round(diskMb / 1024));
   const isoGb = _estimateVmBootstrapIsoGb(typeName, info);
@@ -1489,8 +1489,8 @@ function _getVmBootstrapEstimate(typeName) {
 
 function _syncVmBootstrapProgress(progress = 0) {
   const pct = Math.max(0, Math.min(100, Math.round(progress)));
-  const fill = document.getElementById('onboardValidationFill');
-  const label = document.getElementById('onboardValidationPct');
+  let fill = document.getElementById('onboardValidationFill');
+  let label = document.getElementById('onboardValidationPct');
   if (fill) fill.style.width = `${pct}%`;
   if (label) label.textContent = `${pct}%`;
 }
@@ -1533,17 +1533,17 @@ function _renderVmBootstrapEmptyPanel(data = {}) {
 
 function _renderVmBootstrapOptionsPanel(data = {}) {
   const flow = appState.vmBootstrapFlow;
-  const osCatalog = appState.defaults?.osCatalog || {};
+  let osCatalog = appState.defaults?.osCatalog || {};
   const osNames = Object.keys(osCatalog);
   const selectedType = flow.selectedVmType || osNames[0] || appState.osName || '';
-  const selectedOption = flow.selectedOption || 'download';
-  const downloadFolder = flow.downloadFolder || appState.installPath || appState.defaults?.defaultInstallPath || '';
-  const importFolder = flow.importFolder || appState.existingVmFolder || '';
+  let selectedOption = flow.selectedOption || 'download';
+  let downloadFolder = flow.downloadFolder || appState.installPath || appState.defaults?.defaultInstallPath || '';
+  let importFolder = flow.importFolder || appState.existingVmFolder || '';
   const estimate = _getVmBootstrapEstimate(selectedType);
   const invalid = flow.invalidField || '';
-  const inlineError = flow.inlineError || '';
-  const validationError = flow.validationError || '';
-  const status = flow.statusMessage || data.message || 'Choose how you want to set up your V Os.';
+  let inlineError = flow.inlineError || '';
+  let validationError = flow.validationError || '';
+  let status = flow.statusMessage || data.message || 'Choose how you want to set up your V Os.';
 
   return `
     <div class="onboard-panel-head">
@@ -1640,7 +1640,7 @@ function _renderVmBootstrapOptionsPanel(data = {}) {
 
 function _renderVmBootstrapPanel(data = {}) {
   const flow = appState.vmBootstrapFlow;
-  const panel = flow.panel || 'empty';
+  let panel = flow.panel || 'empty';
   const enterClass = flow.panelEnter === 'from-right'
     ? 'onboard-panel-enter-right'
     : flow.panelEnter === 'from-left'
@@ -1739,7 +1739,7 @@ async function _pickVmBootstrapFolder(mode = 'import') {
   const defaultPath = mode === 'download'
     ? (flow.downloadFolder || appState.installPath || appState.defaults?.defaultInstallPath || '')
     : (flow.importFolder || appState.existingVmFolder || appState.installPath || '');
-  const title = mode === 'download'
+  let title = mode === 'download'
     ? 'Select setup folder'
     : 'Select downloaded V Os folder';
   const selected = await window.vmInstaller.selectFolder(title, defaultPath);
@@ -2286,7 +2286,7 @@ async function _initOverview() {
     }
   };
   const setFullScanMeta = (timestamp) => {
-    const label = document.getElementById('ovLastFullScan');
+    let label = document.getElementById('ovLastFullScan');
     if (!label) return;
     if (!timestamp) {
       label.textContent = 'Full scan: not run';
@@ -2324,12 +2324,12 @@ async function _initOverview() {
   const setChartPath = (id, samples, areaId = null) => {
     const pathEl = document.getElementById(id);
     if (!pathEl || !Array.isArray(samples) || samples.length === 0) return;
-    const width = 320;
+    let width = 320;
     const height = 110;
-    const step = width / Math.max(1, samples.length - 1);
+    let step = width / Math.max(1, samples.length - 1);
     const points = samples.map((value, index) => {
-      const x = Math.round(index * step);
-      const y = Math.round(height - ((clamp(value, 0, 100) / 100) * (height - 8)) - 4);
+      let x = Math.round(index * step);
+      let y = Math.round(height - ((clamp(value, 0, 100) / 100) * (height - 8)) - 4);
       return { x, y };
     });
     if (points.length === 1) {
@@ -2451,7 +2451,7 @@ async function _initOverview() {
     }
 
     container.innerHTML = vms.slice(0, 8).map((vm) => {
-      const state = String(vm.state || 'unknown').toLowerCase();
+      let state = String(vm.state || 'unknown').toLowerCase();
       const cpuPct = hostCpu > 0 ? clamp(Math.round((Number(vm.cpus || 0) / hostCpu) * 100), 2, 100) : 0;
       const ramPct = hostRam > 0 ? clamp(Math.round(((Number(vm.ram || 0) / 1024) / hostRam) * 100), 2, 100) : 0;
       const statusClass = state === 'running' ? 'is-running' : (state === 'paused' ? 'is-paused' : 'is-stopped');
@@ -2483,13 +2483,13 @@ async function _initOverview() {
   let realtimeRefreshing = false;
   let lastOverviewCpuPct = 0;
   const formatDiskRate = (valueMbPerSec) => {
-    const value = Number(valueMbPerSec || 0);
+    let value = Number(valueMbPerSec || 0);
     if (!Number.isFinite(value) || value <= 0) return '0 KB/s';
     if (value >= 1) return `${value.toFixed(1)} MB/s`;
     return `${Math.max(1, Math.round(value * 1024))} KB/s`;
   };
   const formatNetworkRate = (valueMbps) => {
-    const value = Number(valueMbps || 0);
+    let value = Number(valueMbps || 0);
     if (!Number.isFinite(value) || value <= 0) return '0 Kbps';
     if (value >= 1) return `${value.toFixed(1)} Mbps`;
     return `${Math.max(1, Math.round(value * 1000))} Kbps`;
@@ -2626,7 +2626,7 @@ async function _initOverview() {
     runningList.addEventListener('click', async (event) => {
       const emptyAction = event.target.closest('[data-empty-action]');
       if (emptyAction) {
-        const action = emptyAction.getAttribute('data-empty-action');
+        let action = emptyAction.getAttribute('data-empty-action');
         if (action === 'create') app.showWizard();
         if (action === 'import') _openImportWizard();
         if (action === 'open-machines') app.showMachines();
@@ -2636,8 +2636,8 @@ async function _initOverview() {
 
       const actionBtn = event.target.closest('[data-vm-action]');
       if (!actionBtn) return;
-      const vmName = actionBtn.getAttribute('data-vm-name') || '';
-      const action = actionBtn.getAttribute('data-vm-action');
+      let vmName = actionBtn.getAttribute('data-vm-name') || '';
+      let action = actionBtn.getAttribute('data-vm-action');
       if (!vmName || !action) return;
 
       actionBtn.disabled = true;
@@ -2689,8 +2689,8 @@ async function _initOverview() {
     const permissions = permissionsResult.status === 'fulfilled' ? permissionsResult.value : null;
     const permissionChecks = Array.isArray(permissions?.checks) ? permissions.checks : [];
     const permissionDriverIssue = permissionChecks.find((check) => {
-      const name = String(check?.name || '').toLowerCase();
-      const status = String(check?.status || '').toLowerCase();
+      let name = String(check?.name || '').toLowerCase();
+      let status = String(check?.status || '').toLowerCase();
       return name === 'vbox kernel driver' && ['required', 'unavailable', 'warning', 'fail'].includes(status);
     });
     const hostBlockers = permissions?.hostBlockers || {};
@@ -3180,7 +3180,7 @@ async function _initSnapshots() {
       const copy = document.createElement('div');
       copy.className = 'overview-activity-copy';
 
-      const title = document.createElement('strong');
+      let title = document.createElement('strong');
       title.textContent = String(snap.name || snap.id || 'Snapshot');
 
       const subtitle = document.createElement('span');
@@ -3220,7 +3220,7 @@ async function _initSnapshots() {
   };
 
   const loadSnapshots = async () => {
-    const vmName = String(vmSelect?.value || '');
+    let vmName = String(vmSelect?.value || '');
     if (!vmName) {
       if (snapMeta) snapMeta.textContent = 'No V Os selected';
       if (snapList) snapList.innerHTML = `<div class="overview-empty-inline">Select a V Os to view snapshots.</div>`;
@@ -3261,7 +3261,7 @@ async function _initSnapshots() {
   vmSelect?.addEventListener('change', () => loadSnapshots());
   document.getElementById('btnSnapshotRefresh')?.addEventListener('click', () => loadSnapshots());
   document.getElementById('btnCreateSnapshot')?.addEventListener('click', async () => {
-    const vmName = String(vmSelect?.value || '');
+    let vmName = String(vmSelect?.value || '');
     const inputName = String(snapNameInput?.value || '').trim();
     if (!vmName) {
       _notify('Select a V Os first.', 'error');
@@ -3281,8 +3281,8 @@ async function _initSnapshots() {
   snapList?.addEventListener('click', async (event) => {
     const btn = event.target.closest('[data-snap-action]');
     if (!btn) return;
-    const action = btn.getAttribute('data-snap-action');
-    const vmName = btn.getAttribute('data-vm-name') || '';
+    let action = btn.getAttribute('data-snap-action');
+    let vmName = btn.getAttribute('data-vm-name') || '';
     const snapshotRef = btn.getAttribute('data-snap-ref') || '';
     if (!action || !vmName || !snapshotRef) return;
 
@@ -3392,7 +3392,7 @@ async function _initStorage() {
     setText('stMeta', `${items.length} V Os scanned`);
     list.innerHTML = items.length > 0
       ? items.map((item) => {
-          const vmName = String(item.name || '');
+          let vmName = String(item.name || '');
           const vmDir = String(item.vmDir || '');
           const safeVmName = escapeHtml(vmName || 'Unknown');
           const safeVmDir = escapeHtml(vmDir || 'Storage path unavailable');
@@ -3415,7 +3415,7 @@ async function _initStorage() {
 
     list.querySelectorAll('[data-storage-action="open"]').forEach((btn) => {
       btn.addEventListener('click', async () => {
-        const vmName = decodeURIComponent(btn.getAttribute('data-vm-name') || '');
+        let vmName = decodeURIComponent(btn.getAttribute('data-vm-name') || '');
         const vmDir = decodeURIComponent(btn.getAttribute('data-vm-dir') || '');
         if (!vmName && !vmDir) return;
         const openResult = await window.vmInstaller.showVMInExplorer({ vmName, vmDir });
@@ -3522,7 +3522,7 @@ async function _initNetwork() {
       }
     }
 
-    const vmList = document.getElementById('netVmList');
+    let vmList = document.getElementById('netVmList');
     if (!vmList) return;
     if (!vmData?.success) {
       vmList.innerHTML = `<div class="overview-empty-inline">Could not load V Os network details.</div>`;
@@ -3552,7 +3552,7 @@ async function _initNetwork() {
 }
 
 function _renderLibrary(state) {
-  const osCatalog = state.defaults?.osCatalog || {};
+  let osCatalog = state.defaults?.osCatalog || {};
   const totalCount = Object.keys(osCatalog).length;
 
   const categoryCount = Object.values(osCatalog).reduce((acc, info) => {
@@ -3582,8 +3582,8 @@ function _renderLibrary(state) {
         <div class="vm-card-specs" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));">
           ${Object.entries(refreshMeta.summary || {}).map(([source, stats]) => {
             const hasError = !!stats?.error;
-            const color = hasError ? 'var(--danger)' : 'var(--text-secondary)';
-            const title = source.charAt(0).toUpperCase() + source.slice(1);
+            let color = hasError ? 'var(--danger)' : 'var(--text-secondary)';
+            let title = source.charAt(0).toUpperCase() + source.slice(1);
             return `
               <div class="vm-spec" style="align-items:flex-start;">
                 <span style="font-weight:600; color: var(--text);">${title}</span>
@@ -3693,7 +3693,7 @@ function _initLibrary() {
 
   document.querySelectorAll('[data-action="select-os"]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const name = btn.getAttribute('data-os-name');
+      let name = btn.getAttribute('data-os-name');
       appState.osName = name;
       _notify(`Selected "${name}" for Create V Os.`, 'success');
       app.showLibrary();
@@ -3702,7 +3702,7 @@ function _initLibrary() {
 
   document.querySelectorAll('[data-action="open-download"]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const url = btn.getAttribute('data-download-url');
+      let url = btn.getAttribute('data-download-url');
       if (!url) return;
       if (window.vmInstaller.openExternal) {
         await window.vmInstaller.openExternal(url);
@@ -3715,11 +3715,11 @@ function _initLibrary() {
 
 function _renderSettings(initialState = {}) {
   const prefs = _loadUiPrefs();
-  const defaults = appState.defaults || {};
+  let defaults = appState.defaults || {};
   const pick = (key, fallback) => (prefs[key] === undefined ? fallback : prefs[key]);
   const selected = (value, expected) => String(value) === String(expected) ? 'selected' : '';
   const requestedScope = initialState?.scope === 'vos' ? 'vos' : 'global';
-  const lockedScope = initialState?.lockScope === true ? requestedScope : '';
+  let lockedScope = initialState?.lockScope === true ? requestedScope : '';
   const settingsTitle = lockedScope === 'vos'
     ? 'V Os Settings'
     : (lockedScope === 'global' ? 'VM Xposed Settings' : 'Settings');
@@ -3733,42 +3733,46 @@ function _renderSettings(initialState = {}) {
   const defaultDownloadPath = String(defaults.defaultDownloadDir || '');
   const defaultSharedPath = String(defaults.defaultSharedFolder || '');
 
-  const installPath = String(pick('installPath', appState.installPath || defaultInstallPath || ''));
-  const downloadPath = String(pick('downloadPath', appState.downloadPath || defaultDownloadPath || ''));
-  const sharedFolderPath = String(pick('sharedFolderPath', appState.sharedFolderPath || defaultSharedPath || ''));
-  const defaultUserUsername = String(pick('defaultUserUsername', appState.defaultUserUsername || 'user') || 'user');
-  const defaultUserPassword = String(pick('defaultUserPassword', appState.defaultUserPassword || 'user'));
-  const guestUsername = String(pick('guestUsername', pick('username', appState.guestUsername || appState.username || 'guest')) || 'guest');
-  const guestPassword = String(pick('guestPassword', pick('password', appState.guestPassword || appState.password || 'guest')));
-  const startFullscreen = pick('startFullscreen', appState.startFullscreen) !== false;
-  const accelerate3d = pick('accelerate3d', appState.accelerate3d) === true;
+  let installPath = String(pick('installPath', appState.installPath || defaultInstallPath || ''));
+  let downloadPath = String(pick('downloadPath', appState.downloadPath || defaultDownloadPath || ''));
+  let sharedFolderPath = String(pick('sharedFolderPath', appState.sharedFolderPath || defaultSharedPath || ''));
+  let defaultUserUsername = String(pick('defaultUserUsername', appState.defaultUserUsername || 'user') || 'user');
+  let defaultUserPassword = String(pick('defaultUserPassword', appState.defaultUserPassword || 'user'));
+  let guestUsername = String(pick('guestUsername', pick('username', appState.guestUsername || appState.username || 'guest')) || 'guest');
+  let guestPassword = String(pick('guestPassword', pick('password', appState.guestPassword || appState.password || 'guest')));
+  let startFullscreen = pick('startFullscreen', appState.startFullscreen) !== false;
+  let accelerate3d = pick('accelerate3d', appState.accelerate3d) === true;
 
   const visualEffectsSetting = String(pick('visualEffectsMode', _resolveVisualEffectsMode())) === 'full' ? 'full' : 'lite';
-  const language = String(pick('language', 'en'));
-  const startupView = String(pick('startupView', 'dashboard'));
-  const notificationLevel = String(pick('notificationLevel', 'important'));
+  let language = String(pick('language', 'en'));
+  let startupView = String(pick('startupView', 'dashboard'));
+  let notificationLevel = String(pick('notificationLevel', 'important'));
   const virtualBoxPath = String(pick('virtualBoxPath', ''));
-  const adminModePolicy = String(pick('adminModePolicy', 'manual'));
-  const autoRepairLevel = String(pick('autoRepairLevel', 'safe'));
-  const maxHostRamPercent = Math.max(40, Math.min(95, parseInt(pick('maxHostRamPercent', 75), 10) || 75));
-  const maxHostCpuPercent = Math.max(40, Math.min(95, parseInt(pick('maxHostCpuPercent', 75), 10) || 75));
-  const vmDefaultPreset = String(pick('vmDefaultPreset', 'balanced'));
-  const credentialStorage = String(pick('credentialStorage', 'keychain'));
-  const telemetryEnabled = pick('telemetryEnabled', false) === true;
-  const trustedPaths = String(pick('trustedPaths', ''));
-  const logLevel = String(pick('logLevel', 'info'));
-  const logRetentionDays = Math.max(1, Math.min(365, parseInt(pick('logRetentionDays', 14), 10) || 14));
+  let adminModePolicy = String(pick('adminModePolicy', 'manual'));
+  let autoRepairLevel = String(pick('autoRepairLevel', 'safe'));
+  let maxHostRamPercent = Math.max(40, Math.min(95, parseInt(pick('maxHostRamPercent', 75), 10) || 75));
+  let maxHostCpuPercent = Math.max(40, Math.min(95, parseInt(pick('maxHostCpuPercent', 75), 10) || 75));
+  let vmDefaultPreset = String(pick('vmDefaultPreset', 'balanced'));
+  let credentialStorage = String(pick('credentialStorage', 'keychain'));
+  let telemetryEnabled = pick('telemetryEnabled', false) === true;
+  let trustedPaths = String(pick('trustedPaths', ''));
+  let logLevel = String(pick('logLevel', 'info'));
+  let logRetentionDays = Math.max(1, Math.min(365, parseInt(pick('logRetentionDays', 14), 10) || 14));
   const ignoredUpdateVersion = _normalizeVersionText(String(pick('ignoredUpdateVersion', '')));
-  const updateInfo = appState.updateInfo || {};
+  let updateInfo = appState.updateInfo || {};
   const currentVersionText = String(updateInfo.currentVersion || 'Checking...');
   const latestVersionText = String(updateInfo.latestVersion || (ignoredUpdateVersion || 'Not checked'));
   const updateStatusText = updateInfo.hasUpdate
-    ? (updateInfo.isIgnored ? 'Update available (ignored)' : 'Update available')
-    : (updateInfo.checkedAt ? 'Up to date' : 'Not checked');
+    ? (updateInfo.isIgnored ? `New version detected — v${_normalizeVersionText(updateInfo.latestVersion)} (ignored)` : `New version detected — v${_normalizeVersionText(updateInfo.latestVersion)}`)
+    : (updateInfo.checkedAt ? `Currently using the latest version (v${_normalizeVersionText(updateInfo.currentVersion || '')})` : 'Not checked yet');
   const checkedAtStamp = Date.parse(String(updateInfo.checkedAt || ''));
-  const publishedAtText = Number.isFinite(checkedAtStamp)
+  const publishedAtReleaseStamp = Date.parse(String(updateInfo.publishedAt || ''));
+  let publishedAtText = Number.isFinite(checkedAtStamp)
     ? `Last checked ${_formatLocalizedDateTime(checkedAtStamp)}`
     : 'Update check has not run yet.';
+  if (Number.isFinite(publishedAtReleaseStamp)) {
+    publishedAtText += ` · Released ${_formatLocalizedDateTime(publishedAtReleaseStamp)}`;
+  }
 
   const safeInstallPath = _escapeHtml(installPath);
   const safeDownloadPath = _escapeHtml(downloadPath);
@@ -4350,18 +4354,19 @@ function _renderSettings(initialState = {}) {
 
 function _renderDownload() {
   const prefs = _loadUiPrefs();
-  const updateInfo = appState.updateInfo || {};
-  const ignoredVersion = _normalizeVersionText(String(prefs.ignoredUpdateVersion || ''));
+  let updateInfo = appState.updateInfo || {};
+  let ignoredVersion = _normalizeVersionText(String(prefs.ignoredUpdateVersion || ''));
   const currentVersionText = _normalizeVersionText(updateInfo.currentVersion || '') || 'Checking...';
   const latestVersionText = _normalizeVersionText(updateInfo.latestVersion || '') || 'Not checked';
   const statusText = updateInfo.hasUpdate
-    ? ((ignoredVersion && ignoredVersion === _normalizeVersionText(updateInfo.latestVersion || '')) ? 'Update available (ignored)' : 'Update available')
-    : (updateInfo.checkedAt ? 'Up to date' : 'Not checked');
+    ? ((ignoredVersion && ignoredVersion === _normalizeVersionText(updateInfo.latestVersion || '')) ? `New version detected — v${_normalizeVersionText(updateInfo.latestVersion)} (ignored)` : `New version detected — v${_normalizeVersionText(updateInfo.latestVersion)}`)
+    : (updateInfo.checkedAt ? `Currently using the latest version (v${currentVersionText})` : 'Not checked yet');
   const checkedAtStamp = Date.parse(String(updateInfo.checkedAt || ''));
+  const publishedAtStamp = Date.parse(String(updateInfo.publishedAt || ''));
   const metaText = Number.isFinite(checkedAtStamp)
-    ? `Last checked ${_formatLocalizedDateTime(checkedAtStamp)}`
+    ? `Last checked ${_formatLocalizedDateTime(checkedAtStamp)}` + (Number.isFinite(publishedAtStamp) ? ` · Released ${_formatLocalizedDateTime(publishedAtStamp)}` : '')
     : (updateInfo.patchNotesName ? `Patch source: ${String(updateInfo.patchNotesName)}` : 'Patch notes appear after update checks.');
-  const notesText = String(updateInfo.releaseNotes || 'No patch notes loaded yet.');
+  const notesText = String(updateInfo.releaseNotes || 'No release notes loaded yet. Click "Check for Updates" to fetch.');
   const patchHistoryCount = Array.isArray(updateInfo.patchHistory) ? updateInfo.patchHistory.length : 0;
 
   return `
@@ -4507,7 +4512,7 @@ function _initDownload() {
   const openPatchFolderBtn = document.getElementById('updOpenPatchFolder');
   const openSettingsBtn = document.getElementById('btnUpdateOpenSettings');
 
-  const patchHistoryCache = appState.patchHistoryCache || {};
+  let patchHistoryCache = appState.patchHistoryCache || {};
   appState.patchHistoryCache = patchHistoryCache;
   let selectedPatchHistoryKey = '';
   let patchHistoryRequestToken = 0;
@@ -4524,7 +4529,8 @@ function _initDownload() {
       .map((entry) => ({
         version: _normalizeVersionText(entry?.version || ''),
         name: String(entry?.name || '').trim(),
-        url: String(entry?.url || '').trim()
+        url: String(entry?.url || '').trim(),
+        body: String(entry?.body || '').trim()
       }))
       .filter((entry) => entry.version && entry.name);
   };
@@ -4537,12 +4543,18 @@ function _initDownload() {
   };
 
   const loadPatchHistoryText = async (entry, forceRefresh = false) => {
-    if (!entry || !entry.url) {
-      showPatchHistoryText('Patch note file URL is missing for this entry.');
+    if (!entry) {
+      showPatchHistoryText('No patch history entry selected.');
       return;
     }
     const key = getPatchHistoryKey(entry);
     if (!forceRefresh && patchHistoryCache[key]) {
+      showPatchHistoryText(patchHistoryCache[key]);
+      return;
+    }
+    // Use release body directly if available (from GitHub Releases)
+    if (entry.body && String(entry.body).trim()) {
+      patchHistoryCache[key] = String(entry.body).trim();
       showPatchHistoryText(patchHistoryCache[key]);
       return;
     }
@@ -4551,16 +4563,20 @@ function _initDownload() {
       showPatchHistoryText(patchHistoryCache[key]);
       return;
     }
-
-    const token = ++patchHistoryRequestToken;
-    showPatchHistoryText('Loading patch note...');
-    const result = await window.vmInstaller.getPatchNoteText({ url: entry.url }).catch((err) => ({ success: false, error: err?.message || 'Failed to load patch note.' }));
-    if (token !== patchHistoryRequestToken) return;
-    if (!result?.success) {
-      showPatchHistoryText(`Could not load patch note: ${result?.error || 'Unknown error'}`);
+    if (!entry.url) {
+      showPatchHistoryText('No release notes available for this version.');
       return;
     }
-    patchHistoryCache[key] = String(result.text || '').trim() || 'Patch note is empty.';
+
+    const token = ++patchHistoryRequestToken;
+    showPatchHistoryText('Loading release notes...');
+    const result = await window.vmInstaller.getPatchNoteText({ url: entry.url }).catch((err) => ({ success: false, error: err?.message || 'Failed to load release notes.' }));
+    if (token !== patchHistoryRequestToken) return;
+    if (!result?.success) {
+      showPatchHistoryText(`Could not load release notes: ${result?.error || 'Unknown error'}`);
+      return;
+    }
+    patchHistoryCache[key] = String(result.text || '').trim() || 'Release notes are empty.';
     showPatchHistoryText(patchHistoryCache[key]);
   };
 
@@ -4605,21 +4621,28 @@ function _initDownload() {
   };
 
   const renderUpdateState = (info = appState.updateInfo || {}) => {
-    const state = info || {};
+    let state = info || {};
     const currentVersion = _normalizeVersionText(state.currentVersion || '');
     const latestVersion = _normalizeVersionText(state.latestVersion || '');
     const prefs = _loadUiPrefs();
-    const ignoredVersion = _normalizeVersionText(prefs.ignoredUpdateVersion || state.ignoredVersion || '');
-    const isIgnored = !!latestVersion && ignoredVersion === latestVersion;
+    let ignoredVersion = _normalizeVersionText(prefs.ignoredUpdateVersion || state.ignoredVersion || '');
+    let isIgnored = !!latestVersion && ignoredVersion === latestVersion;
     const statusText = state.hasUpdate
-      ? (isIgnored ? 'Update available (ignored)' : 'Update available')
-      : (state.checkedAt ? 'Up to date' : 'Not checked');
+      ? (isIgnored ? `New version detected — v${latestVersion} (ignored)` : `New version detected — v${latestVersion}`)
+      : (state.checkedAt ? `Currently using the latest version (v${currentVersion})` : 'Not checked yet');
 
     if (currentVersionEl) currentVersionEl.textContent = currentVersion || 'Unknown';
     if (latestVersionEl) latestVersionEl.textContent = latestVersion || 'Not checked';
     if (statusEl) statusEl.textContent = statusText;
-    if (metaEl) metaEl.textContent = formatCheckText(state.checkedAt);
-    if (notesEl) notesEl.textContent = String(state.releaseNotes || 'No patch notes loaded yet.');
+    if (metaEl) {
+      let metaContent = formatCheckText(state.checkedAt);
+      const publishedAtMs = Date.parse(String(state.publishedAt || ''));
+      if (Number.isFinite(publishedAtMs)) {
+        metaContent += ` · Released ${_formatLocalizedDateTime(publishedAtMs)}`;
+      }
+      metaEl.textContent = metaContent;
+    }
+    if (notesEl) notesEl.textContent = String(state.releaseNotes || 'No release notes loaded yet. Click "Check for Updates" to fetch.');
     if (installBtn) installBtn.disabled = !state.hasUpdate || !state.installerUrl;
     if (ignoreBtn) ignoreBtn.disabled = !state.hasUpdate || !latestVersion;
     if (ignoredEl) {
@@ -4656,7 +4679,7 @@ function _initDownload() {
     await refreshUpdateState({ force: true, notifyOnUpdate: true, notifyOnNoUpdate: true, notifyOnError: true });
   });
   installBtn?.addEventListener('click', async () => {
-    const info = appState.updateInfo || {};
+    let info = appState.updateInfo || {};
     if (!info?.hasUpdate || !info?.installerUrl) {
       _notify('Run update check first to fetch installer details.', 'error');
       return;
@@ -4795,7 +4818,7 @@ function _initSettings(initialState = {}) {
   const updateIgnoreBtn = document.getElementById('setUpdateIgnore');
   const updateOpenReleasesBtn = document.getElementById('setUpdateOpenReleases');
   const updateOpenPatchFolderBtn = document.getElementById('setUpdateOpenPatchFolder');
-  const patchHistoryCache = appState.patchHistoryCache || {};
+  let patchHistoryCache = appState.patchHistoryCache || {};
   appState.patchHistoryCache = patchHistoryCache;
   let selectedPatchHistoryKey = '';
   let patchHistoryRequestToken = 0;
@@ -4910,7 +4933,8 @@ function _initSettings(initialState = {}) {
       .map((entry) => ({
         version: _normalizeVersionText(entry?.version || ''),
         name: String(entry?.name || '').trim(),
-        url: String(entry?.url || '').trim()
+        url: String(entry?.url || '').trim(),
+        body: String(entry?.body || '').trim()
       }))
       .filter((entry) => entry.version && entry.name);
   };
@@ -4923,12 +4947,18 @@ function _initSettings(initialState = {}) {
   };
 
   const loadPatchHistoryText = async (entry, forceRefresh = false) => {
-    if (!entry || !entry.url) {
-      showPatchHistoryText('Patch note file URL is missing for this entry.');
+    if (!entry) {
+      showPatchHistoryText('No patch history entry selected.');
       return;
     }
     const key = getPatchHistoryKey(entry);
     if (!forceRefresh && patchHistoryCache[key]) {
+      showPatchHistoryText(patchHistoryCache[key]);
+      return;
+    }
+    // Use release body directly if available (from GitHub Releases)
+    if (entry.body && String(entry.body).trim()) {
+      patchHistoryCache[key] = String(entry.body).trim();
       showPatchHistoryText(patchHistoryCache[key]);
       return;
     }
@@ -4937,16 +4967,20 @@ function _initSettings(initialState = {}) {
       showPatchHistoryText(patchHistoryCache[key]);
       return;
     }
-
-    const requestToken = ++patchHistoryRequestToken;
-    showPatchHistoryText('Loading patch note...');
-    const result = await window.vmInstaller.getPatchNoteText({ url: entry.url }).catch((err) => ({ success: false, error: err?.message || 'Failed to load patch note.' }));
-    if (requestToken !== patchHistoryRequestToken) return;
-    if (!result?.success) {
-      showPatchHistoryText(`Could not load patch note: ${result?.error || 'Unknown error'}`);
+    if (!entry.url) {
+      showPatchHistoryText('No release notes available for this version.');
       return;
     }
-    patchHistoryCache[key] = String(result.text || '').trim() || 'Patch note is empty.';
+
+    const requestToken = ++patchHistoryRequestToken;
+    showPatchHistoryText('Loading release notes...');
+    const result = await window.vmInstaller.getPatchNoteText({ url: entry.url }).catch((err) => ({ success: false, error: err?.message || 'Failed to load release notes.' }));
+    if (requestToken !== patchHistoryRequestToken) return;
+    if (!result?.success) {
+      showPatchHistoryText(`Could not load release notes: ${result?.error || 'Unknown error'}`);
+      return;
+    }
+    patchHistoryCache[key] = String(result.text || '').trim() || 'Release notes are empty.';
     showPatchHistoryText(patchHistoryCache[key]);
   };
 
@@ -4991,21 +5025,28 @@ function _initSettings(initialState = {}) {
   };
 
   const renderUpdateState = (state = appState.updateInfo || {}) => {
-    const info = state || {};
+    let info = state || {};
     const currentVersion = _normalizeVersionText(info.currentVersion || '');
     const latestVersion = _normalizeVersionText(info.latestVersion || '');
     const prefs = _loadUiPrefs();
-    const ignoredVersion = _normalizeVersionText(prefs.ignoredUpdateVersion || info.ignoredVersion || '');
-    const isIgnored = !!latestVersion && ignoredVersion === latestVersion;
+    let ignoredVersion = _normalizeVersionText(prefs.ignoredUpdateVersion || info.ignoredVersion || '');
+    let isIgnored = !!latestVersion && ignoredVersion === latestVersion;
     const statusText = info.hasUpdate
-      ? (isIgnored ? 'Update available (ignored)' : 'Update available')
-      : (info.checkedAt ? 'Up to date' : 'Not checked');
+      ? (isIgnored ? `New version detected — v${latestVersion} (ignored)` : `New version detected — v${latestVersion}`)
+      : (info.checkedAt ? `Currently using the latest version (v${currentVersion})` : 'Not checked yet');
 
     if (updateCurrentVersionEl) updateCurrentVersionEl.textContent = currentVersion || 'Unknown';
     if (updateLatestVersionEl) updateLatestVersionEl.textContent = latestVersion || 'Not checked';
     if (updateStatusEl) updateStatusEl.textContent = statusText;
-    if (updatePublishedAtEl) updatePublishedAtEl.textContent = formatUpdateTimestamp(info.checkedAt);
-    if (updateNotesEl) updateNotesEl.textContent = String(info.releaseNotes || 'No patch notes loaded yet.');
+    if (updatePublishedAtEl) {
+      let metaContent = formatUpdateTimestamp(info.checkedAt);
+      const publishedAtMs = Date.parse(String(info.publishedAt || ''));
+      if (Number.isFinite(publishedAtMs)) {
+        metaContent += ` · Released ${_formatLocalizedDateTime(publishedAtMs)}`;
+      }
+      updatePublishedAtEl.textContent = metaContent;
+    }
+    if (updateNotesEl) updateNotesEl.textContent = String(info.releaseNotes || 'No release notes loaded yet. Click "Check for Updates" to fetch.');
     if (updateInstallBtn) updateInstallBtn.disabled = !info.hasUpdate || !info.installerUrl;
     if (updateIgnoreBtn) updateIgnoreBtn.disabled = !info.hasUpdate || !latestVersion;
     if (updateIgnoredEl) {
@@ -5051,7 +5092,7 @@ function _initSettings(initialState = {}) {
       'setVmClipboard', 'setVmDnD', 'setVmSharedPath'].forEach((id) => {
       const control = document.getElementById(id);
       if (!control) return;
-      const value = control.type === 'checkbox' ? (control.checked ? 'true' : 'false') : String(control.value ?? '');
+      let value = control.type === 'checkbox' ? (control.checked ? 'true' : 'false') : String(control.value ?? '');
       control.setAttribute('data-default', value);
     });
   };
@@ -5059,7 +5100,7 @@ function _initSettings(initialState = {}) {
   const fillVmEditor = (vm) => {
     const badge = document.getElementById('setVmStateBadge');
     if (badge) {
-      const state = String(vm?.state || 'unknown');
+      let state = String(vm?.state || 'unknown');
       badge.textContent = `${state.toUpperCase()}${vm?.integrationChecks?.guestAdditions ? ' • GA Ready' : ''}`;
       badge.classList.toggle('running', state.toLowerCase() === 'running');
     }
@@ -5140,8 +5181,8 @@ function _initSettings(initialState = {}) {
   });
   document.querySelectorAll('.settings-nav-btn').forEach((button) => {
     button.addEventListener('click', () => {
-      const scope = button.getAttribute('data-settings-scope') || settingsState.scope;
-      const section = button.getAttribute('data-settings-section') || '';
+      let scope = button.getAttribute('data-settings-scope') || settingsState.scope;
+      let section = button.getAttribute('data-settings-section') || '';
       setScope(scope);
       setSection(scope, section);
     });
@@ -5183,7 +5224,7 @@ function _initSettings(initialState = {}) {
     app.showDownload();
   });
   const applyVisualEffectsModeFromSettings = () => {
-    const mode = document.getElementById('setVisualEffectsMode')?.value === 'full' ? 'full' : 'lite';
+    let mode = document.getElementById('setVisualEffectsMode')?.value === 'full' ? 'full' : 'lite';
     _applyVisualEffectsMode(mode);
     _ensureMotionSystemMounted();
     resolveMotionPreference();
@@ -5199,7 +5240,7 @@ function _initSettings(initialState = {}) {
     });
   });
   updateInstallBtn?.addEventListener('click', async () => {
-    const info = appState.updateInfo || {};
+    let info = appState.updateInfo || {};
     if (!info?.hasUpdate || !info?.installerUrl) {
       _notify('Run update check first to fetch installer details.', 'error');
       return;
@@ -5449,7 +5490,7 @@ function _initSettings(initialState = {}) {
     saveVmBtn.textContent = 'Saving...';
     try {
       const sharedPath = document.getElementById('setVmSharedPath')?.value?.trim() || '';
-      const payload = {
+      let payload = {
         ram: clamp(document.getElementById('setVmRam')?.value, 512, 1048576, vm.ram || 2048),
         cpus: clamp(document.getElementById('setVmCpus')?.value, 1, 64, vm.cpus || 2),
         vram: clamp(document.getElementById('setVmVram')?.value, 16, 1024, vm.vram || 128),
@@ -5804,7 +5845,7 @@ function renderStep(stepIndex) {
   if (stepIndex < 0 || stepIndex >= STEPS.length) return;
 
   appState.currentStep = stepIndex;
-  const step = STEPS[stepIndex];
+  let step = STEPS[stepIndex];
   const container = document.getElementById('wizardContainer');
 
   // Render the step
@@ -5941,7 +5982,7 @@ async function _runSetup(resumeFrom) {
   const syncPauseSetupButton = () => {
     const pauseBtn = document.getElementById('btnPauseSetup');
     if (!pauseBtn) return;
-    const canPause = appState.isRunning
+    let canPause = appState.isRunning
       && !appState.cancelRequested
       && !appState.pauseRequested
       && pauseableDownloadPhases.has(activeSetupPhase);
@@ -6087,7 +6128,8 @@ async function _runSetup(resumeFrom) {
     password: appState.password,
     useExistingVm: !!appState.useExistingVm,
     existingVmName: appState.existingVmName || '',
-    existingVmFolder: appState.existingVmFolder || ''
+    existingVmFolder: appState.existingVmFolder || '',
+    installMethod: appState.installMethod || 'iso'
   };
   _trackTelemetry('setup_started', {
     vmDefaultPreset: appState.vmDefaultPreset,
@@ -6135,7 +6177,7 @@ function showComplete(data) {
   document.getElementById('btnLaunchVm')?.addEventListener('click', async () => {
     const launchBtn = document.getElementById('btnLaunchVm');
     const launchLabel = launchBtn?.textContent || 'Launch VM';
-    const vmName = data?.vmName || appState.vmName;
+    let vmName = data?.vmName || appState.vmName;
     if (!vmName) {
       _notify('No VM name found to launch.', 'error');
       return;
@@ -6197,7 +6239,7 @@ async function _resumeSetupFromCheckpoint() {
 
 function showError(error) {
   const errorPayload = typeof error === 'string' ? { message: error } : (error || {});
-  const message = String(errorPayload.message || 'Setup failed');
+  let message = String(errorPayload.message || 'Setup failed');
   const paused = !!errorPayload.paused || appState.pauseRequested || /pause/i.test(message);
   const cancelled = !paused && (!!errorPayload.cancelled || appState.cancelRequested || /cancel/i.test(message));
 
@@ -6487,8 +6529,8 @@ function applyPointerEffects() {
   }
 
   const { innerWidth, innerHeight } = window;
-  const x = (pointerState.x / innerWidth - 0.5) * 2;
-  const y = (pointerState.y / innerHeight - 0.5) * 2;
+  let x = (pointerState.x / innerWidth - 0.5) * 2;
+  let y = (pointerState.y / innerHeight - 0.5) * 2;
 
   pointerState.cards.forEach((card) => {
     const rx = y * -6;

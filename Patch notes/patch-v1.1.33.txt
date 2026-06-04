@@ -1,0 +1,32 @@
+VM Xposed v1.1.33 - Patch Notes
+================================
+
+FIX: "Try Ubuntu / Install Ubuntu" Screen Still Appearing
+
+ROOT CAUSE:
+VBoxManage unattended install was missing the critical kernel boot
+parameters that Ubuntu Desktop ISOs need to skip the welcome screen.
+
+Without these parameters, the Casper live system boots into the
+"Try Ubuntu or Install Ubuntu" dialog — even when preseed is configured.
+
+THE FIX:
+Added --extra-install-kernel-parameters to VBoxManage unattended install:
+  - only-ubiquity: Skips the "Try/Install" welcome screen entirely
+  - automatic-ubiquity: Runs Ubiquity installer in full auto-preseed mode
+  - auto=true priority=critical: Standard d-i preseed automation flags
+  - locale=en_US: Pre-configures locale to avoid prompts
+
+These parameters are automatically added when a Desktop ISO is detected
+(filename contains 'desktop' or 'ubuntu' without 'server'/'mini').
+They are harmless on server ISOs — ignored if not applicable.
+
+ALSO INCLUDES (from v1.1.32):
+- Removed all keyboard/mouse automation (100% file-based)
+- Tightened _isConstructMediaError() error detection
+- Cloud-init trigger ISO fallback for Ubiquity
+- --start-vm=none and --time-zone flags
+
+Files Changed:
+- adapters/virtualbox.js (--extra-install-kernel-parameters)
+- package.json (version bump to 1.1.33)

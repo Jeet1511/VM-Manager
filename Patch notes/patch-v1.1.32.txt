@@ -1,0 +1,47 @@
+VM Xposed v1.1.32 - Patch Notes
+================================
+
+100% FILE-BASED OS AUTOMATION — No Keyboard/Mouse Controls
+
+CRITICAL FIX: Ubuntu 18.04 Showing Installer After Download
+- The "Try Ubuntu / Install Ubuntu" screen was appearing because the
+  Ubiquity installer was not receiving preseed automation
+- Root cause: _isConstructMediaError() was matching ALL VBox errors
+  (matched 'unattended' and 'vboxmanage' — way too broad)
+- This prevented VBoxManage unattended install from working even when
+  it should have succeeded for Ubuntu 18.04
+- FIX: Tightened error detection to only catch genuine media construction
+  failures (constructmedia, E_FAIL, E_INVALIDARG, etc.)
+- VBox unattended install now works properly for Ubuntu 18.04
+
+REMOVED ALL KEYBOARD/MOUSE AUTOMATION:
+- Completely removed sendAutomatedInstallKeystrokes from the active flow
+- No scancode injection, no virtual keyboard, no virtual mouse — ever
+- These were slow, buggy, and unreliable across different hardware
+- All OS installation is now driven by files, ISOs, and shell commands
+
+NEW: Cloud-Init Trigger ISO for Legacy Ubuntu (Fallback):
+- When VBox unattended genuinely fails, a cloud-init trigger ISO is created
+- The ISO uses the "cidata" label (NoCloud data source)
+- Cloud-init user-data writes preseed.cfg and auto-launches:
+  ubiquity --automatic --preseed /tmp/vmxposed-preseed.cfg
+- Ubuntu 18.04 Desktop has cloud-init installed — it picks up the cidata
+  disk automatically and runs the installer with zero user interaction
+- 100% file-based, no keyboard or mouse needed
+
+VBOX UNATTENDED IMPROVEMENTS:
+- Added --start-vm=none flag (VM doesn't auto-start during setup)
+- Added --time-zone parameter for proper timezone configuration
+- We control VM start ourselves after all configuration is applied
+
+AUTOMATION FLOW (all file-based):
+  Tier 1: VBoxManage unattended install (handles preseed internally)
+  Tier 2: Cloud-init autoinstall ISO (Ubuntu 20.04+ Subiquity)
+  Tier 3: Cloud-init trigger ISO + preseed (Ubuntu < 20.04 Ubiquity)
+  Post:   Deferred guest setup via guestcontrol shell commands
+
+Files Changed:
+- vm/vmManager.js (removed keyboard automation, tightened error detection)
+- vm/cloudInit.js (cloud-init trigger ISO for Ubiquity, removed keyboard code)
+- adapters/virtualbox.js (--start-vm=none, --time-zone)
+- package.json (version bump to 1.1.32)

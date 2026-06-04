@@ -196,8 +196,16 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       vmName,
       normalizedUsername,
       password,
-      `export DEBIAN_FRONTEND=noninteractive; ${sudoPrefix} apt-get install -y ` +
-      'virtualbox-guest-utils virtualbox-guest-x11 virtualbox-guest-dkms dkms build-essential linux-headers-$(uname -r)',
+      `export DEBIAN_FRONTEND=noninteractive; ` +
+      `UBUNTU_VER=$(lsb_release -rs 2>/dev/null || echo "22.04"); ` +
+      `MAJOR_VER=\${UBUNTU_VER%%.*}; ` +
+      `if [ "$MAJOR_VER" -ge 22 ] 2>/dev/null; then ` +
+      `  ${sudoPrefix} apt-get install -y virtualbox-guest-utils virtualbox-guest-x11 2>/dev/null || ` +
+      `  ${sudoPrefix} apt-get install -y virtualbox-guest-utils 2>/dev/null; ` +
+      `else ` +
+      `  ${sudoPrefix} apt-get install -y virtualbox-guest-utils virtualbox-guest-x11 virtualbox-guest-dkms dkms build-essential linux-headers-$(uname -r) 2>/dev/null || ` +
+      `  ${sudoPrefix} apt-get install -y virtualbox-guest-utils virtualbox-guest-x11 2>/dev/null; ` +
+      `fi; echo pkg-done`,
       { timeout: 480000, retries: 2, description: 'Guest Additions package install' }
     );
 
@@ -406,7 +414,7 @@ async function configureGuestInside(vmName, username, password, onProgress = nul
       'pkill -f "VBoxClient --draganddrop" 2>/dev/null || true; ' +
       'pkill -f "VBoxClient --seamless" 2>/dev/null || true; ' +
       'sleep 1; ' +
-      'nohup VBoxClient --vmsvga >/tmp/vbox-vmsvga.log 2>&1 & ' +
+      '(VBoxClient --vmsvga >/tmp/vbox-vmsvga.log 2>&1 || VBoxClient --display >/tmp/vbox-display.log 2>&1) & ' +
       'nohup VBoxClient --clipboard >/tmp/vbox-clipboard.log 2>&1 & ' +
       'nohup VBoxClient --draganddrop >/tmp/vbox-dnd.log 2>&1 & ' +
       'nohup VBoxClient --seamless >/tmp/vbox-seamless.log 2>&1 & ' +

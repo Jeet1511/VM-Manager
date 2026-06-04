@@ -33,6 +33,7 @@ const platform = require('../adapters/platform');
 const { createAndConfigureVM } = require('../vm/vmManager');
 const { configureGuestInside } = require('../vm/guestAdditions');
 const stateManager = require('./stateManager');
+const { getCloudImageInfo, isCloudImageAvailable, downloadCloudImage, createVMFromCloudImage } = require('../services/cloudImageManager');
 
 // All phases in order — the user sees this list in the UI
 const PHASES = [
@@ -96,7 +97,7 @@ function _buildUbuntuCandidateBaseUrls(version = '') {
 }
 
 function _buildIsoDownloadUrlCandidates(selectedIsoConfig = {}, osLabel = '') {
-  const urls = [];
+  let urls = [];
   const push = (candidate) => {
     if (typeof candidate === 'string' && candidate.trim()) {
       urls.push(candidate.trim());
@@ -109,7 +110,7 @@ function _buildIsoDownloadUrlCandidates(selectedIsoConfig = {}, osLabel = '') {
   }
 
   if (_isUbuntuIsoProfile(selectedIsoConfig, osLabel)) {
-    const version = _extractUbuntuVersionFromIsoProfile(selectedIsoConfig, osLabel);
+    let version = _extractUbuntuVersionFromIsoProfile(selectedIsoConfig, osLabel);
     const filename = String(selectedIsoConfig?.filename || '').trim();
     if (version && filename) {
       for (const baseUrl of _buildUbuntuCandidateBaseUrls(version)) {
@@ -122,7 +123,7 @@ function _buildIsoDownloadUrlCandidates(selectedIsoConfig = {}, osLabel = '') {
 }
 
 function _buildSha256UrlCandidates(selectedIsoConfig = {}, osLabel = '') {
-  const urls = [];
+  let urls = [];
   const push = (candidate) => {
     if (typeof candidate === 'string' && candidate.trim()) {
       urls.push(candidate.trim());
@@ -135,7 +136,7 @@ function _buildSha256UrlCandidates(selectedIsoConfig = {}, osLabel = '') {
   }
 
   if (_isUbuntuIsoProfile(selectedIsoConfig, osLabel)) {
-    const version = _extractUbuntuVersionFromIsoProfile(selectedIsoConfig, osLabel);
+    let version = _extractUbuntuVersionFromIsoProfile(selectedIsoConfig, osLabel);
     if (version) {
       for (const baseUrl of _buildUbuntuCandidateBaseUrls(version)) {
         push(`${baseUrl}SHA256SUMS`);
@@ -264,7 +265,7 @@ class Orchestrator extends EventEmitter {
         throw new Error('VirtualBox installation failed — VBoxManage not found after install.');
       }
 
-      const version = await virtualbox.getVersion();
+      let version = await virtualbox.getVersion();
       emitVBoxProgress({
         phase: 'install_vbox',
         message: `VirtualBox ${version || ''} installed successfully`,
@@ -405,7 +406,7 @@ class Orchestrator extends EventEmitter {
     }
 
     const hasDnsError = errors.some((entry) => /ENOTFOUND|getaddrinfo|EAI_AGAIN/i.test(String(entry.errorMessage || '')));
-    const lastError = errors[errors.length - 1]?.errorMessage || 'Unknown download error';
+    let lastError = errors[errors.length - 1]?.errorMessage || 'Unknown download error';
     const dnsHint = hasDnsError
       ? ' DNS lookup failed for one or more source hosts. Check DNS/internet or switch to Local ISO.'
       : '';
@@ -451,9 +452,13 @@ class Orchestrator extends EventEmitter {
       logger.info('Orchestrator', '══════════════════════════════════════════');
     }
 
+    const installMethod = String(config.installMethod || 'iso').toLowerCase();
+    const isCloudImageFlow = installMethod === 'cloud-image';
+
     logger.info('Orchestrator', `V Os Name: ${config.vmName}`);
     logger.info('Orchestrator', `Install Path: ${config.installPath}`);
     logger.info('Orchestrator', `OS: ${config.osName || config.ubuntuVersion}`);
+    logger.info('Orchestrator', `Install Method: ${isCloudImageFlow ? 'Pre-built Cloud Image' : 'ISO Installation'}`);
     logger.info('Orchestrator', `Resources: ${config.ram}MB RAM, ${config.cpus} CPUs, ${config.disk}MB Disk`);
 
     // Helper: should we skip a phase? (already done in a previous run)
@@ -525,7 +530,7 @@ class Orchestrator extends EventEmitter {
           await stateManager.completePhase('download_vbox', { vboxInstallerPath: ensureResult.installerPath || null });
 
           this._setPhase('install_vbox', 'active');
-          const version = ensureResult.version || await virtualbox.getVersion();
+          let version = ensureResult.version || await virtualbox.getVersion();
           this._emitProgress('install_vbox', `VirtualBox ${version || ''} installed successfully`, 100);
           this._setPhase('install_vbox', 'complete');
           await stateManager.completePhase('install_vbox');
@@ -537,20 +542,145 @@ class Orchestrator extends EventEmitter {
           await stateManager.skipPhase('install_vbox');
           await virtualbox.init();
 
-          const version = await virtualbox.getVersion();
+          let version = await virtualbox.getVersion();
           logger.info('Orchestrator', `VirtualBox ${version} already installed — skipping download`);
         }
       }
 
-      // ─── Phase 4: Download OS ISO ──────────────────────────────────
+      // ─── Phase 4: Download OS Image ─────────────────────────────────
       const selectedOS = config._resolvedOsProfile || findOS(config.osName || config.ubuntuVersion) || OS_CATALOG['Custom ISO'];
-      const selectedIsoConfig = selectedOS || UBUNTU_RELEASES[config.ubuntuVersion];
+      let selectedIsoConfig = selectedOS || UBUNTU_RELEASES[config.ubuntuVersion];
       const resolvedDownloadDir = String(config.downloadPath || '').trim() || getDownloadDir();
-      const osLabel = config.osName || config.ubuntuVersion || '';
+      let osLabel = config.osName || config.ubuntuVersion || '';
       const isoDownloadCandidates = _buildIsoDownloadUrlCandidates(selectedIsoConfig || {}, osLabel);
       const sha256Candidates = _buildSha256UrlCandidates(selectedIsoConfig || {}, osLabel);
       const requiresAutomaticInstall = config.requireAutomaticInstall === true;
       let isoPath;
+      let cloudImagePath = null;
+
+      // ─── Cloud Image Flow: Download VMDK instead of ISO ────────────
+      if (isCloudImageFlow) {
+        const cloudInfo = getCloudImageInfo(selectedIsoConfig || {}, osLabel);
+
+        if (!cloudInfo) {
+          throw new Error(`Cloud image is not available for "${osLabel}". Please use Manual Installation (ISO) instead.`);
+        }
+
+        if (_shouldSkip('download_iso') && stateManager.state?.artifacts?.cloudImagePath) {
+          cloudImagePath = stateManager.state.artifacts.cloudImagePath;
+          if (fs.existsSync(cloudImagePath)) {
+            this._setPhase('download_iso', 'complete');
+            this._emitProgress('download_iso', 'Cloud image already downloaded (previous run)', 100);
+            logger.info('Orchestrator', `⏭ Cloud image download — already done: ${cloudImagePath}`);
+          } else {
+            cloudImagePath = null;
+          }
+        }
+
+        if (!cloudImagePath) {
+          this._setPhase('download_iso', 'active');
+          this._emitProgress('download_iso', `Downloading pre-built cloud image (~${cloudInfo.estimatedSizeMb || 570} MB)...`, 0);
+
+          cloudImagePath = await downloadCloudImage(cloudInfo, resolvedDownloadDir, {
+            signal: this.abortController.signal,
+            onProgress: (p) => {
+              this._emitProgress('download_iso',
+                p.message || `Downloading cloud image... ${p.percent || 0}%`,
+                p.percent || 0,
+                p.downloadProgress || null
+              );
+            }
+          });
+
+          this._emitProgress('download_iso', 'Cloud image downloaded', 100);
+          this._setPhase('download_iso', 'complete');
+          await stateManager.completePhase('download_iso', { cloudImagePath });
+        }
+
+        // Skip ISO verification for cloud images (use SHA256 from Ubuntu)
+        this._setPhase('verify_iso', 'skipped');
+        this._emitProgress('verify_iso', 'Pre-built image — verification skipped', 100);
+        await stateManager.skipPhase('verify_iso');
+
+        // ─── Create VM from Cloud Image ────────────────────────────
+        this._setPhase('create_vm', 'active');
+        this._emitProgress('create_vm', 'Creating V Os from pre-built cloud image...', 0);
+
+        let vmResult = await createVMFromCloudImage(
+          {
+            name: config.vmName,
+            installPath: config.installPath,
+            ram: config.ram,
+            cpus: config.cpus,
+            disk: config.disk,
+            cloudImagePath,
+            osType: selectedIsoConfig?.osType || 'Ubuntu_64',
+            network: config.network,
+            sharedFolderPath: config.enableSharedFolder ? config.sharedFolderPath : '',
+            username: config.username || 'guest',
+            password: config.password || 'guest',
+            graphicsController: selectedIsoConfig?.graphicsController || 'vmsvga',
+            vram: config.vram || selectedIsoConfig?.vram || 128,
+            audioController: config.audioController || 'hda',
+            startFullscreen: config.startFullscreen !== false,
+            accelerate3d: config.accelerate3d === true,
+            clipboardMode: config.clipboardMode || 'bidirectional',
+            dragAndDrop: config.dragAndDrop || 'bidirectional',
+            autoStartVm: config.autoStartVm === true,
+            displayWidth: config.displayWidth || 0,
+            displayHeight: config.displayHeight || 0
+          },
+          (p) => {
+            this._emitProgress('create_vm', p.message, p.percent);
+          }
+        );
+
+        this._setPhase('create_vm', 'complete');
+        await stateManager.completePhase('create_vm', {
+          vmCreated: true,
+          sharedFolderResult: vmResult.sharedFolder,
+          unattendedApplied: true,
+          installMethod: 'cloud-image'
+        });
+
+        // Cloud image VMs skip install_os and wait_boot phases
+        this._setPhase('install_os', 'skipped');
+        this._emitProgress('install_os', 'Pre-built image — no OS installation needed', 100);
+        await stateManager.skipPhase('install_os');
+
+        this._setPhase('wait_boot', 'skipped');
+        this._emitProgress('wait_boot', 'Cloud-init configures the OS on first boot (~30 seconds)', 100);
+        await stateManager.skipPhase('wait_boot');
+
+        this._setPhase('guest_config', 'skipped');
+        this._emitProgress('guest_config', 'Guest integration configured via cloud-init', 100);
+        await stateManager.skipPhase('guest_config');
+
+        // ─── Complete (cloud image path) ───────────────────────────
+        this._setPhase('complete', 'complete');
+        const completeResult = {
+          vmName: config.vmName,
+          credentials: {
+            username: config.username || 'guest',
+            password: config.password || 'guest'
+          },
+          sharedFolder: vmResult.sharedFolder,
+          installMethod: 'cloud-image',
+          autoStarted: config.autoStartVm === true
+        };
+
+        this._emitProgress('complete',
+          config.autoStartVm
+            ? 'V Os is booting! Cloud-init will configure it in ~30 seconds.'
+            : 'V Os is ready. Start it when you want — first boot takes ~30 seconds.',
+          100
+        );
+        this.emit('complete', completeResult);
+
+        await stateManager.completePhase('complete');
+        this.isRunning = false;
+        return completeResult;
+      }
 
       // VM Xposed now handles all profiles — no blocking for unattended status
 
@@ -870,25 +1000,31 @@ class Orchestrator extends EventEmitter {
           }
         );
 
-        if (gaReady) {
-          this._emitProgress('wait_boot', 'Guest Additions detected! Ejecting install media...', 60);
+        // ── ALWAYS eject ISO and fix boot order ────────────────────────
+        // The OS is installed regardless of whether Guest Additions are
+        // running. The ISO must be ejected and boot order must be set to
+        // disk-first to prevent the installer from running again on reboot.
+        this._emitProgress('wait_boot', 'Ejecting install media and setting boot order...', 55);
+        try {
+          // Remove the ISO from the virtual DVD drive so it doesn't boot from it again
+          await virtualbox.ejectInstallerIso(config.vmName).catch(() => {});
+          // Change boot order to disk first (modifyvm may fail if VM is running — that's OK,
+          // we also set extradata markers so vm:start will fix it next time)
+          await virtualbox._run(['modifyvm', config.vmName, '--boot1', 'disk', '--boot2', 'dvd', '--boot3', 'none', '--boot4', 'none']).catch(async () => {
+            // If modifyvm fails because VM is running, set extradata so vm:start fixes boot order
+            await virtualbox._run(['setextradata', config.vmName, 'GUI/DefaultCloseAction', 'PowerOff']).catch(() => {});
+          });
+          await virtualbox._run(['setextradata', config.vmName, 'VMXposed/InstalledDiskReady', 'on']).catch(() => {});
+          await virtualbox._run(['setextradata', config.vmName, 'VMXposed/GuestInstallMarker', 'on']).catch(() => {});
+          await virtualbox._run(['setextradata', config.vmName, 'VMXposed/InstallPhase', 'postinstall']).catch(() => {});
+          logger.success('Orchestrator', 'Install media ejected and boot order set to disk-first');
+        } catch (ejectErr) {
+          logger.warn('Orchestrator', `Could not eject install media: ${ejectErr.message}`);
+        }
+        await stateManager.completePhase('wait_boot', { isoEjected: true });
 
-          // Eject the ISO and set boot order to disk-first now that OS is installed
-          try {
-            // Remove the ISO from the virtual DVD drive so it doesn't boot from it again
-            await virtualbox.ejectInstallerIso(config.vmName).catch(() => {});
-            // Change boot order to disk first
-            await virtualbox._run(['modifyvm', config.vmName, '--boot1', 'disk', '--boot2', 'dvd', '--boot3', 'none', '--boot4', 'none']).catch(async () => {
-              // If modifyvm fails because VM is running, try via setextradata
-              await virtualbox._run(['setextradata', config.vmName, 'GUI/DefaultCloseAction', 'PowerOff']).catch(() => {});
-            });
-            await virtualbox._run(['setextradata', config.vmName, 'VMXposed/InstalledDiskReady', 'on']).catch(() => {});
-            await virtualbox._run(['setextradata', config.vmName, 'VMXposed/GuestInstallMarker', 'on']).catch(() => {});
-            await virtualbox._run(['setextradata', config.vmName, 'VMXposed/InstallPhase', 'postinstall']).catch(() => {});
-            logger.success('Orchestrator', 'Install media ejected and boot order set to disk-first');
-          } catch (ejectErr) {
-            logger.warn('Orchestrator', `Could not eject install media: ${ejectErr.message}`);
-          }
+        if (gaReady) {
+          this._emitProgress('wait_boot', 'Guest Additions detected! Preparing guest configuration...', 65);
 
           this._emitProgress('wait_boot', 'Waiting for Ubuntu desktop...', 70);
 
@@ -949,24 +1085,29 @@ class Orchestrator extends EventEmitter {
             } catch (guestErr) {
               guestConfigured = false;
               guestConfigWarning = guestErr.message;
-              this._emitProgress('guest_config', 'OS installed. Integration setup will continue after login from V Os tools.', 100);
+              this._emitProgress('guest_config', 'OS installed. Guest setup will complete automatically on next start.', 100);
               this._setPhase('guest_config', 'skipped');
+              await virtualbox._run(['setextradata', config.vmName, 'VMXposed/GuestConfigPending', 'on']).catch(() => {});
               logger.warn('Orchestrator', `Guest integration deferred: ${guestErr.message}`);
             }
           } else {
-            this._emitProgress('wait_boot', 'OS booted but not yet responsive — in-guest config will happen on next boot', 100);
+            this._emitProgress('wait_boot', 'OS booted but not yet responsive — guest setup will complete on next start', 100);
             this._setPhase('wait_boot', 'complete');
             this._setPhase('guest_config', 'skipped');
-            guestConfigWarning = 'Guest OS booted but was not yet responsive for integration commands.';
-            logger.warn('Orchestrator', 'Guest not responsive yet. Services will auto-start on next login.');
+            await virtualbox._run(['setextradata', config.vmName, 'VMXposed/GuestConfigPending', 'on']).catch(() => {});
+            guestConfigWarning = 'Guest OS booted but was not yet responsive. Guest setup will complete automatically on next start.';
+            logger.warn('Orchestrator', 'Guest not responsive yet. Deferred setup will run on next vm:start.');
           }
         } else {
-          this._emitProgress('wait_boot', 'OS is still installing — in-guest config will happen on next boot', 100);
+          // GA not detected — OS may still be installing, but ISO is already ejected
+          // and boot order is set. On next reboot, VM will boot from disk.
+          this._emitProgress('wait_boot', 'OS installation in progress — boot media ejected. Guest setup will complete on next start.', 100);
           this._setPhase('wait_boot', 'complete');
           this._setPhase('guest_config', 'skipped');
-          guestConfigWarning = 'Guest Additions was not ready before setup completion.';
-          logger.warn('Orchestrator', 'Guest Additions not yet ready. OS is likely still installing.');
-          logger.info('Orchestrator', 'The in-guest setup will complete automatically when you log in.');
+          await virtualbox._run(['setextradata', config.vmName, 'VMXposed/GuestConfigPending', 'on']).catch(() => {});
+          guestConfigWarning = 'Guest Additions not ready yet. Guest setup will complete automatically on next start.';
+          logger.warn('Orchestrator', 'Guest Additions not yet ready. ISO ejected. Deferred setup scheduled.');
+          logger.info('Orchestrator', 'The in-guest setup will complete automatically on next vm:start.');
         }
       }
 
@@ -1060,7 +1201,7 @@ class Orchestrator extends EventEmitter {
       logger.error('Orchestrator', `Setup failed: ${err.message}`);
 
       // Save the failure to state — so we can resume from here
-      const recoverable = err?.recoverable !== false && err?.noResume !== true;
+      let recoverable = err?.recoverable !== false && err?.noResume !== true;
       if (err?.noResume === true) {
         await stateManager.clearState().catch((clearErr) => {
           logger.warn('Orchestrator', `Could not clear non-resumable setup state: ${clearErr.message}`);

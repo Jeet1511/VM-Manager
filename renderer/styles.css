@@ -523,7 +523,7 @@ body.perf-lite * {
 .header-search svg { color: var(--text-secondary); }
 .search-input { background: transparent; border: none; color: var(--text); font-family: var(--font-ui); font-size: 13px; width: 100%; outline: none; }
 .search-input::placeholder { color: var(--text-secondary); }
-.sys-content { flex: 1; padding: clamp(18px, 2vw, 32px); overflow-y: auto; background: transparent; }
+.sys-content { flex: 1; padding: clamp(12px, 1.5vw, 24px); overflow-y: auto; background: transparent; }
 .sys-content > * {
   width: min(100%, 1520px);
   margin-left: auto;
@@ -628,7 +628,7 @@ button:active, .btn:active {
 .vm-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 28px;
+  gap: 16px;
 }
 
 /* VM Cards */
@@ -1265,7 +1265,7 @@ body.motion-prime .bg-glow::after {
   justify-content: space-between;
   align-items: flex-start;
   gap: 18px;
-  padding: 16px 18px;
+  padding: 12px 18px;
   border-radius: 16px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0) 34%),
@@ -1419,7 +1419,7 @@ body.motion-prime .bg-glow::after {
 .overview-main-grid {
   display: grid;
   grid-template-columns: 1.1fr 1fr;
-  gap: 12px;
+  gap: 8px;
 }
 
 .overview-main-grid--lower {
@@ -1428,16 +1428,16 @@ body.motion-prime .bg-glow::after {
 
 .overview-panel {
   position: relative;
-  overflow: hidden;
-  border-radius: 14px;
+  overflow: visible;
+  border-radius: 10px;
   border: 1px solid rgba(154, 164, 178, 0.14);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0) 34%),
     #151c24;
   box-shadow: 0 10px 22px rgba(4, 8, 16, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.025);
-  padding: 14px;
+  padding: 10px;
   display: grid;
-  gap: 12px;
+  gap: 8px;
   transition: transform 250ms ease, box-shadow 250ms ease, border-color 250ms ease;
 }
 
@@ -1471,7 +1471,7 @@ body.motion-prime .bg-glow::after {
 }
 
 .overview-panel-title h3 {
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
   color: #eef3ff;
 }
@@ -1620,11 +1620,11 @@ body.motion-prime .bg-glow::after {
 
 .overview-empty-state {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   border-radius: 12px;
-  border: 1px dashed rgba(154, 164, 178, 0.24);
+  border: 1px dashed rgba(154, 164, 178, 0.14);
   background: #0f141b;
-  padding: 20px 14px;
+  padding: 10px 12px;
   text-align: center;
 }
 
@@ -1702,7 +1702,7 @@ body.motion-prime .bg-glow::after {
   border-radius: 10px;
   border: 1px solid rgba(126, 151, 229, 0.22);
   background: linear-gradient(160deg, rgba(18, 26, 42, 0.72), rgba(22, 31, 52, 0.62));
-  padding: 9px 10px;
+  padding: 6px 8px;
   transition: transform 250ms ease, box-shadow 250ms ease, border-color 250ms ease;
 }
 
@@ -1728,7 +1728,7 @@ body.motion-prime .bg-glow::after {
   align-items: center;
   font-size: 11px;
   color: rgba(170, 181, 216, 0.84);
-  margin-bottom: 6px;
+  margin-bottom: 3px;
 }
 
 .overview-chart-meta strong {
@@ -1738,7 +1738,7 @@ body.motion-prime .bg-glow::after {
 
 .overview-chart-card svg {
   width: 100%;
-  height: 76px;
+  height: 56px;
   display: block;
 }
 
@@ -1762,7 +1762,7 @@ body.motion-prime .bg-glow::after {
 .overview-storage-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .overview-storage-grid--three {
@@ -1897,6 +1897,8 @@ body.motion-prime .bg-glow::after {
 .overview-activity-list {
   display: grid;
   gap: 8px;
+  max-height: 150px;
+  overflow-y: auto;
 }
 
 .overview-activity-item {
@@ -2012,7 +2014,31 @@ body.motion-prime .bg-glow::after {
   }
 }
 
-@media (max-width: 760px) {
+@media (max-
+
+/* ═══ Small screen (768px height) compact overrides ═══ */
+@media (max-height: 820px) {
+  .sys-header { height: 48px; }
+  .sys-content { padding: clamp(8px, 1vw, 16px); }
+  .overview-hero-panel { padding: 8px 14px; }
+  .overview-metric-card { padding: 8px 10px; }
+  .overview-metric-value { font-size: 20px; }
+  .overview-metric-label span { font-size: 10px; }
+  .overview-chart-card svg { height: 44px; }
+  .overview-chart-card { padding: 4px 6px; }
+  .overview-panel { padding: 8px; gap: 6px; }
+  .overview-main-grid { gap: 6px; }
+  .overview-main-grid--lower { gap: 6px; }
+  .overview-panel-title h3 { font-size: 12px; }
+  .overview-storage-grid { gap: 4px; }
+  .overview-storage-item { padding: 6px 8px; }
+  .ov-chip-row { padding: 3px 0; font-size: 12px; }
+  .overview-actions-grid { gap: 4px; }
+  .ov-action-btn { min-height: 28px; font-size: 11px; padding: 0 8px; }
+  .overview-activity-list { max-height: 100px; }
+  .overview-host-grid { gap: 4px; }
+}
+width: 760px) {
   .overview-hero-panel {
     flex-direction: column;
     align-items: flex-start;

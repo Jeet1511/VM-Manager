@@ -205,7 +205,7 @@ const Dashboard = {
         const btn = document.getElementById('btnPrepareHost');
         btn.innerHTML = `${Icons.sized(Icons.spinner, 14)} Preparing...`;
         btn.disabled = true;
-        const result = await window.vmInstaller.prepareHostRecovery();
+        let result = await window.vmInstaller.prepareHostRecovery();
         const primaryMessage = String(result?.message || 'Host recovery preparation completed.').trim();
         const planPreview = Array.isArray(result?.steps) ? result.steps.slice(0, 3) : [];
 
@@ -238,7 +238,7 @@ const Dashboard = {
         if (!btn) return;
         btn.innerHTML = `${Icons.sized(Icons.spinner, 14)} Disabling...`;
         btn.disabled = true;
-        const result = await window.vmInstaller.runHostRecoveryAction('disable-hypervisor-stack');
+        let result = await window.vmInstaller.runHostRecoveryAction('disable-hypervisor-stack');
         if (result?.requiresAdmin) {
           btn.innerHTML = `${Icons.sized(Icons.shieldCheck, 14)} Admin Needed`;
           btn.disabled = false;
@@ -259,7 +259,7 @@ const Dashboard = {
         Dashboard._notify(result?.message || 'Could not disable Hyper-V blockers automatically.', 'error');
       });
       document.getElementById('btnOpenWindowsFeatures')?.addEventListener('click', async () => {
-        const result = await window.vmInstaller.runHostRecoveryAction('open-windows-features');
+        let result = await window.vmInstaller.runHostRecoveryAction('open-windows-features');
         if (!result?.success) {
           Dashboard._notify(result?.message || 'Could not open Windows Features.', 'error');
           return;
@@ -267,7 +267,7 @@ const Dashboard = {
         Dashboard._notify(result.message || 'Windows Features opened.', 'info');
       });
       document.getElementById('btnOpenCoreIsolation')?.addEventListener('click', async () => {
-        const result = await window.vmInstaller.runHostRecoveryAction('open-core-isolation');
+        let result = await window.vmInstaller.runHostRecoveryAction('open-core-isolation');
         if (!result?.success) {
           Dashboard._notify(result?.message || 'Could not open Device Security settings.', 'error');
           return;
@@ -307,7 +307,7 @@ const Dashboard = {
     }
 
     try {
-      const result = await window.vmInstaller.listVMs();
+      let result = await window.vmInstaller.listVMs();
 
       if (!result.success) {
         if (!silent) {
@@ -423,7 +423,7 @@ const Dashboard = {
     }
 
     vms.forEach((vm, index) => {
-      const id = Dashboard._getVmDomId(vm, index);
+      let id = Dashboard._getVmDomId(vm, index);
 
       document.getElementById(`vm-power-${id}`)?.addEventListener('click', async function() {
         if (this.disabled) return;
@@ -436,7 +436,7 @@ const Dashboard = {
         const shouldStart = vm.state !== 'running' && vm.state !== 'paused';
         if (powerLabel) powerLabel.textContent = shouldStart ? 'Starting...' : 'Stopping...';
 
-        const result = shouldStart
+        let result = shouldStart
           ? await window.vmInstaller.startVM(vm.name)
           : await window.vmInstaller.stopVM(vm.name);
 
@@ -474,7 +474,7 @@ const Dashboard = {
           return;
         }
 
-        const result = await window.vmInstaller.getVMDetails(vm.name);
+        let result = await window.vmInstaller.getVMDetails(vm.name);
         if (!result.success) {
           Dashboard._notify(result.error || 'Could not load V Os settings', 'error');
           return;
@@ -520,7 +520,7 @@ const Dashboard = {
 
         this.disabled = true;
         const enableFit = vm.fullscreenEnabled === false;
-        const result = await window.vmInstaller.editVM(vm.name, { fullscreenEnabled: enableFit });
+        let result = await window.vmInstaller.editVM(vm.name, { fullscreenEnabled: enableFit });
         if (!result?.success) {
           Dashboard._notify(result?.error || 'Failed to update display fit.', 'error');
           this.disabled = false;
@@ -564,7 +564,7 @@ const Dashboard = {
 
       document.getElementById(`vm-menu-folder-${id}`)?.addEventListener('click', async () => {
         menuEl?.classList.remove('open');
-        const result = await window.vmInstaller.showVMInExplorer({ vmName: vm.name, vmDir: vm.vmDir || '' });
+        let result = await window.vmInstaller.showVMInExplorer({ vmName: vm.name, vmDir: vm.vmDir || '' });
         if (!result?.success) {
           Dashboard._notify(result?.error || 'Could not open V Os folder.', 'error');
         }
@@ -573,7 +573,7 @@ const Dashboard = {
   },
 
   _renderVMCard(vm, index = 0) {
-    const id = Dashboard._getVmDomId(vm, index);
+    let id = Dashboard._getVmDomId(vm, index);
     const osLower = (vm.os || '').toLowerCase();
 
     let osClass = 'os-generic';
@@ -626,7 +626,7 @@ const Dashboard = {
     const safeSharedFolderSummary = Dashboard._escapeHtml(sharedFolderSummary);
 
     const normalizeMode = (rawValue) => {
-      const value = String(rawValue || 'disabled').toLowerCase();
+      let value = String(rawValue || 'disabled').toLowerCase();
       return ['disabled', 'hosttoguest', 'guesttohost', 'bidirectional'].includes(value) ? value : 'disabled';
     };
     const modeLabel = (mode) => {
@@ -938,7 +938,7 @@ const Dashboard = {
         accelerate3d: !!modal.querySelector('#gi3dAcceleration')?.checked
       };
 
-      const result = await window.vmInstaller.configureGuestIntegration(vm.name, payload);
+      let result = await window.vmInstaller.configureGuestIntegration(vm.name, payload);
       if (result?.pendingInGuest) {
         const extra = Array.isArray(result?.notes) && result.notes.length > 0
           ? ` ${result.notes.join(' | ')}`
@@ -1011,7 +1011,7 @@ const Dashboard = {
         msg.className = 'vm-inline-message error';
         return;
       }
-      const result = await window.vmInstaller.cloneVM(vm.name, cloneName);
+      let result = await window.vmInstaller.cloneVM(vm.name, cloneName);
       if (!result.success) {
         msg.textContent = result.error || 'Clone failed.';
         msg.className = 'vm-inline-message error';
@@ -1199,7 +1199,7 @@ const Dashboard = {
         payload.networkMode = selectedNetwork;
       }
 
-      const result = await window.vmInstaller.editVM(vm.name, payload);
+      let result = await window.vmInstaller.editVM(vm.name, payload);
       if (!result.success) {
         Dashboard._notify(`Failed to save settings: ${result.error || 'Unknown error'}`, 'error');
         if (saveBtn) {
@@ -1264,7 +1264,7 @@ const Dashboard = {
         return;
       }
 
-      const result = await window.vmInstaller.renameVM(vm.name, newName);
+      let result = await window.vmInstaller.renameVM(vm.name, newName);
       if (!result.success) {
         msg.textContent = result.error || 'Rename failed.';
         msg.className = 'vm-inline-message error';
@@ -1277,18 +1277,111 @@ const Dashboard = {
     });
   },
 
-  _openDeleteConfirm(vm, app) {
+  async _openDeleteConfirm(vm, app) {
+    // Try to find the ISO path associated with this VM
+    let isoPath = '';
+    let isoName = '';
+    let isoSize = '';
+    try {
+      const details = await window.vmInstaller.getVMDetails(vm.name);
+      if (details?.success && details.vm) {
+        const info = details.vm;
+        for (const key of Object.keys(info)) {
+          const val = String(info[key] || '');
+          if (val.toLowerCase().endsWith('.iso') && !val.includes('cloud-init') && !val.includes('preseed')) {
+            isoPath = val;
+            break;
+          }
+        }
+        if (!isoPath && info.dvdImagePath) isoPath = info.dvdImagePath;
+        if (!isoPath && info.isoPath) isoPath = info.isoPath;
+      }
+    } catch {}
+
+    if (isoPath) {
+      const parts = isoPath.replace(/\\/g, '/').split('/');
+      isoName = parts[parts.length - 1] || isoPath;
+      try {
+        const sizeResult = await window.vmInstaller.getFileSize(isoPath);
+        if (sizeResult?.size) {
+          const gb = (sizeResult.size / (1024 * 1024 * 1024)).toFixed(1);
+          isoSize = ` (${gb} GB)`;
+        }
+      } catch {}
+    }
+
+    // Build the two-option delete dialog
+    const isoOptionHtml = isoPath ? `
+      <div style="margin-top: 16px; display: grid; gap: 10px;">
+        <div style="padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(154, 164, 178, 0.18); background: rgba(255,255,255,0.03); cursor: pointer; transition: border-color 0.2s, background 0.2s;" id="deleteOptVosOnly" class="delete-option selected">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 18px; height: 18px; border-radius: 50%; border: 2px solid #4c8dff; display: flex; align-items: center; justify-content: center;" id="radioVosOnly">
+              <div style="width: 10px; height: 10px; border-radius: 50%; background: #4c8dff;" id="radioDotVosOnly"></div>
+            </div>
+            <div>
+              <strong style="color: #e2e8f0;">Delete V Os only</strong>
+              <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 2px;">Removes the virtual machine and disk files. Keeps the ISO for future use.</div>
+            </div>
+          </div>
+        </div>
+        <div style="padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(239, 68, 68, 0.18); background: rgba(239, 68, 68, 0.04); cursor: pointer; transition: border-color 0.2s, background 0.2s;" id="deleteOptVosAndIso" class="delete-option">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 18px; height: 18px; border-radius: 50%; border: 2px solid rgba(154,164,178,0.4); display: flex; align-items: center; justify-content: center;" id="radioVosAndIso">
+              <div style="width: 10px; height: 10px; border-radius: 50%; background: transparent;" id="radioDotVosAndIso"></div>
+            </div>
+            <div>
+              <strong style="color: #fca5a5;">Delete V Os + ISO file</strong>
+              <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 2px;">${Dashboard._escapeHtml(isoName)}${isoSize}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    ` : '';
+
     const { close, modal } = this._openModal({
       title: `Delete V Os — ${vm.name}`,
       body: `
-        <div class="vm-modal-note danger">This removes the V Os and all associated files. This action cannot be undone.</div>
+        <div class="vm-modal-note danger" style="margin-bottom: 4px;">This removes the V Os and all associated virtual disk files. This action cannot be undone.</div>
+        ${isoOptionHtml}
         <div class="vm-inline-message" id="deleteVmMsg"></div>
       `,
       footer: `
-        <button class="btn btn-secondary" id="deleteVmCancel">Cancel</button>
-        <button class="btn btn-danger" id="deleteVmConfirm">Delete</button>
+        <button class="btn btn-secondary" id="deleteVmCancel" style="min-width: 100px;">Cancel</button>
+        <button class="btn btn-danger" id="deleteVmConfirm" style="min-width: 160px;">Delete V Os</button>
       `
     });
+
+    let deleteIsoSelected = false;
+    const confirmBtn = modal.querySelector('#deleteVmConfirm');
+    const optVosOnly = modal.querySelector('#deleteOptVosOnly');
+    const optVosAndIso = modal.querySelector('#deleteOptVosAndIso');
+
+    const selectOption = (iso) => {
+      deleteIsoSelected = iso;
+      if (confirmBtn) confirmBtn.textContent = iso ? 'Delete V Os + ISO' : 'Delete V Os Only';
+      // Update radio visuals
+      const radioVosOnly = modal.querySelector('#radioVosOnly');
+      const radioDotVosOnly = modal.querySelector('#radioDotVosOnly');
+      const radioVosAndIso = modal.querySelector('#radioVosAndIso');
+      const radioDotVosAndIso = modal.querySelector('#radioDotVosAndIso');
+      if (radioVosOnly) radioVosOnly.style.borderColor = iso ? 'rgba(154,164,178,0.4)' : '#4c8dff';
+      if (radioDotVosOnly) radioDotVosOnly.style.background = iso ? 'transparent' : '#4c8dff';
+      if (radioVosAndIso) radioVosAndIso.style.borderColor = iso ? '#ef4444' : 'rgba(154,164,178,0.4)';
+      if (radioDotVosAndIso) radioDotVosAndIso.style.background = iso ? '#ef4444' : 'transparent';
+      // Update card borders
+      if (optVosOnly) {
+        optVosOnly.style.borderColor = iso ? 'rgba(154,164,178,0.18)' : 'rgba(76,141,255,0.35)';
+        optVosOnly.style.background = iso ? 'rgba(255,255,255,0.03)' : 'rgba(76,141,255,0.06)';
+      }
+      if (optVosAndIso) {
+        optVosAndIso.style.borderColor = iso ? 'rgba(239,68,68,0.35)' : 'rgba(239,68,68,0.18)';
+        optVosAndIso.style.background = iso ? 'rgba(239,68,68,0.08)' : 'rgba(239,68,68,0.04)';
+      }
+    };
+
+    if (optVosOnly) optVosOnly.addEventListener('click', () => selectOption(false));
+    if (optVosAndIso) optVosAndIso.addEventListener('click', () => selectOption(true));
+    selectOption(false); // Default: V Os only
 
     modal.querySelector('#deleteVmCancel')?.addEventListener('click', close);
     modal.querySelector('#deleteVmConfirm')?.addEventListener('click', async () => {
@@ -1296,14 +1389,28 @@ const Dashboard = {
       if (!adminReady) return;
 
       const msg = modal.querySelector('#deleteVmMsg');
-      const result = await window.vmInstaller.deleteVM(vm.name);
+      const deleteIso = deleteIsoSelected && isoPath ? true : false;
+
+      if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Deleting...';
+      }
+
+      let result = await window.vmInstaller.deleteVM(vm.name, { deleteIso, isoPath });
       if (!result.success) {
         msg.textContent = result.error || 'Delete failed.';
         msg.className = 'vm-inline-message error';
+        if (confirmBtn) {
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = deleteIso ? 'Delete V Os + ISO' : 'Delete V Os Only';
+        }
         return;
       }
 
-      this._notify('V Os deleted successfully', 'success');
+      const successMsg = deleteIso && result.isoDeleted
+        ? 'V Os and ISO file deleted successfully'
+        : 'V Os deleted successfully';
+      this._notify(successMsg, 'success');
       close();
       await Dashboard._refreshAfterMutation(app);
     });
@@ -1338,7 +1445,7 @@ const Dashboard = {
       msg.className = 'vm-inline-message';
       resultEl.innerHTML = '';
 
-      const result = await window.vmInstaller.bootFixVM(vm.name);
+      let result = await window.vmInstaller.bootFixVM(vm.name);
       if (!result.success) {
         msg.textContent = result.error || 'Boot fix failed.';
         msg.className = 'vm-inline-message error';
@@ -1567,7 +1674,7 @@ const Dashboard = {
     };
 
     const loadUsers = async () => {
-      const result = await window.vmInstaller.listVMUsers(getPayload());
+      let result = await window.vmInstaller.listVMUsers(getPayload());
       if (!result?.success) {
         setMessage(result?.error || 'Could not load users.', 'error');
         return;
@@ -1580,7 +1687,7 @@ const Dashboard = {
     usersList?.addEventListener('click', async (event) => {
       const button = event.target?.closest?.('.vm-users-delete');
       if (!button || button.disabled) return;
-      const username = button.dataset.username;
+      let username = button.dataset.username;
       const adminReady = await Dashboard._ensureAdminForTask('guest user account management');
       if (!adminReady) return;
 
@@ -1591,7 +1698,7 @@ const Dashboard = {
       }
 
       setMessage(`Deleting "${username}"...`);
-      const result = await window.vmInstaller.deleteVMUser({ ...getPayload(), username });
+      let result = await window.vmInstaller.deleteVMUser({ ...getPayload(), username });
       if (!result?.success) {
         setMessage(result?.error || 'Delete failed.', 'error');
         return;
@@ -1615,7 +1722,7 @@ const Dashboard = {
 
       const action = actionSelect?.value || 'list';
       const base = getPayload();
-      const username = modal.querySelector('#accTargetUser')?.value?.trim();
+      let username = modal.querySelector('#accTargetUser')?.value?.trim();
       const password = modal.querySelector('#accPassword')?.value ?? '';
       const requiresUser = action === 'create' || action === 'update' || action === 'delete' || action === 'autologin';
       if (requiresUser && !username) {
