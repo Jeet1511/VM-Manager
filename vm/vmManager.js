@@ -282,9 +282,9 @@ async function createAndConfigureVM(config, onProgress = null) {
             username: normalizedUsername,
             password: normalizedPassword,
             fullName: normalizedUsername,
-            locale: options.locale || 'en_US.UTF-8',
-            timezone: options.timezone || 'UTC',
-            keyboardLayout: options.keyboardLayout || 'us',
+            locale: config.locale || 'en_US.UTF-8',
+            timezone: config.timezone || 'UTC',
+            keyboardLayout: config.keyboardLayout || 'us',
             enableSharedFolder: !!sharedFolderPath
           });
           if (fallbackResult.success) {
@@ -374,13 +374,15 @@ async function createAndConfigureVM(config, onProgress = null) {
       throw new Error('V Os start command completed but V Os did not reach running state.');
     }
 
-    // If cloud-init fallback was used, inject autoinstall via GRUB editing
-    // This ensures Ubuntu's Subiquity installer skips the "Try/Install" dialog
-    if (cloudInitFallbackUsed) {
+    // Inject autoinstall via GRUB editing for ALL Ubuntu VMs
+    // This ensures Ubuntu's installer skips the "Try/Install Ubuntu" dialog.
+    // Even when VBox unattended was applied, Ubuntu desktop ISOs still show this screen.
+    const isUbuntuOs = /ubuntu/i.test(osType) || /ubuntu/i.test(normalizedIsoPath);
+    if (isUbuntuOs && isSubiquityUbuntu(normalizedIsoPath, osType)) {
       try {
-        _emitProgress(onProgress, 'start', 'Configuring OS auto-installer...', 92);
+        _emitProgress(onProgress, 'start', 'Bypassing Ubuntu installer selection screen...', 92);
         await injectAutoinstallViaGrub(name, virtualbox);
-        logger.success('VMManager', 'Autoinstall kernel parameter injected via GRUB.');
+        logger.success('VMManager', 'Autoinstall kernel parameter injected via GRUB — Ubuntu will install automatically.');
       } catch (grubErr) {
         logger.warn('VMManager', 'GRUB injection failed (non-fatal): ' + grubErr.message);
       }

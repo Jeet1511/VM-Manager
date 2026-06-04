@@ -4476,7 +4476,7 @@ function _renderCredits() {
               ${Icons.externalLink} Support on GitHub @jeet1511
             </button>
             <button class="btn btn-secondary btn-icon-text" id="btnSupportInstagram">
-              ${Icons.externalLink} Follow on Instagram @_echo.del.alma_
+              ${Icons.externalLink} Follow on Instagram @_4n0s_
             </button>
           </div>
         </div>
@@ -4491,7 +4491,7 @@ function _initCredits() {
   });
 
   document.getElementById('btnSupportInstagram')?.addEventListener('click', async () => {
-    await window.vmInstaller.openExternal('https://instagram.com/_echo.del.alma_');
+    await window.vmInstaller.openExternal('https://instagram.com/_4n0s_');
   });
 }
 

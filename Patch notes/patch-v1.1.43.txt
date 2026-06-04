@@ -1,0 +1,24 @@
+Version 1.1.43 (Update System & Ubuntu Installer Fix)
+--------------------------------------
+
+This update overhauls the version detection system, fixes the Ubuntu "Try/Install" installer screen issue, and improves update notifications throughout the app.
+
+Key Fixes & Improvements:
+
+Update System:
+- Version Detection: Switched from raw package.json fetching to GitHub Releases API for accurate, reliable version detection.
+- Update Notifications: Now shows "New version detected — v1.1.43" when an update is available, and "Currently using the latest version (v1.1.42)" when up to date.
+- Release Date Display: Shows the GitHub release publish date alongside the last-checked timestamp.
+- Patch History: Release notes are now loaded directly from GitHub Release body text — no extra network requests needed.
+- Installer URL: Download URL is now pulled directly from the GitHub Release assets, eliminating broken download links.
+
+Ubuntu Installation:
+- Try/Install Fix: Fixed the Ubuntu "Try Ubuntu / Install Ubuntu" selection screen appearing instead of auto-installing. The GRUB autoinstall injection now runs for ALL Ubuntu 20.04+ VMs (not just cloud-init fallback).
+- GRUB Timing: Reduced GRUB menu wait from 10s to 4s and added ESC key press to stop the GRUB countdown timer, preventing auto-boot before injection completes.
+- GRUB Retry: Added 3-attempt retry loop for GRUB editing in case the first attempt is too early (slow VM boot).
+- Trailing Separator: Now removes the trailing "---" from Ubuntu's kernel command line before appending autoinstall parameters.
+- Full ds=nocloud: Now injects both "autoinstall" AND "ds=nocloud" parameters for complete cloud-init data source detection.
+- Config Bug Fix: Fixed an undefined variable reference (options → config) in the cloud-init fallback that could crash VM creation.
+
+Other:
+- Credits: Updated Instagram handle to @_4n0s_.

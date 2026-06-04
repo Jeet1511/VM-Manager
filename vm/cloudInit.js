@@ -1277,73 +1277,129 @@ async function injectAutoinstallViaGrub(vmName, virtualbox) {
   
   logger.info('CloudInit', '═══ Injecting autoinstall via GRUB edit ═══');
   
-  // Wait for GRUB menu to appear (after BIOS/EFI, ~6 seconds)
-  logger.info('CloudInit', 'Waiting 10s for GRUB menu...');
-  await _sleep(10000);
+  // Wait for GRUB menu to appear.
+  // BIOS/EFI POST takes ~2-4 seconds, then GRUB appears.
+  // GRUB's auto-boot timeout is typically 10 seconds.
+  // We must press 'e' BEFORE the timeout expires.
+  logger.info('CloudInit', 'Waiting 4s for GRUB menu to appear...');
+  await _sleep(4000);
   
-  // Press 'e' to edit GRUB entry (scancode: 12 92)
-  logger.info('CloudInit', 'Pressing "e" to edit GRUB entry...');
-  await sendSC('12 92');
-  await _sleep(1500);
-  
-  // Press Down arrow 4 times to reach the 'linux' line
-  // GRUB edit screen typically has:
-  //   line 1: setparams 'Try or Install Ubuntu'
-  //   line 2: set gfxpayload=keep  
-  //   line 3: linux /casper/vmlinuz ... quiet splash ---
-  //   line 4: initrd /casper/initrd
-  // Down arrow scancode: 50 d0
-  logger.info('CloudInit', 'Navigating to linux line (Down x4)...');
-  for (let i = 0; i < 4; i++) {
-    await sendSC('e0 50 e0 d0');  // Down arrow (extended key)
-    await _sleep(300);
+  // Try multiple times in case the first attempt is too early
+  // (VM might still be in BIOS POST or GRUB hasn't rendered yet)
+  let injected = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      logger.info('CloudInit', `GRUB edit attempt ${attempt}/3...`);
+      
+      // First, press Escape or any key to stop GRUB auto-boot countdown
+      // This ensures GRUB stays on screen even if we're slow
+      await sendSC('01 81');  // ESC press/release — stops GRUB countdown
+      await _sleep(500);
+      
+      // Press 'e' to edit GRUB entry (scancode: 12 92)
+      logger.info('CloudInit', 'Pressing "e" to edit GRUB entry...');
+      await sendSC('12 92');
+      await _sleep(1500);
+      
+      // Press Down arrow to navigate to the 'linux' line
+      // GRUB edit screen typically has:
+      //   line 1: setparams 'Try or Install Ubuntu'
+      //   line 2: set gfxpayload=keep  
+      //   line 3: linux /casper/vmlinuz ... quiet splash ---
+      //   line 4: initrd /casper/initrd
+      // Navigate down 4 times to be safe (handles varying GRUB configs)
+      logger.info('CloudInit', 'Navigating to linux line (Down x4)...');
+      for (let i = 0; i < 4; i++) {
+        await sendSC('e0 50 e0 d0');  // Down arrow (extended key)
+        await _sleep(200);
+      }
+      
+      // Press End key to go to end of the linux line
+      logger.info('CloudInit', 'Moving to end of line (End)...');
+      await sendSC('e0 4f e0 cf');
+      await _sleep(300);
+      
+      // Type ' autoinstall' at the end of the linux line
+      // Also remove '---' by backspacing 3 chars first (Ubuntu adds --- which blocks params)
+      logger.info('CloudInit', 'Removing trailing "---" (Backspace x4)...');
+      for (let i = 0; i < 4; i++) {
+        await sendSC('0e 8e');  // Backspace
+        await _sleep(50);
+      }
+      
+      const textToType = ' autoinstall ds=nocloud';
+      logger.info('CloudInit', `Typing "${textToType}"...`);
+      
+      // Space
+      await sendSC('39 b9'); await _sleep(50);
+      // a
+      await sendSC('1e 9e'); await _sleep(50);
+      // u
+      await sendSC('16 96'); await _sleep(50);
+      // t
+      await sendSC('14 94'); await _sleep(50);
+      // o
+      await sendSC('18 98'); await _sleep(50);
+      // i
+      await sendSC('17 97'); await _sleep(50);
+      // n
+      await sendSC('31 b1'); await _sleep(50);
+      // s
+      await sendSC('1f 9f'); await _sleep(50);
+      // t
+      await sendSC('14 94'); await _sleep(50);
+      // a
+      await sendSC('1e 9e'); await _sleep(50);
+      // l
+      await sendSC('26 a6'); await _sleep(50);
+      // l
+      await sendSC('26 a6'); await _sleep(50);
+      // Space
+      await sendSC('39 b9'); await _sleep(50);
+      // d
+      await sendSC('20 a0'); await _sleep(50);
+      // s
+      await sendSC('1f 9f'); await _sleep(50);
+      // = (0d 8d)
+      await sendSC('0d 8d'); await _sleep(50);
+      // n
+      await sendSC('31 b1'); await _sleep(50);
+      // o
+      await sendSC('18 98'); await _sleep(50);
+      // c
+      await sendSC('2e ae'); await _sleep(50);
+      // l
+      await sendSC('26 a6'); await _sleep(50);
+      // o
+      await sendSC('18 98'); await _sleep(50);
+      // u
+      await sendSC('16 96'); await _sleep(50);
+      // d
+      await sendSC('20 a0'); await _sleep(50);
+      
+      await _sleep(200);
+      
+      // Press Ctrl+X to boot with modified parameters
+      // Ctrl press: 1d, x press: 2d, x release: ad, Ctrl release: 9d
+      logger.info('CloudInit', 'Pressing Ctrl+X to boot with autoinstall param...');
+      await sendSC('1d 2d ad 9d');
+      
+      injected = true;
+      break;
+    } catch (err) {
+      logger.warn('CloudInit', `GRUB edit attempt ${attempt} failed: ${err.message}`);
+      if (attempt < 3) {
+        await _sleep(2000);
+      }
+    }
   }
   
-  // Press End key to go to end of the linux line
-  // End scancode: 4f cf
-  logger.info('CloudInit', 'Moving to end of line (End)...');
-  await sendSC('e0 4f e0 cf');
-  await _sleep(300);
-  
-  // Type ' autoinstall ds=nocloud' at the end of the linux line
-  // We need to type each character as scancodes
-  const textToType = ' autoinstall';
-  logger.info('CloudInit', 'Typing "' + textToType + '"...');
-  
-  // Space (39 b9)
-  await sendSC('39 b9'); await _sleep(50);
-  // a (1e 9e)
-  await sendSC('1e 9e'); await _sleep(50);
-  // u (16 96)
-  await sendSC('16 96'); await _sleep(50);
-  // t (14 94)
-  await sendSC('14 94'); await _sleep(50);
-  // o (18 98)
-  await sendSC('18 98'); await _sleep(50);
-  // i (17 97)
-  await sendSC('17 97'); await _sleep(50);
-  // n (31 b1)
-  await sendSC('31 b1'); await _sleep(50);
-  // s (1f 9f)
-  await sendSC('1f 9f'); await _sleep(50);
-  // t (14 94)
-  await sendSC('14 94'); await _sleep(50);
-  // a (1e 9e)
-  await sendSC('1e 9e'); await _sleep(50);
-  // l (26 a6)
-  await sendSC('26 a6'); await _sleep(50);
-  // l (26 a6)
-  await sendSC('26 a6'); await _sleep(50);
-  
-  await _sleep(200);
-  
-  // Press Ctrl+X to boot with modified parameters
-  // Ctrl press: 1d, x press: 2d, x release: ad, Ctrl release: 9d
-  logger.info('CloudInit', 'Pressing Ctrl+X to boot with autoinstall param...');
-  await sendSC('1d 2d ad 9d');
-  
-  logger.success('CloudInit', '═══ GRUB autoinstall injection complete ═══');
-  logger.info('CloudInit', 'Ubuntu will now boot with autoinstall parameter. Subiquity will auto-detect cloud-init config.');
+  if (injected) {
+    logger.success('CloudInit', '═══ GRUB autoinstall injection complete ═══');
+    logger.info('CloudInit', 'Ubuntu will now boot with autoinstall parameter. The "Try/Install" dialog will be skipped.');
+  } else {
+    logger.warn('CloudInit', 'GRUB injection could not be confirmed. Ubuntu may show the Try/Install dialog.');
+  }
 }
 
 module.exports = {
